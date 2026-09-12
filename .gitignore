@@ -1,0 +1,10 @@
+# colcon workspace build artifacts
+build/
+install/
+log/
+CMakeFiles/
+CMakeCache.txt
+
+# large model/experiment assets that shouldn't live in git history
+results/*.bag
+results/*.mcap
