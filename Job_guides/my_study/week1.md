@@ -257,3 +257,51 @@ A2:
 - 需要对这份文件做本地修改，又不想依赖上游随时变动的版本
 
 这次的选择逻辑是：**能装系统包就装系统包（避免重复维护一份文件），没有包管理方式的才 vendor 进仓库**。这也是为什么 [CLAUDE.md](../../CLAUDE.md) 里把两种情况分开记录——它们对"如何在新机器上复现环境"这件事的处理方式完全不同：系统包需要额外一步 `apt install`，vendor 的文件只要 `git clone` 这个仓库就自带了。
+
+---
+
+Q：我正在使用 vscode，目前可以看到 `mujoco_bridge_node.cpp` 里的 `#include <rclcpp/rclcpp.hpp>` 会在编辑器标红，表示检测不到。如何才能让编辑器知道要去哪里找？
+
+A：
+
+**根源**：VSCode 现在是运行在宿主机上，而 `rclcpp` 的头文件（`/opt/ros/humble/include/rclcpp/...`）只存在于 `robotics-dev` 这个 distrobox 容器里，宿主机文件系统里根本没有这条路径。C/C++ 插件的 IntelliSense 在宿主机文件系统里当然找不到，所以标红是符合预期的——不是配置错了，而是编辑器"看错了机器"。
+
+**方案 A（推荐）：让 VSCode 直接在容器里跑**
+
+distrobox 底层是 podman/docker，VSCode 的 **Dev Containers** 扩展可以直接 attach 到一个正在运行的容器：
+
+1. 安装扩展 `ms-vscode-remote.remote-containers`（Dev Containers）
+2. 确保容器在运行：
+   ```bash
+   distrobox enter robotics-dev
+   ```
+   （进一次就会启动它，之后可以退出，容器仍在后台运行）
+3. `Cmd/Ctrl+Shift+P` → `Dev Containers: Attach to Running Container...` → 选 `robotics-dev`
+4. attach 成功后，VSCode 会开一个新窗口，这个窗口的文件系统视角就是容器内部——用 `File > Open Folder` 打开仓库在容器内的实际路径（比如 `~/robotics/robotic_manipulation_practice`）
+
+这样之后，C/C++ 插件的 IntelliSense 天然就能看到 `/opt/ros/humble/include`，不需要手动配置 `includePath`。这是最彻底的方案，后面调试（断点、`gdb`）也依赖这个，迟早要配。
+
+---
+
+Q：我已经在 container 运行了 vscode，但是仍然标红？
+
+A：
+
+attach 到容器本身没问题（容器内确认 `rclcpp` 头文件确实存在于 `/opt/ros/humble/include/rclcpp`），标红通常是下面几个原因之一：
+
+1. **C/C++ 插件是否在"容器窗口"里单独装的**：Remote/Dev Containers 里扩展分本地和远程两类，attach 到容器后打开的新窗口需要**在容器里重新安装一遍** `C/C++`（`ms-vscode.cpptools`）扩展，宿主机装过不算数。检查方法：左下角远程指示器应显示 `Dev Container: robotics-dev`，打开扩展面板看 `C/C++` 是否显示 "Install in Dev Container"。
+2. **装了插件但没告诉它去哪找头文件**：让 colcon 生成真实编译参数，而不是手写 `includePath`：
+   ```bash
+   colcon build --packages-select mujoco_bridge --symlink-install \
+     --cmake-args -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+   ```
+   会在 `build/mujoco_bridge/compile_commands.json` 生成每个源文件真实的 `-I`/`-D` 参数。然后在 `.vscode/settings.json` 加：
+   ```json
+   {
+     "C_Cpp.default.compileCommands": "${workspaceFolder}/build/mujoco_bridge/compile_commands.json"
+   }
+   ```
+   加完后 `Cmd/Ctrl+Shift+P` → `C/C++: Reset IntelliSense Database` 强制刷新。
+3. **打开的 Folder 是不是仓库根目录**：确认标题栏路径是容器内的 `~/robotics/robotic_manipulation_practice`，不是宿主机残留路径，否则 `${workspaceFolder}` 会指错地方。
+
+**结果：方案 2（`compile_commands.json` + `C_Cpp.default.compileCommands`）解决了问题。** 说明插件本身已经在容器里正确安装，只是缺少真实的编译参数信息——colcon 生成的 `compile_commands.json` 把每个源文件实际用到的 `-I` 路径（`/opt/ros/humble/include/...`）喂给了 IntelliSense。这也印证了一个通用经验：ROS2/colcon 这类多包工作区，`compile_commands.json` 比手写 `c_cpp_properties.json` 里的 `includePath` 更可靠——手写容易漏掉某个包的依赖路径，而编译参数是构建系统自己算出来的，不会漏。
