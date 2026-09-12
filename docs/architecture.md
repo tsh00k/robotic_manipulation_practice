@@ -26,8 +26,9 @@
 | `base_link` (= URDF `link0`) | `world` | 机器人基座，固定于桌面 | static |
 | `link1` .. `link7` | 链式（`link{i}` 的父为 `link{i-1}`） | Panda 7-DoF 关节链，link/joint 命名沿用 `franka_description`（无 `panda_` 前缀，默认 `arm_prefix` 为空） | dynamic（`mujoco_bridge` 按仿真步发布） |
 | `link8` | `link7` | 固定 frame（fixed joint），法兰基准，`franka_description` 中用作挂载末端执行器的连接点 | static（相对 link7 固定） |
-| `hand` / `hand_tcp` | `link8` | 夹爪基座 / 工具中心点（TCP），抓取位姿以 `hand_tcp` 为参考 | static（相对 link8 固定，来自 `franka_hand` xacro 的 `hand_tcp_joint`） |
-| `leftfinger` / `rightfinger` | `hand` | 两指夹爪指尖 link，关节为 `finger_joint1`/`finger_joint2` | dynamic |
+| `hand` | `link8` | 夹爪基座 | static（相对 link8 固定） |
+| `hand_tcp` | `hand` | 工具中心点（TCP），抓取位姿以此为参考 | static，由 `mujoco_bridge` **合成发布**（见下方说明，MJCF 里没有这个 frame） |
+| `left_finger` / `right_finger` | `hand` | 两指夹爪指尖 body，关节为 `finger_joint1`/`finger_joint2` | dynamic |
 | `camera_link` / `camera_optical_frame` | `world` 或固定支架 link | RGB-D 相机外参；只能由 TF 发布一份 | static |
 | `object` | `world` | 目标物体 ground-truth/估计位姿 | dynamic（oracle 或感知发布） |
 
@@ -36,6 +37,10 @@
 - 相机外参只允许在 `mujoco_bridge` 中以一份 static TF 发布，禁止感知节点手写第二套外参（对应第3.2节）。
 - ground truth 与视觉估计的 `object` frame 使用同一命名，但通过不同 topic 区分（oracle vs vision），不得混用。
 - 抓取/规划模块统一以 `hand_tcp` 作为末端参考 frame，不直接用 `link8` 或 `hand`（TCP 已经把夹爪长度和默认 45° 旋转的偏移量算进去，避免每个模块各自加一遍偏移）。
+
+**`hand_tcp` 合成说明**：MuJoCo 的 `panda.xml` 里**没有** `hand_tcp` 这个 body/site，这个 frame 是 URDF 侧 `franka_hand.urdf.xacro`（`franka_hand_arguments.xacro` 里的 `hand_tcp_joint`）引入的概念，默认偏移量 `xyz="0 0 0.1034"`, `rpy="0 0 0"`（相对 `hand`）。因为 `mujoco_bridge` 是仿真侧的 ground truth 来源，它按 MJCF 原生 body 名发布 TF，同时**额外手动合成**一个 `hand -> hand_tcp` 的 static TF（用上面这组固定偏移量），这样下游抓取/规划模块仍然能拿到 `hand_tcp`，即使 MJCF 本身不提供它。
+
+**指尖命名不一致（已知上游差异，不是 bug）**：MJCF 里两个指尖 body 叫 `left_finger` / `right_finger`（下划线），而 `franka_description` 的 URDF 侧（包括 MoveIt Setup Assistant 生成的产物）用的是 `leftfinger` / `rightfinger`（无下划线），在 `hand:=true` 参数下 URDF 甚至会强制加 `fer_` 前缀而不管 `no_prefix` 设置。`mujoco_bridge` 发布 TF 时用 MJCF 自己的命名（`left_finger`/`right_finger`），任何需要跟 URDF 侧工具（MoveIt 配置等）对照的代码必须显式处理这个命名差异，不能假设两边字符串相同。
 
 ## 2. 关节命名与顺序
 

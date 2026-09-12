@@ -16,6 +16,7 @@
   <depend>control_msgs</depend>
   <depend>tf2_ros</depend>
   <depend>std_srvs</depend>
+  <depend>ament_index_cpp</depend>
   <depend>robot_description</depend>
 
   <test_depend>ament_lint_auto</test_depend>
