@@ -1,5 +1,13 @@
 # CLAUDE.md
 
+## 学习笔记与提问约定 → 见 [STUDY_NOTES_GUIDE.md](STUDY_NOTES_GUIDE.md)
+
+这是一个**学习型项目**，笔记和提问过程本身是产出物的一部分。[STUDY_NOTES_GUIDE.md](STUDY_NOTES_GUIDE.md) 规定了笔记结构、每个 stage 的五步工作流、提问分类，以及 Claude 的一项固定职责：
+
+**在每个 stage 讲解结束、写入笔记之前，主动列出"用户没问但值得注意的"问题（2~4 条）**，重点补可测试性（E 类）和可观测性（C 类）——详见该文档第 5 节。
+
+跑验证前务必先确认没有遗留节点进程，起后台节点不要经过 `ros2 run`（见该文档 3.1，这个坑踩过两次）。
+
 ## 开发环境：distrobox
 
 本项目的 ROS2/编译工具链不在宿主机上，而是在名为 `robotics-dev` 的 distrobox 容器（Ubuntu 22.04 + ROS2 Humble）里。
