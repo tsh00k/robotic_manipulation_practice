@@ -1,18 +1,26 @@
 #pragma once
 
-// MuJoCo's shared library bundles its own copy of tinyxml2 with default (exported)
-// symbol visibility. So does libfastrtps.so, which rclcpp pulls in as a DDS backend
-// and loads *after* our executable's normal DT_NEEDED libraries are already resident.
-// Because both export the same mangled tinyxml2 symbols, standard dynamic linking lets
-// mujoco's copy "win" the process-wide symbol lookup for fastrtps's internal XML
-// profile parsing too -- fastrtps then runs with mujoco's (ABI-incompatible) tinyxml2
-// object layout and crashes (call through a null vtable entry).
+// libmujoco.so statically links its own (patched, newer) tinyxml2 and re-exports all
+// ~223 tinyxml2 symbols with default visibility. libfastrtps.so -- which rclcpp
+// dlopens as its DDS backend when the first Node is constructed -- does NOT bundle
+// tinyxml2; it imports 16 tinyxml2 symbols and declares DT_NEEDED libtinyxml2.so.9,
+// expecting the system copy.
 //
-// Loading libmujoco.so ourselves via dlopen(RTLD_LOCAL | RTLD_DEEPBIND) keeps its
-// symbols out of the global scope entirely, so this never happens. That means we
-// cannot link against mujoco at compile time (no target_link_libraries(mujoco::mujoco));
-// instead every mj_* entry point we use is resolved with dlsym into a function pointer
-// here, and calling code goes through this struct instead of the raw mj_* names.
+// All 16 of those symbols are also exported by libmujoco. If mujoco is a normal
+// link-time dependency of the executable it lands in the global symbol scope first,
+// so the loader resolves fastrtps's tinyxml2 imports to mujoco's copy instead of
+// libtinyxml2.so.9 -- classic symbol interposition. The two copies are not
+// ABI-compatible (e.g. mujoco has XMLDocument::Identify(char*, XMLNode**, bool) vs
+// the system's 2-arg form, and an extra XMLPrinter ctor param), so fastrtps then
+// operates on objects whose layout it disagrees with and dies writing through a
+// garbage vtable slot.
+//
+// dlopen(RTLD_LOCAL | RTLD_DEEPBIND) keeps mujoco's symbols out of the global scope
+// entirely, so fastrtps binds to the system tinyxml2 as intended. The cost is that
+// we cannot link mujoco at compile time (no target_link_libraries(mujoco::mujoco)):
+// every mj_* entry point must be dlsym'd into a function pointer below, and calling
+// code goes through this struct rather than the raw mj_* names.
+// Full write-up: Job_guides/my_study/week1.md section 6.2.
 
 #include <mujoco/mujoco.h>
 
@@ -27,6 +35,7 @@ struct MujocoApi
   void (*deleteData)(mjData * d);
   void (*deleteModel)(mjModel * m);
   int (*name2id)(const mjModel * m, int type, const char * name);
+  const char * (*id2name)(const mjModel * m, int type, int id);
   void (*resetDataKeyframe)(const mjModel * m, mjData * d, int key);
 };
 

@@ -9,6 +9,7 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(rosgraph_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(trajectory_msgs REQUIRED)
 find_package(control_msgs REQUIRED)
@@ -27,6 +28,7 @@ target_include_directories(mujoco_bridge_node PRIVATE
 ament_target_dependencies(mujoco_bridge_node
   rclcpp
   sensor_msgs
+  rosgraph_msgs
   geometry_msgs
   trajectory_msgs
   control_msgs

@@ -37,6 +37,7 @@ MujocoApi & loadMujocoApi()
     resolve(handle, "mj_deleteData", api.deleteData);
     resolve(handle, "mj_deleteModel", api.deleteModel);
     resolve(handle, "mj_name2id", api.name2id);
+    resolve(handle, "mj_id2name", api.id2name);
     resolve(handle, "mj_resetDataKeyframe", api.resetDataKeyframe);
     return api;
   }();
