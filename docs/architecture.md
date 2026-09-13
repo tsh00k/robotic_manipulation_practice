@@ -20,27 +20,51 @@
 
 ## 1. Frame 约定
 
+**权威规则：TF 里的 frame 名 = MJCF 的原生 body 名**，唯一例外是合成的 `hand_tcp`。`mujoco_bridge` 是仿真侧唯一的 ground-truth 发布者，它从 `mjModel` 自动推导整棵树，不做任何名字翻译（决策与理由见 week1.md 9.9、9.10）。**URDF 侧的名字（`fer_` 前缀、`link8`、`base`、`leftfinger`）不出现在 TF 里**，见下方"URDF 侧命名差异"。
+
 | Frame | 父 frame | 说明 | 发布方式 |
 | --- | --- | --- | --- |
-| `world` | - | 全局固定 frame，仿真与真实世界坐标原点 | static |
-| `base_link` (= URDF `link0`) | `world` | 机器人基座，固定于桌面 | static |
-| `link1` .. `link7` | 链式（`link{i}` 的父为 `link{i-1}`） | Panda 7-DoF 关节链，link/joint 命名沿用 `franka_description`（无 `panda_` 前缀，默认 `arm_prefix` 为空） | dynamic（`mujoco_bridge` 按仿真步发布） |
-| `link8` | `link7` | 固定 frame（fixed joint），法兰基准，`franka_description` 中用作挂载末端执行器的连接点 | static（相对 link7 固定） |
-| `hand` | `link8` | 夹爪基座 | static（相对 link8 固定） |
+| `world` | - | 全局固定 frame，仿真与真实世界坐标原点。MuJoCo 的隐式 body 0，也是 TF 树的唯一根 | - （作为根，不作为任何变换的 child） |
+| `link0` | `world` | 机器人基座，固定于桌面。**注意不叫 `base_link`**——MJCF 里这个 body 就叫 `link0`，URDF 侧对应 `fer_link0`（其父是 URDF 独有的 `base`，TF 里不存在） | static（当前为单位变换） |
+| `link1` .. `link7` | 链式（`link{i}` 的父为 `link{i-1}`） | Panda 7-DoF 关节链，命名沿用 `franka_description` 的无前缀形式 | dynamic（`mujoco_bridge` 按仿真步发布） |
+| `hand` | **`link7`** | 夹爪基座。**TF 里没有 `link8`**：MJCF 把 URDF 的 `link7→link8→hand` 两步合并成一步（`pos="0 0 0.107"` + 绕 z 转 −45°），数学上等价（已逐项核对，见 week1.md 4.3.3） | static（相对 `link7` 固定） |
 | `hand_tcp` | `hand` | 工具中心点（TCP），抓取位姿以此为参考 | static，由 `mujoco_bridge` **合成发布**（见下方说明，MJCF 里没有这个 frame） |
 | `left_finger` / `right_finger` | `hand` | 两指夹爪指尖 body，关节为 `finger_joint1`/`finger_joint2` | dynamic |
 | `camera_link` / `camera_optical_frame` | `world` 或固定支架 link | RGB-D 相机外参；只能由 TF 发布一份 | static |
-| `object` | `world` | 目标物体 ground-truth/估计位姿 | dynamic（oracle 或感知发布） |
+| `object` | `world` | 目标物体 ground-truth/估计位姿 | dynamic（free joint 的 body，由 `mujoco_bridge` 自动推导，无需额外代码） |
 
 规则：
 
-- 相机外参只允许在 `mujoco_bridge` 中以一份 static TF 发布，禁止感知节点手写第二套外参（对应第3.2节）。
+- **每条 TF 边只允许有一个发布者。** tf2 不会对重复发布的同一条边报错，只会按到达顺序反复覆盖，表现为位姿抖动/跳变。具体两条后果：
+  - 相机外参只允许在 `mujoco_bridge` 中以一份 static TF 发布，禁止感知节点手写第二套外参（对应第3.2节）。
+  - **不得让 `robot_state_publisher` 发布 `/tf`**（它默认会发 `link0..link7` 这几条边，和 `mujoco_bridge` 直接冲突）。第6周接 MoveIt 时需要 `/robot_description`，届时应 remap 掉 rsp 的 `/tf`、`/tf_static`。职责划分：**URDF 负责"长什么样和怎么规划"，MuJoCo 负责"现在在哪"**。
 - ground truth 与视觉估计的 `object` frame 使用同一命名，但通过不同 topic 区分（oracle vs vision），不得混用。
-- 抓取/规划模块统一以 `hand_tcp` 作为末端参考 frame，不直接用 `link8` 或 `hand`（TCP 已经把夹爪长度和默认 45° 旋转的偏移量算进去，避免每个模块各自加一遍偏移）。
+- 抓取/规划模块统一以 `hand_tcp` 作为末端参考 frame，不直接用 `hand`（TCP 已经把夹爪长度的偏移量算进去，避免每个模块各自加一遍）。
 
-**`hand_tcp` 合成说明**：MuJoCo 的 `panda.xml` 里**没有** `hand_tcp` 这个 body/site，这个 frame 是 URDF 侧 `franka_hand.urdf.xacro`（`franka_hand_arguments.xacro` 里的 `hand_tcp_joint`）引入的概念，默认偏移量 `xyz="0 0 0.1034"`, `rpy="0 0 0"`（相对 `hand`）。因为 `mujoco_bridge` 是仿真侧的 ground truth 来源，它按 MJCF 原生 body 名发布 TF，同时**额外手动合成**一个 `hand -> hand_tcp` 的 static TF（用上面这组固定偏移量），这样下游抓取/规划模块仍然能拿到 `hand_tcp`，即使 MJCF 本身不提供它。
+**`hand_tcp` 合成说明**：MuJoCo 的 `panda.xml` 里**没有** `hand_tcp` 这个 body/site。这个 frame 来自 URDF 侧 `franka_description/end_effectors/common/franka_hand.xacro` 的 `hand_tcp_joint`，是一个**空 link**（无 visual/collision/inertial），即纯粹的命名坐标系：不参与动力学、不参与碰撞、不占 DoF。偏移量 `xyz="0 0 0.1034"`, `rpy="0 0 0"`（相对 `hand`）。`mujoco_bridge` 额外手动合成一条 `hand -> hand_tcp` static TF，这样下游抓取/规划模块仍能拿到 `hand_tcp`。
 
-**指尖命名不一致（已知上游差异，不是 bug）**：MJCF 里两个指尖 body 叫 `left_finger` / `right_finger`（下划线），而 `franka_description` 的 URDF 侧（包括 MoveIt Setup Assistant 生成的产物）用的是 `leftfinger` / `rightfinger`（无下划线），在 `hand:=true` 参数下 URDF 甚至会强制加 `fer_` 前缀而不管 `no_prefix` 设置。`mujoco_bridge` 发布 TF 时用 MJCF 自己的命名（`left_finger`/`right_finger`），任何需要跟 URDF 侧工具（MoveIt 配置等）对照的代码必须显式处理这个命名差异，不能假设两边字符串相同。
+> **更正（Stage C）**：本文档此前写"TCP 已经把夹爪长度和**默认 45° 旋转**的偏移量算进去"，**这条是错的**。`tcp_rpy` 默认为 `0 0 0`，`hand_tcp` 是**纯 103.4mm 平移**；那个 −45° 的手腕旋转在 `hand_joint`（URDF 的 `link8→hand`）上，MJCF 里折进了 `hand` body 自己的 `quat`。
+
+**`0.1034` 是一份手抄的副本**：它的权威出处是 `franka_description` 的 xacro（`tcp_xyz` 默认值），而 `franka_description`（apt）和 `panda.xml`（vendor）之间没有任何构建步骤，上游改了这里不会有任何东西告警。当前代码里以具名常量 `kHandToTcpZ` 出现（[mujoco_bridge_node.cpp](../src/mujoco_bridge/src/mujoco_bridge_node.cpp)），注释内附核对命令：
+
+```bash
+xacro $(ros2 pkg prefix franka_description)/share/franka_description/robots/fer/fer.urdf.xacro
+```
+
+计划中的根治方案：给 vendor 的 MJCF 的 `hand` body 加 `<site name="hand_tcp" pos="0 0 0.1034"/>`，让数值住在描述层、代码从模型读。
+
+**URDF 侧命名差异（已知上游差异，不是 bug）**：展开 `fer.urdf.xacro` 后，URDF 侧和 MJCF/TF 侧的对应关系是：
+
+| MJCF / TF（权威） | URDF (`fer.urdf.xacro` 展开后) | 差异 |
+| --- | --- | --- |
+| `world`（树根） | `base`（树根） | 名字不同 |
+| `link0` .. `link7` | `fer_link0` .. `fer_link7` | `fer_` 前缀 |
+| —（不存在） | `fer_link8` | URDF 多一级法兰 frame |
+| `hand` | `fer_hand` | 前缀 |
+| `hand_tcp`（合成） | `fer_hand_tcp` | 前缀 |
+| `left_finger` / `right_finger` | `fer_leftfinger` / `fer_rightfinger` | 前缀 **且**无下划线 |
+
+任何需要跟 URDF 侧工具（MoveIt 配置等）对照的代码**必须显式处理这张表**，不能假设两边字符串相同。注意 `hand:=true` 参数下 URDF 会强制加 `fer_` 前缀而不管 `no_prefix` 设置。
 
 ## 2. 关节命名与顺序
 
@@ -75,6 +99,9 @@
 - [x] 选定 Panda URDF 来源：`franka_description`（apt，`fer` 型号）
 - [x] 选定 MJCF 来源：MuJoCo Menagerie `franka_emika_panda/`（vendor 进 `robot_description/mujoco/`）
 - [x] 填写关节命名表、零位、限位（见第2节）
+- [x] 定下 TF frame 命名权威规则（MJCF 原生名 + 合成 `hand_tcp`），并与 `mujoco_bridge` 实现核对一致（Stage C）
+- [ ] 把 `hand_tcp` 的 `0.1034` 搬进 vendor 的 MJCF（`<site>`），消除手抄副本（见第1节）
+- [ ] 第6周接 MoveIt 时决定 `robot_state_publisher` 的 TF remap 方案，并补一份 `docs/adr/`
 - [ ] 记录相机外参数值来源与标定方式（相机型号/安装位置尚未选定）
 - [ ] 确认 URDF 与 MJCF 碰撞几何是否为同一份简化（第3节）
 - [ ] 编写第一个自动测试：5组固定 `q`，对比 MuJoCo 与 MoveIt FK（对应第15节任务5，需等 `motion_planner`/MoveIt 配置接入后才能跑）

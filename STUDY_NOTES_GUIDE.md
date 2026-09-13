@@ -108,7 +108,7 @@ for l in s.split('\n'):
     lvl, title = len(m.group(1)), m.group(2)
     if title.startswith(('学习重点', '目录')):
         continue
-    if not re.match(r'^\d+\.', title) and not re.match(r'^(Stage|验收标准|第一次|第二次|留下的经验)', title):
+    if not re.match(r'^\d+\.', title) and not re.match(r'^(Stage|验收标准|第\d|第一次|第二次|留下的经验)', title):
         continue
     toc.append('  ' * (lvl - 2) + f'- [{title}](#{slug(title)})')
 start = s.index('## 目录'); end = s.index('\n---\n', start)

@@ -20,17 +20,30 @@
   - [2.2 Publisher 与 QoS](#22-publisher-与-qos)
   - [2.3 内置消息类型 vs 自定义消息](#23-内置消息类型-vs-自定义消息)
   - [2.4 为什么 `timer_` / `clock_pub_` / `joint_state_pub_` 都是 `SharedPtr`](#24-为什么-timer_--clock_pub_--joint_state_pub_-都是-sharedptr)
+  - [2.5 `declare_parameter`：ROS 参数到底是什么，为什么不用 `const double`](#25-declare_parameterros-参数到底是什么为什么不用-const-double)
 - [3. TF / Frame 约定](#3-tf--frame-约定)
   - [3.1 为什么必须先约定 Frame，关键规则有哪些](#31-为什么必须先约定-frame关键规则有哪些)
 - [4. 机器人描述模型的来源](#4-机器人描述模型的来源)
   - [4.1 apt 装 vs 自己 vendor，MoveIt 的 SRDF 从哪来](#41-apt-装-vs-自己-vendormoveit-的-srdf-从哪来)
   - [4.2 vendor 是什么意思](#42-vendor-是什么意思)
+  - [4.3 怎么检查和分析 MJCF / URDF，以及怎么据此判断代码正误](#43-怎么检查和分析-mjcf--urdf以及怎么据此判断代码正误)
+    - [4.3.1 两边都要先"展平"，否则等于没读](#431-两边都要先展平否则等于没读)
+    - [4.3.2 该按什么顺序看（MJCF）](#432-该按什么顺序看mjcf)
+    - [4.3.3 URDF ↔ MJCF 交叉验证：这是判断代码正误的主要手段](#433-urdf--mjcf-交叉验证这是判断代码正误的主要手段)
+    - [4.3.4 "每个关节的状态变量应该是什么样"，以及一个 Stage E 地雷](#434-每个关节的状态变量应该是什么样以及一个-stage-e-地雷)
+  - [4.4 `hand_tcp` 是什么，以及 `0.1034` 这个 magic number](#44-hand_tcp-是什么以及-01034-这个-magic-number)
+    - [4.4.1 它是一个纯粹的命名坐标系，不是零件](#441-它是一个纯粹的命名坐标系不是零件)
+    - [4.4.2 为什么这个数没有自动共享](#442-为什么这个数没有自动共享)
 - [5. 开发环境：VSCode + distrobox](#5-开发环境vscode--distrobox)
   - [5.1 `#include <rclcpp/rclcpp.hpp>` 标红怎么办](#51-include-rclcpprclcpphpp-标红怎么办)
   - [5.2 已经 attach 容器了仍然标红](#52-已经-attach-容器了仍然标红)
 - [6. 运动学（FK）](#6-运动学fk)
   - [6.1 FK 实践中可用的组件、需要自己写的部分、构型鲁棒写法](#61-fk-实践中可用的组件需要自己写的部分构型鲁棒写法)
   - [6.2 广义坐标：`qpos` / `qvel` 的表示方法，以及为什么维度不相等](#62-广义坐标qpos--qvel-的表示方法以及为什么维度不相等)
+  - [6.3 四元数基础：从半角到位姿复合](#63-四元数基础从半角到位姿复合)
+    - [6.3.1 一个单位四元数就是一个旋转](#631-一个单位四元数就是一个旋转)
+    - [6.3.2 三个运算](#632-三个运算)
+    - [6.3.3 位姿（不只是旋转）怎么复合](#633-位姿不只是旋转怎么复合)
 - [7. Stage A：mujoco_bridge_node 最小实现（模型加载 + 物理步进定时器）](#7-stage-amujoco_bridge_node-最小实现模型加载--物理步进定时器)
   - [7.0 一句话总结](#70-一句话总结)
   - [7.1 Stage A 具体做了什么，涉及哪些概念](#71-stage-a-具体做了什么涉及哪些概念)
@@ -62,17 +75,33 @@
     - [8.8.1 确实做不到，而且 rclcpp 的定时器比想象的更"软"](#881-确实做不到而且-rclcpp-的定时器比想象的更软)
     - [8.8.2 能保证的性质：仿真时间自洽 + 无累积漂移](#882-能保证的性质仿真时间自洽--无累积漂移)
     - [8.8.3 不一致会怎样：多数情况下什么都不会](#883-不一致会怎样多数情况下什么都不会)
-- [9. 后续计划与 Session 交接](#9-后续计划与-session-交接)
+- [9. Stage C：TF（static + dynamic）](#9-stage-ctfstatic--dynamic)
+  - [9.0 一句话总结](#90-一句话总结)
+  - [9.1 改动清单与验证结果](#91-改动清单与验证结果)
+  - [9.2 动机：TF 以后在哪些环节被用](#92-动机tf-以后在哪些环节被用)
+  - [9.3 为什么必须是两个 broadcaster](#93-为什么必须是两个-broadcaster)
+  - [9.4 static / dynamic 怎么划分：用结构而不是名字](#94-static--dynamic-怎么划分用结构而不是名字)
+  - [9.5 从 `xpos`/`xquat` 到父相对变换：推导与代码对应](#95-从-xposxquat-到父相对变换推导与代码对应)
+  - [9.6 四元数分量顺序：一次讲错的更正](#96-四元数分量顺序一次讲错的更正)
+  - [9.7 为什么先建索引，而不在 publish 里直接迭代 `model_`](#97-为什么先建索引而不在-publish-里直接迭代-model_)
+  - [9.8 frame tree 必须是树](#98-frame-tree-必须是树)
+  - [9.9 命名：我们发 MJCF 的原生名](#99-命名我们发-mjcf-的原生名)
+  - [9.10 权衡：为什么不用 `robot_state_publisher`](#910-权衡为什么不用-robot_state_publisher)
+  - [9.11 权衡：`tf_rate_hz` 独立于 `joint_state_rate_hz`](#911-权衡tf_rate_hz-独立于-joint_state_rate_hz)
+  - [9.12 失败模式与验证手段](#912-失败模式与验证手段)
+  - [9.13 排查记录：第三次遗留进程（同一个坑的第三次）](#913-排查记录第三次遗留进程同一个坑的第三次)
+- [10. 后续计划与 Session 交接](#10-后续计划与-session-交接)
   - [Stage B — `/clock` + `/joint_states` ✅ 已完成](#stage-b--clock--joint_states--已完成)
-  - [Stage C — TF（static + dynamic）](#stage-c--tfstatic--dynamic)
+  - [Stage C — TF（static + dynamic）✅ 已完成](#stage-c--tfstatic--dynamic-已完成)
   - [Stage D — reset service](#stage-d--reset-service)
   - [Stage E — 命令订阅 + sine 测试脚本 + demo launch/rviz](#stage-e--命令订阅--sine-测试脚本--demo-launchrviz)
   - [验收标准（沿用已批准计划里的定义）](#验收标准沿用已批准计划里的定义)
-- [10. 悬挂问题（等有了参照系再回来）](#10-悬挂问题等有了参照系再回来)
-  - [10.0 为什么要单开这一节](#100-为什么要单开这一节)
-  - [10.1 清单（Stage B 阶段识别出的）](#101-清单stage-b-阶段识别出的)
-  - [10.2 反向清单：现在就该做的（属于"缺一次推演"）](#102-反向清单现在就该做的属于缺一次推演)
-  - [10.3 维护约定](#103-维护约定)
+  - [第6周接 MoveIt 时的待决项（Stage C 识别出来的）](#第6周接-moveit-时的待决项stage-c-识别出来的)
+- [11. 悬挂问题（等有了参照系再回来）](#11-悬挂问题等有了参照系再回来)
+  - [11.0 为什么要单开这一节](#110-为什么要单开这一节)
+  - [11.1 清单](#111-清单)
+  - [11.2 反向清单：现在就该做的（属于"缺一次推演"）](#112-反向清单现在就该做的属于缺一次推演)
+  - [11.3 维护约定](#113-维护约定)
 
 ---
 
@@ -391,6 +420,51 @@ rclcpp::spin(std::make_shared<mujoco_bridge::MujocoBridgeNode>());
 
 `api_` 是个例外——它是 `MujocoApi &`（引用，不是指针）。因为 `loadMujocoApi()` 返回的是函数内 `static` 单例的引用，那个对象的生命周期是整个程序，不需要任何所有权管理，用引用最直接（详见 [cpp_concepts.md](cpp_concepts.md) 的单例小节）。
 
+### 2.5 `declare_parameter`：ROS 参数到底是什么，为什么不用 `const double`
+
+> Q: 我看到 `declare_parameter` 这里还需要接收 param 参数，为什么，而且我还不知道 `declare_parameter` 在这里除了返回一个 double 还能做什么？那为什么不直接用 `const double`？
+
+**第一个参数是"参数名"，一个字符串 key。** ROS 参数是**节点持有的一个运行时 `string → value` 字典**。C++ 变量名在进程外完全不可见，外界（命令行、launch 文件、YAML、其它节点）只能通过这个字符串指代它。所以名字必须显式给出。
+
+这就是和 `const double joint_state_rate_hz = 100.0;` 的本质区别：**后者根本不存在于进程外**。
+
+**除了返回一个 double，它还做了这些**（以下全部实测，节点确认 `Publisher count: 1`）：
+
+```
+$ ros2 param list /mujoco_bridge
+  joint_state_rate_hz
+  tf_rate_hz
+  use_sim_time
+  qos_overrides./tf.publisher.depth          ← 附带得到的
+  qos_overrides./tf.publisher.durability
+  ...
+```
+
+| 能力 | 实测 |
+|---|---|
+| 注册进节点参数表，可枚举 | `ros2 param list` 见上 |
+| 可远程读 | `ros2 param get /mujoco_bridge tf_rate_hz` → `Double value is: 40.0` |
+| **启动时覆盖，不用重编译** | `--ros-args -p tf_rate_hz:=40.0` → 日志 `/tf every 13 steps (40.0 Hz requested, 38.5 Hz actual)`，`ros2 topic hz /tf` 实测 `38.462` ✅ |
+| 类型被默认值钉住 | 默认值写 `100.0`（double），传非数值会被拒 |
+| 变更事件广播 | 这就是 `ros2 topic list` 里 `/parameter_events` 的来源 |
+| 重复声明同名会抛异常 | `ParameterAlreadyDeclaredException`，防同名冲突 |
+| 顺带暴露 QoS 覆盖 | 上面那堆 `qos_overrides.*`，可在运行时调话题 QoS 而不改代码 |
+
+**为什么不用 `const double`**：`const double` 是编译期常量，改发布频率要重新 `colcon build` + 重装。参数的整个意义是**让运行这个节点的人（launch 文件、调试中的自己）在不碰源码的前提下调**。这是 ROS 里暴露可调旋钮的标准做法。
+
+**顺带答掉 [2.1](#21-rclcppnode-基类常用属性与方法) 留下的一个问题**：`use_sim_time` 出现在 `ros2 param list` 里，而我们从没声明它——它是 `rclcpp::Node` **基类构造时自己声明的**。当时那条"我没看到 `use_sim_time` 定义在哪"，答案就是这个。
+
+**一个必须记下的缺陷（实测）**：
+
+```
+$ ros2 param set /mujoco_bridge tf_rate_hz 10.0
+Set parameter successful          ← 报告成功
+$ ros2 topic hz /tf
+average rate: 38.457              ← 频率一点没变
+```
+
+因为构造函数里**读一次就算成 `tf_decimation_` 存起来了**，运行时改参数只改了字典里那个 double，没人再去看它。这是典型的 C 类问题：**接口报告成功、实际无效果、无任何告警**。要真支持热改需要 `add_on_set_parameters_callback` 重算 decimation。现在没做，进了 [11.2](#112-反向清单现在就该做的属于缺一次推演) 反向清单。
+
 ---
 
 ## 3. TF / Frame 约定
@@ -470,6 +544,162 @@ rclcpp::spin(std::make_shared<mujoco_bridge::MujocoBridgeNode>());
 - 需要对这份文件做本地修改，又不想依赖上游随时变动的版本
 
 这次的选择逻辑是：**能装系统包就装系统包（避免重复维护一份文件），没有包管理方式的才 vendor 进仓库**。这也是为什么 [CLAUDE.md](../../CLAUDE.md) 里把两种情况分开记录——它们对"如何在新机器上复现环境"这件事的处理方式完全不同：系统包需要额外一步 `apt install`，vendor 的文件只要 `git clone` 这个仓库就自带了。
+
+### 4.3 怎么检查和分析 MJCF / URDF，以及怎么据此判断代码正误
+
+> Q: 目前的代码，以及讲解，有多处涉及 URDF/MJCF 等描述文件，但我还不知道应该如何去检查分析它们，如何根据我的检查和分析判断代码正误，比如每个关节的状态变量应该是什么样。
+
+#### 4.3.1 两边都要先"展平"，否则等于没读
+
+**MJCF 有继承，必须展平。** `panda.xml` 里写的是：
+
+```xml
+<joint name="joint1"/>          <!-- 什么属性都没有 -->
+```
+
+它的 `range` / `damping` / `armature` / `axis` 全部来自上面的 `<default class="panda">`。直接读 body 段**什么都看不出来**。MuJoCo 自带的 `compile` 工具会把所有 default 继承展开：
+
+```bash
+compile panda.xml /tmp/panda_flat.xml     # 在 $MUJOCO_DIR/bin 里
+```
+
+展平后（实跑结果）：
+
+```xml
+<joint name="joint1" pos="0 0 0" axis="0 0 1"/>                        <!-- range 从 default 继承 -->
+<joint name="joint4" pos="0 0 0" axis="0 0 1" range="-3.0718 -0.0698"/>
+<joint name="finger_joint1" class="finger" pos="0 0 0" axis="0 1 0"/>
+```
+
+**URDF 本身是扁平的**（没有继承），但 `.xacro` 有宏和参数，所以先展开：
+
+```bash
+xacro /opt/ros/humble/share/franka_description/robots/fer/fer.urdf.xacro > /tmp/fer.urdf
+```
+
+之后 URDF 就是一串扁平的 `<joint>`，一遍 ElementTree 就能打出整棵树（[4.3.3](#433-urdf--mjcf-交叉验证这是判断代码正误的主要手段) 那张表就是这么来的）。
+
+另有交互式手段：`simulate panda.xml` 看 MJCF，`joint_state_publisher_gui` + RViz 拖 URDF 关节。
+
+#### 4.3.2 该按什么顺序看（MJCF）
+
+| 看什么 | 为什么它排在前面 |
+|---|---|
+| `<compiler angle="radian">` | **决定所有角度数字的含义**。如果是 `degree`，下面每个数的意思都变 |
+| `<default>` 链 | 关节的**有效**属性来源，不看等于没读 |
+| body 嵌套 + `pos`/`quat` | 这就是运动学树 + 每条边的静止变换 |
+| `<joint>` 的 `type`（缺省 hinge）/ `axis` / `range` | 决定它在 `qpos` 里占几位、单位是什么 |
+| `<actuator>` | **控制接口的真实形状**。见 [4.3.4](#434-每个关节的状态变量应该是什么样以及一个-stage-e-地雷)，这里有坑 |
+| `<equality>` / `<tendon>` | 关节间的耦合。`qpos` 的维度会骗人 |
+| `<keyframe>` | 预定义的 `qpos`/`ctrl` 组合（Stage D 的 reset 用它） |
+
+#### 4.3.3 URDF ↔ MJCF 交叉验证：这是判断代码正误的主要手段
+
+两份描述来自**两个互不知道的上游**（`mujoco_menagerie` 和 `franka_description`）。如果它们几何参数一致，说明我们信任的那份没被改坏。逐行核对结果——13 条边全对：
+
+| URDF joint (`origin xyz / rpy`) | MJCF body (`pos` / `quat`) | 一致？ |
+|---|---|---|
+| `joint1` `0 0 0.333` / `0 0 0` | `link1 pos="0 0 0.333"` | ✅ |
+| `joint2` `0 0 0` / `-π/2 0 0` | `link2 quat="1 -1 0 0"` = −90° 绕 x | ✅ |
+| `joint3` `0 -0.316 0` / `π/2 0 0` | `link3 pos="0 -0.316 0" quat="1 1 0 0"` | ✅ |
+| `joint4` `0.0825 0 0` / `π/2 0 0` | `link4 pos="0.0825 0 0" quat="1 1 0 0"` | ✅ |
+| `joint5` `-0.0825 0.384 0` / `-π/2 0 0` | `link5 pos="-0.0825 0.384 0" quat="1 -1 0 0"` | ✅ |
+| `joint6` `0 0 0` / `π/2 0 0` | `link6 quat="1 1 0 0"` | ✅ |
+| `joint7` `0.088 0 0` / `π/2 0 0` | `link7 pos="0.088 0 0" quat="1 1 0 0"` | ✅ |
+| `joint8` `0 0 0.107` **然后** `hand_joint` `0 0 0` / `0 0 -π/4` | `hand pos="0 0 0.107" quat="0.9238795 0 0 -0.3826834"` = −45° 绕 z | ✅ 合并写法 |
+| `hand_tcp_joint` `0 0 0.1034` / `0 0 0` | **MJCF 里没有** → 我们合成 | — |
+| `finger_joint1` `0 0 0.0584` | `left_finger pos="0 0 0.0584"` | ✅ |
+| `finger_joint2` `0 0 0.0584` / `0 0 π` | `right_finger pos="0 0 0.0584" quat="0 0 0 1"` = 180° 绕 z | ✅ |
+
+（怎么把 `1 1 0 0` 读成"绕 x 转 90°"，见 [6.3](#63-四元数基础从半角到位姿复合)。）
+
+这张表直接支撑了 [9.1](#91-改动清单与验证结果) 的 `tf2_echo` 验证：`link4→link5` 实测 `[-0.082, 0.384, 0]` + RPY `[-90°,0,0]`，**两份独立描述都说该是这个数**，所以那不是自证。
+
+**顺带发现 `architecture.md` 两处要改**（已改）：
+1. URDF 侧的根是 `base`，所有名字带 `fer_` 前缀（`fer_link0`、`fer_leftfinger`），**没有 `world`**。
+2. 原文写"TCP 已经把夹爪长度和**默认 45° 旋转**的偏移量算进去"——**这条错了**。`tcp_rpy` 默认是 `0 0 0`，`hand_tcp` 是**纯 103.4mm 平移**；那个 −45° 在 `hand_joint`（`link8→hand`）上。
+
+#### 4.3.4 "每个关节的状态变量应该是什么样"，以及一个 Stage E 地雷
+
+这个问题的答案不在 `<joint>` 里，在 `<actuator>` 里。展平后：
+
+```xml
+<general name="actuator1" joint="joint1" gainprm="4500" biasprm="0 -4500 -450"/>
+...
+<general name="actuator7" joint="joint7" gainprm="2000" biasprm="0 -2000 -200"/>
+<!-- Remap original ctrlrange (0, 0.04) to (0, 255): 0.04*100/255 = 0.01568627451 -->
+<general name="actuator8" tendon="split" forcerange="-100 100" ctrlrange="0 255"
+         gainprm="0.01568627451 0 0" biasprm="0 -100 -10"/>
+```
+
+加上：
+
+```xml
+<tendon><fixed name="split">
+  <joint joint="finger_joint1" coef="0.5"/><joint joint="finger_joint2" coef="0.5"/>
+</fixed></tendon>
+<equality><joint joint1="finger_joint1" joint2="finger_joint2" polycoef="0 1 0 0 0"/></equality>
+```
+
+于是本模型的真实形状是：
+
+| 量 | 值 | 含义 |
+|---|---|---|
+| `njnt` / `nq` / `nv` | 9 / 9 / 9 | 7 个臂 hinge + 2 个指 slide，全是 1-DoF |
+| **`nu`** | **8** | 7 个臂 actuator + **1 个**夹爪 actuator |
+| `neq` | 1 | `finger_joint1 == finger_joint2`（`polycoef="0 1 0 0 0"` 就是这个等式） |
+| `ntendon` | 1 | `split`，把一个 ctrl 摊到两指 |
+
+**这是 Stage E 的三颗地雷**（计划里写的是"把 `positions` 按 joint name 写进 `mjData::ctrl`"）：
+
+1. **`ctrl` 长度是 `nu`=8，不是 `nq`=9**，索引是 **actuator id，不是 joint id**。`ctrl[joint_index]` 对 7 个臂关节碰巧对（actuator 顺序恰好同 joint 顺序），到夹爪就错位/越界。正确做法：`mj_name2id(m, mjOBJ_ACTUATOR, name)` 建一份 joint→actuator 映射，或用 `actuator_trnid`。
+2. **`actuator8` 的 `ctrlrange` 是 `0..255`，不是 `0..0.04`**（上游注释明说是为了对齐真机夹爪的 0-255 接口重映射过）。直接把 `finger_joint1` 的目标角 `0.04` 写进去，夹爪会收到"0.04/255"的指令，几乎全闭。`keyframe` 里 `ctrl="... 255"` 印证了这点。
+3. **两指不能独立指令**。物理上只有一个可控自由度。
+
+三条都是"读描述文件读出来的"，不读就要在 Stage E 靠调试撞出来。
+
+### 4.4 `hand_tcp` 是什么，以及 `0.1034` 这个 magic number
+
+> Q: 比如 `0.1034` 这个 magic number（为什么不统一写成一个公共的常量）（`hand_tcp` 不在哪又在哪，意义是什么）。
+
+#### 4.4.1 它是一个纯粹的命名坐标系，不是零件
+
+URDF 里它长这样，完整、没省略（`franka_description/end_effectors/common/franka_hand.xacro`）：
+
+```xml
+<link name="fer_hand_tcp" />                            ← 空的
+<joint name="fer_hand_tcp_joint" type="fixed">
+  <origin xyz="0 0 0.1034" rpy="0 0 0" />
+  <parent link="fer_hand" /><child link="fer_hand_tcp" />
+</joint>
+```
+
+`<link>` 里**没有 `<visual>`、没有 `<collision>`、没有 `<inertial>`**。所以：
+
+**`hand_tcp` 不参与动力学、不参与碰撞、不占 DoF，它只是一个约定**——"抓取点在这儿"。
+
+这就是它"不在 MJCF 里"的原因：MJCF 对应的概念是 `<site>`（同样是无质量标记点），而 menagerie 这份模型**只是没定义**，不是 MuJoCo 表达不了。
+
+它的**意义是消除重复**：夹爪长度 103.4mm 这个偏移，如果不定义 `hand_tcp`，抓取模块、规划模块、可视化各自都要在自己代码里加一遍——三份副本、三个出错机会。定义成一个 frame 后大家统一说"我要 `hand_tcp` 到这儿"。这就是 [architecture.md](../../docs/architecture.md) 里"统一以 `hand_tcp` 作为末端参考 frame"的含义。
+
+#### 4.4.2 为什么这个数没有自动共享
+
+因为**两份描述来自两个互不知道的上游、之间没有任何构建步骤**：`franka_description` 是 apt 装的、`panda.xml` 是 vendor 进来的，谁都不读谁。这个数在我们这儿**必然是一份手抄的副本**。
+
+已经做的改善（[mujoco_bridge_node.cpp](../../src/mujoco_bridge/src/mujoco_bridge_node.cpp)）——具名常量 + 注释写清上游出处和核对命令：
+
+```cpp
+constexpr const char * kHandBodyName = "hand";
+constexpr const char * kTcpFrameName = "hand_tcp";
+constexpr double kHandToTcpZ = 0.1034;
+```
+
+**但要说清它解决了什么**：具名常量只消除了"一个进程内有几份副本"，**没有**解决"上游改了我们不知道"。真正的修法两条：
+
+- **(a) 把这个数搬进 vendor 的 MJCF**：给 `hand` body 加 `<site name="hand_tcp" pos="0 0 0.1034"/>`，代码从模型里读。数值就住在**描述层**、和其它几何参数待在一起，代码里零 magic number。**倾向这个做法**，还顺手能消掉 `kHandBodyName` 那个硬编码字符串（改成"找 site 存不存在"）。
+- **(b) 写测试**：展开 xacro、断言 `tcp_xyz == 0.1034`。能抓上游漂移，但要跑 xacro，比较重。
+
+没在 Stage C 做，因为改 vendor 的模型文件是个独立决定。进 [11.2](#112-反向清单现在就该做的属于缺一次推演)。
 
 ---
 
@@ -657,7 +887,65 @@ BALL joint:  qpos = [qw, qx, qy, qz]            ← 4
 3. **不该被当作可控关节**。free joint 没有 actuator，不能下发命令，只受物理规律驱动。Stage E 的命令订阅按 name 查 actuator，天然不会碰到它。
 4. **oracle 位姿的来源**。ground-truth 物体位姿就是读这个 free joint 对应 body 的 `xpos`/`xquat`（或直接读 `qpos` 那 7 个数）。这是第4-5周做 oracle vs vision 对照实验的数据来源，对应 [3.1](#31-为什么必须先约定-frame关键规则有哪些) 规则4 里说的"同一个 frame 名、不同 topic 区分来源"。
 
-**`ctrl` 是第三个维度，别和上面两个混了**：`mjData::ctrl` 长度是 `mjModel::nu`（actuator 个数），既不等于 `nq` 也不等于 `nv`。Panda 这份 MJCF 有 8 个 actuator（7 个臂关节 + 1 个夹爪，两个指头由同一个 actuator 驱动），所以 `nu = 8` 而 `nq = 9`。Stage E 写 `ctrl` 时必须按 actuator 名字查 `mj_name2id(m, mjOBJ_ACTUATOR, name)`，**不能用关节索引去索引 `ctrl`**——这是个会静默错位的坑（MJCF 里 `home` keyframe 的 `ctrl` 正好是 8 个数，可以用来交叉验证）。
+**`ctrl` 是第三个维度，别和上面两个混了**：`mjData::ctrl` 长度是 `mjModel::nu`（actuator 个数），既不等于 `nq` 也不等于 `nv`。Panda 这份 MJCF 有 8 个 actuator（7 个臂关节 + 1 个夹爪，两个指头由同一个 actuator 驱动），所以 `nu = 8` 而 `nq = 9`。Stage E 写 `ctrl` 时必须按 actuator 名字查 `mj_name2id(m, mjOBJ_ACTUATOR, name)`，**不能用关节索引去索引 `ctrl`**——这是个会静默错位的坑（MJCF 里 `home` keyframe 的 `ctrl` 正好是 8 个数，可以用来交叉验证）。Stage C 阶段读 `<actuator>` 段时又挖出两条相关的坑（`ctrlrange` 被重映射成 `0..255`、两指不可独立指令），见 [4.3.4](#434-每个关节的状态变量应该是什么样以及一个-stage-e-地雷)。
+
+### 6.3 四元数基础：从半角到位姿复合
+
+> Q: 我需要四元数运算的基础知识，以便了解 TF publish 函数到底在干什么，发送的是什么。
+
+这一节是 [9.5](#95-从-xposxquat-到父相对变换推导与代码对应) 的前置，同时也是读懂 MJCF 里那些 `quat="1 1 0 0"` 的前提。
+
+#### 6.3.1 一个单位四元数就是一个旋转
+
+$q = (w, x, y, z)$，满足 $w^2+x^2+y^2+z^2 = 1$。它编码"绕单位轴 $\mathbf{n}$ 转 $\theta$"：
+
+$$w = \cos\frac{\theta}{2},\qquad (x,y,z) = \mathbf{n}\sin\frac{\theta}{2}$$
+
+**注意是半角。** 学会这个就能徒手核对描述文件——MJCF 里那些数字的真实含义：
+
+| MJCF 写的 | 归一化后 | $\theta = 2\arccos w$ | 轴 | 读作 |
+|---|---|---|---|---|
+| `1 1 0 0` | $(0.7071, 0.7071, 0, 0)$ | $2 \times 45° = 90°$ | $+x$ | 绕 x 转 +90° |
+| `1 -1 0 0` | $(0.7071, -0.7071, 0, 0)$ | $90°$ | $-x$ | 绕 x 转 −90° |
+| `0 0 0 1` | $(0,0,0,1)$ | $2 \times 90° = 180°$ | $+z$ | 绕 z 转 180° |
+| `0.9238795 0 0 -0.3826834` | 已归一 | $2 \times 22.5° = 45°$ | $-z$ | 绕 z 转 −45° |
+| `1 0 0 0` | — | $0°$ | — | 单位（不转） |
+
+（`quat` 在 MJCF 里不要求已归一化，编译器会归一。`w=0` ⟺ 恰好 180°。）
+
+**一个陷阱**：$q$ 和 $-q$ 表示**同一个旋转**（半角的后果，叫 double cover）。所以**"逐字段比较两个四元数相等"的断言可能对正确值报失败**——要比 $|q_1 \cdot q_2| \approx 1$，或先把 $w$ 的符号归一。这是将来写 TF 单测的第一个坑。
+
+#### 6.3.2 三个运算
+
+| 运算 | 数学 | MuJoCo |
+|---|---|---|
+| **共轭 = 逆**（单位四元数） | $q^* = (w, -x, -y, -z)$ | `mju_negQuat(res, q)` |
+| **复合** | $q_1 \otimes q_2$（Hamilton 积） | `mju_mulQuat(res, q1, q2)` |
+| **旋转一个向量** | $(0,\mathbf{v}') = q \otimes (0,\mathbf{v}) \otimes q^*$ | `mju_rotVecQuat(res, v, q)` = $R(q)\mathbf{v}$ |
+
+复合的关键性质两条：
+
+$$R(q_1 \otimes q_2) = R(q_1)\,R(q_2) \qquad\text{且}\qquad q_1 \otimes q_2 \ne q_2 \otimes q_1$$
+
+**不可交换**。所以 `mulQuat` 的参数顺序是承重的，写反了不会报错、只会得到错的姿态。
+
+最有用的读法是**坐标系复合**：若 $q_1 = q_{A \leftarrow B}$（B 系在 A 系里的姿态）、$q_2 = q_{B \leftarrow C}$，则
+
+$$q_1 \otimes q_2 = q_{A \leftarrow C}$$
+
+"下标像分数一样约掉"。记住这个，参数顺序就不用背。
+
+#### 6.3.3 位姿（不只是旋转）怎么复合
+
+一个位姿 $T = (\mathbf{p}, q)$ 的含义是：**body 系里的点 $\mathbf{v}$ 映射到父系的 $R(q)\mathbf{v} + \mathbf{p}$**。这就是 `mjData::xpos`/`xquat` 的含义（父系 = world），也是 `TransformStamped` 的含义（父系 = `header.frame_id`）。
+
+两条规则：
+
+$$(\mathbf{p}_1, q_1) \circ (\mathbf{p}_2, q_2) = \big(\mathbf{p}_1 + R(q_1)\mathbf{p}_2,\ \ q_1 \otimes q_2\big)$$
+
+$$(\mathbf{p}, q)^{-1} = \big(-R(q^*)\,\mathbf{p},\ \ q^*\big)$$
+
+[9.5](#95-从-xposxquat-到父相对变换推导与代码对应) 就是把这两条代进一个具体场景。
 
 ## 7. Stage A：mujoco_bridge_node 最小实现（模型加载 + 物理步进定时器）
 
@@ -1340,9 +1628,288 @@ P=$(ps -eo pid,comm | awk '$2 ~ /^mujoco_bridge/ {print $1}')
 
 ---
 
-## 9. 后续计划与 Session 交接
+## 9. Stage C：TF（static + dynamic）
 
-Stage A 已完成（见第6节）。Stage B 已完成、build+run 验证通过、讲解已记录（见第7节）。以下是 Stage B-E 的简要计划，供下一个 session 接着做（原始完整计划见 `.claude/plans` 下已批准的计划文件，这里只摘录关键点方便快速回忆上下文）。
+### 9.0 一句话总结
+
+从 `mjModel`/`mjData` 自动推导出整棵 TF 树并发布：没有关节的 body（焊死的）走 `/tf_static` 发一次，有关节的 body 走 `/tf` 按 100Hz 重发。核心计算是把 MuJoCo 的**绝对**位姿（`xpos`/`xquat`，相对 world）换算成 TF 要的**父相对**变换。额外合成一条 MJCF 里不存在的 `hand -> hand_tcp`。时间戳继续走 `simTime()`，和 `/joint_states` 落在同一根时间轴上。
+
+### 9.1 改动清单与验证结果
+
+| 文件 | 改动 |
+|---|---|
+| [mujoco_dl.hpp](../../src/mujoco_bridge/include/mujoco_bridge/mujoco_dl.hpp) | `MujocoApi` 加三个字段：`negQuat`/`mulQuat`/`rotVecQuat` |
+| [mujoco_dl.cpp](../../src/mujoco_bridge/src/mujoco_dl.cpp) | 对应三行 `resolve(handle, "mju_...", ...)` |
+| [mujoco_bridge_node.cpp](../../src/mujoco_bridge/src/mujoco_bridge_node.cpp) | `buildFrameIndex()`、`makeTransform()`、`publishTransforms()`、`decimationFor()`（把 Stage B 的抽取逻辑提成复用函数）、两个 broadcaster、常量 `kHandToTcpZ` 等、新参数 `tf_rate_hz` |
+
+`CMakeLists.txt` / `package.xml` **没动**——`tf2_ros`、`geometry_msgs` 早就在里面了。新增的 `mju_*` 按 [第10节](#10-后续计划与-session-交接) 那条硬约束走了 `MujocoApi` 结构体，没有直接链接 MuJoCo。
+
+**启动日志**：
+
+```
+9 actuated joints: joint1..joint7, finger_joint1, finger_joint2
+TF: 3 static, 9 dynamic frames
+/joint_states every 5 steps (100.0 Hz requested, 100.0 Hz actual)
+/tf every 5 steps (100.0 Hz requested, 100.0 Hz actual)
+```
+
+**实测表**（跑前已确认 `ros2 topic info /tf` → `Publisher count: 1`）：
+
+| 验证项 | 命令 | 结果 |
+|---|---|---|
+| 话题存在 | `ros2 topic list` | `/tf`、`/tf_static` 都在 ✅ |
+| 动态频率 | `ros2 topic hz /tf` | `99.98`，`std dev 0.0002s` ✅ |
+| static 内容 | `ros2 topic echo /tf_static --once` | 3 条：`world->link0`(单位)、`link7->hand`(z=0.107, quat z=−0.3827)、`hand->hand_tcp`(z=0.1034) ✅ |
+| TF 树形状 | `ros2 run tf2_tools view_frames` | 12 个 frame，每个恰好一个父，`world` 是唯一根 ✅ |
+| 参数覆盖生效 | `-p tf_rate_hz:=40.0` | 日志 `every 13 steps (38.5 Hz actual)`，`hz` 实测 `38.462` ✅ |
+
+**相对变换的数值验证**（最关键的一条）——此时 `ctrl=0`、机器人稳定在 `qpos≈0` 附近，所以每条父子变换应等于 MJCF 的 `body_pos`/`body_quat` 原值。而这些原值刚刚在 [4.3.3](#433-urdf--mjcf-交叉验证这是判断代码正误的主要手段) 里用**另一份独立的 URDF** 交叉验证过，所以这不是自证：
+
+| `tf2_echo` | 实测 | MJCF 里写的 | |
+|---|---|---|---|
+| `link0 link1` | `[0, 0, 0.333]`，旋转单位 | `pos="0 0 0.333"` | ✅ |
+| `link4 link5` | `[-0.082, 0.384, 0.000]`，RPY `[-90°, 0, 0]` | `pos="-0.0825 0.384 0" quat="1 -1 0 0"` | ✅ |
+| `link5 link6` | `[0,0,0]`，RPY `[90°, -11.009°, 0]` | `quat="1 1 0 0"` ∘ rot_z(joint6) | ✅（`joint6=0.19214 rad = 11.009°`） |
+| `world hand_tcp` | `[0.141, 0.000, 0.840]`，yaw `45.16°` | 整链 + 手的 −45° | ✅ 量级合理 |
+
+这张表里**第二行是最强的一条测试**：`link4` 在 world 系里是歪的，如果 `rotVecQuat(delta, negQuat(parent_quat))` 那步的逆旋转写错，平移分量不可能恰好落回 `(-0.0825, 0.384, 0)`。**第三行验证的是四元数乘法顺序**（`parent_inv * child`），靠 `joint6=0.192` 是唯一一个偏离零位够多的关节撞上——这属于偶然覆盖，不是设计好的测试（见 [9.12](#912-失败模式与验证手段)）。
+
+### 9.2 动机：TF 以后在哪些环节被用
+
+> Q: Stage C 的动机。发布 TF，即父子关系之间的变换关系，在以后的什么环节会被使用。
+
+按周排，全是具体用途：
+
+| 何时 | 怎么用 |
+|---|---|
+| **第3周 FK/Jacobian** | TF 是**参考答案**。自己算出 `link0→hand_tcp`，和 `lookupTransform("link0","hand_tcp")` 比。没有 TF，FK 的单测没有东西可断言。**这同时是 [9.10](#910-权衡为什么不用-robot_state_publisher) 不能用 `robot_state_publisher` 的决定性理由** |
+| **第4周 感知** | 相机给的点云在 `camera_optical_frame` 里，规划要的是 `world`/`link0` 里的物体位姿。这个换算链条**就是 TF**；`tf2_ros::Buffer::transform()` 对 `PointCloud2`/`PoseStamped` 一行搞定 |
+| **第5周 抓取** | 抓取位姿是**相对物体**生成的，要变成"`hand_tcp` 在机器人基座系里的目标"。又是一条 TF 链 |
+| **第6周 MoveIt** | MoveIt 的 planning scene 建立在 TF 上；`world→link0` 告诉它机器人装在哪；规划轨迹要用当前状态做起点 |
+| **RViz（Stage E 起）** | RViz 里**一切东西的位置都由 TF 决定**。发一个 `frame_id: hand_tcp` 的 Marker，它自动出现在正确位置，不用自己算 |
+| **随时调试** | `tf2_echo` / `view_frames` 是**最便宜的跨模块健全性检查**，[9.1](#91-改动清单与验证结果) 的验证表就是它 |
+
+再往深一层，两个更本质的动机：
+
+**① TF 是全项目的共享坐标词汇表。** 没有它，任意两个模块之间要**双边约定**一个变换、各自硬编码一份——这正是 [3.1](#31-为什么必须先约定-frame关键规则有哪些) 规则1（相机外参只允许发一份、禁止感知节点手写第二套）要禁的东西。有了 TF，每条边有唯一权威发布者，其他人按**名字 + 时间戳**查。
+
+**② TF 在时间上解耦。** 感知节点处理一帧图像花了 200ms，它可以问"`hand_tcp` 在**那个时间戳**时在哪"，tf2 会在缓冲区里插值给出答案。这是为什么每条 TF 必须带正确的 stamp，也是为什么 **Stage B 的 sim time 一致性是 Stage C 的前置条件**（[8.2](#82-sim-time-vs-wall-time以及-use_sim_time)）——如果 TF 用墙钟、JointState 用 sim time，这个查询就落在两个时间轴上，插值结果没有意义。
+
+### 9.3 为什么必须是两个 broadcaster
+
+不是 API 洁癖，是**两个不同的话题、不同的 QoS、不同的语义**：
+
+| | `/tf` | `/tf_static` |
+|---|---|---|
+| 发布者类 | `tf2_ros::TransformBroadcaster` | `tf2_ros::StaticTransformBroadcaster` |
+| Durability | volatile | **transient_local（latched）** |
+| 发布次数 | 每周期都要重发 | 启动时发一次 |
+| tf2 怎么用时间戳 | 按 stamp 插值，超出缓冲区（默认 10s）就查不到 | **完全忽略 stamp，视为对任意时刻都有效** |
+
+两条关键推论：
+
+1. **static 只发一次也不会丢**。`transient_local` 让 DDS 替我们缓存最后一条样本，5 分钟后才启动的 RViz 依然收得到。这也是为什么 `view_frames` 里那三条的 `rate` 显示成 `10000.000`、`buffer_length: 0.000`——它只见过一个样本，那个数没有意义。
+2. **static 的 frame 不占缓冲区、不会过期**。如果把 `world->link0` 塞进 `/tf`，任何一次 `lookupTransform` 只要时间戳落在缓冲窗口外就**整条链**查不到；放进 `/tf_static` 就没这个问题。
+
+### 9.4 static / dynamic 怎么划分：用结构而不是名字
+
+判据只有一行：
+
+```cpp
+if (model_->body_jntnum[i] == 0) { /* static */ } else { /* dynamic */ }
+```
+
+**一个没有任何关节的 body 是焊在父 body 上的**，那么它相对父的变换永远等于 MJCF 里写的 `body_pos`/`body_quat`——这两个数组本来就是"父相对"表示，直接搬走即可。有至少一个关节的 body 相对父会动，必须每周期从 `xpos`/`xquat` 现算。
+
+这个判据的好处是**零硬编码名字**，延续了 [8.4](#84-关节列表为什么从模型推导而不是写死) 的路子：第4周往场景里丢一个带 free joint 的待抓物体，它的父是 `world`、`body_jntnum=1`，会自动出现在 dynamic 列表里变成 `world -> object`，代码一行不用改。
+
+还有一个不明显的收益：**用 `body_pos` 而不是 `xpos` 算 static，就不需要在构造函数里调 `mj_forward`**。`mj_makeData` 之后 `xpos` 还是全 0（要走一遍前向运动学才会填），如果从 `xpos` 推 static 变换，构造期发出去的三条 static TF 全是零——而且因为 static 是 latched、只发一次，**这个错会永久生效、不会被后面任何一帧纠正**。（Stage D 的 reset 之后要不要补 `mj_forward`，是同一个坑的另一面。）
+
+**这条判据的已知反例：mocap body。** MuJoCo 的 mocap body 没有任何关节，但位姿由用户每步直接写 `mjData::mocap_pos`/`mocap_quat`——它会动。现在的代码会把它判成 static、发一次就再也不更新。正确判据应该是 `body_jntnum[i] == 0 && body_mocapid[i] < 0`。当前 MJCF 里没有 mocap body，所以这是"写着的假设暂时成立"，进 [11.1](#111-清单) 的知识边界条目。
+
+### 9.5 从 `xpos`/`xquat` 到父相对变换：推导与代码对应
+
+`mjData::xpos[3*i]` / `xquat[4*i]` 是 body `i` 在 **world 系**里的位姿。TF 的每条边是"child 在 parent 系里的位姿"。父 id 从 `model_->body_parentid[i]` 拿——MJCF 的 body 嵌套结构在编译期就被压成了这个整型数组。
+
+用 [6.3.3](#633-位姿不只是旋转怎么复合) 的两条规则推。已知 $T_{W \leftarrow C}$（child 的 `xpos`/`xquat`）和 $T_{W \leftarrow P}$（parent 的），要求：
+
+$$T_{P \leftarrow C} = T_{W \leftarrow P}^{-1} \circ T_{W \leftarrow C} = T_{P \leftarrow W} \circ T_{W \leftarrow C}$$
+
+（下标约掉 $W$。）代入复合与求逆规则：
+
+$$q_{P \leftarrow C} = q_P^* \otimes q_C \qquad\qquad \mathbf{p}_{P \leftarrow C} = R(q_P^*)\,(\mathbf{p}_C - \mathbf{p}_P)$$
+
+逐字对应代码：
+
+```cpp
+api_.negQuat(parent_quat_inv, parent_quat);           // q_P*
+delta = child_pos - parent_pos;                        // (p_C − p_P)，注意还在 world 系里
+api_.rotVecQuat(rel_pos,  delta, parent_quat_inv);    // R(q_P*)·delta  → 转进 parent 系
+api_.mulQuat  (rel_quat, parent_quat_inv, child_quat); // q_P* ⊗ q_C
+```
+
+两个必须说清的点：
+
+- **`delta` 先减、后转**。相减得到的是"从父原点指向子原点的向量"，但它的**分量还是用 world 的坐标轴表达的**；`rotVecQuat` 那一步才把它换成用 parent 的坐标轴表达。顺序反过来（先转再减）是错的。
+- **`mulQuat(rel, parent_inv, child)` 不能交换**。按 [6.3.2](#632-三个运算) 的下标约法：$q_{P \leftarrow W} \otimes q_{W \leftarrow C} = q_{P \leftarrow C}$ ✓；写成 `(child, parent_inv)` 得到 $q_{C \leftarrow W} \otimes q_{W \leftarrow P}$，那是**反向**的变换。
+
+**如果偷懒直接发绝对位姿会怎样**：对父是 `world` 的 body（这里只有 `link0`）恰好正确，其余全错。而且错得很隐蔽——RViz 里会看到一个形状离谱但仍然"连着"的机器人，不会有任何报错。这就是 [9.1](#91-改动清单与验证结果) 那张数值表存在的理由。
+
+**所以每周期发出去的到底是什么**：9 条 dynamic 边，每条是 7 个数 +1 个时间戳：
+
+```
+header.frame_id  = "link4"        ← 参考系
+child_frame_id   = "link5"        ← 被描述的系
+translation      = (x, y, z)      ← link5 的原点，在 link4 系里的坐标
+rotation         = (x, y, z, w)   ← link5 的三根坐标轴，相对 link4 的朝向
+header.stamp     = sim time       ← 这组数在什么时刻成立
+```
+
+一句话：**"在时刻 $t$，child 的原点在 parent 系里的这个位置，且 child 的坐标轴相对 parent 是这个朝向。"** tf2 收到一堆这样的边拼成树，然后能回答任意两个 frame 之间、任意时刻的变换。
+
+另外是**一条消息装所有变换**，不是每个 frame 发一条：`/tf` 的类型是 `tf2_msgs/TFMessage`（一个 `transforms` 数组），正是为了让发布者能在单个样本里送出一个**一致的快照**。
+
+### 9.6 四元数分量顺序：一次讲错的更正
+
+> Q: 你在 `makeTransform` 前面标注 quat 在 mujoco 和 geo msgs 里的顺序不一致性，但是你下面的 tf 的 rotation 分量用的都是结构体成员表示，这有啥顺序在？我认为会出错的应该是 memcpy 写法才对。
+
+**这条追问是对的，我原来的注释和讲解把风险放错了侧。** 留档原文：我最初写的是"`quat` is MuJoCo order (w,x,y,z); geometry_msgs is (x,y,z,w)"，读起来像是在说这段赋值代码有顺序风险。
+
+实际上：
+
+- **输出侧（`geometry_msgs`）没有顺序**。`tf.transform.rotation` 是四个**具名字段** `.x/.y/.z/.w`，写 `rotation.w = ...` 编译器认字段名，不可能"顺序写混"。
+- **输入侧（MuJoCo）才有顺序**。`quat` 是一个裸 `mjtNum[4]`，`quat[0]` 是 **w**。读的人必须知道这件事，否则会以为 `quat[0]` 是 x。
+
+所以那段注释真正的作用是**告诉读者怎么读那个裸数组**，而**正是"逐字段具名赋值"这个写法让顺序错误不可能发生**。真会出错的确实是 `memcpy` / `std::copy` 那类整块搬四个 double 的写法——那时 MuJoCo 的 w 会落到 ROS 的 x 上，而且**结果模长仍是 1**，tf2 不会报 `invalid quaternion`，只会安静地把机器人摆成一个错姿态。
+
+源码注释已按这个版本改掉（[STUDY_NOTES_GUIDE.md 2.3 的约定](../../STUDY_NOTES_GUIDE.md)：笔记改结论，代码注释要一起改）。
+
+### 9.7 为什么先建索引，而不在 publish 里直接迭代 `model_`
+
+> Q: 为什么我们选择先构建 JointIndex，而不是在 publish 的时候直接读取 `model_` 里的地址数据（我知道关节角的数值会变，但是地址应该不会变化吧）。对于 FrameIndex 也是如此，后面的 publish 函数里面也只是用了 id 来找地址而已，为什么不直接迭代 `model_`。
+
+**前提完全正确**：`jnt_qposadr` 这些地址在 `mj_loadXML` 之后就固定了，publish 里每次读 `model_->jnt_qposadr[i]` 拿到的是同一个数。所以**这不是为了缓存会变的东西**。真正的理由，按重要性排：
+
+**① `name` 字段必须和数值字段严格同序——这是个不变量，最好在结构上保证。**
+
+`JointState` 是四个平行数组（[8.3](#83-sensor_msgsjointstate-字段布局)），第 `i` 项必须描述同一个关节。如果 publish 里现场迭代 `njnt`、现场 `push_back(name)`，"筛选逻辑"就出现在**两个地方**（建名字时、填数值时），将来任何人改动其中一处，两个数组就错位——而且**错位后消息完全合法**，`ros2 topic echo` 看着一切正常，只是 `joint4` 的角度被标成了 `joint5`。现在的写法让 `name` 只在构造期写一次、publish 只能改数值，这类错位**在结构上不可能发生**。
+
+**② 筛选和取名字是真正的工作，不是"取地址"。** publish 路径要做的不只是索引：`jnt_type` 的过滤（`njnt` 里可能有 free/ball 关节）、`mj_id2name` 返回 `const char *` 塞进 `std::string` 要**堆分配 + 拷贝**。9 个关节 × 100Hz = 每秒 900 次本可避免的 string 构造；TF 那边是 9 frame × 2 个名字 = 每秒 1800 次。
+
+**③ Fail fast + 日志只打一次。** `throw std::runtime_error("no hinge/slide joints found")` 放构造期意味着模型不对时节点**启动就死**；放 publish 里就变成"节点跑起来了，一直发空消息"。同理 `RCLCPP_WARN("body id %d has no name")`：构造期打一条，publish 期就是每秒 100 条刷屏。
+
+**④ vector 只 resize 一次。** `position.resize(9)` 构造期做完，publish 是纯覆写，无 realloc。
+
+**对 FrameIndex 额外还有两条，而且这两条不是优化、是逻辑上必须：**
+
+**⑤ static/dynamic 的划分是一个"决策"，不是一次查询。** static 变换**根本没有 publish 循环**——构造期算完、发一次、靠 DDS 的 latch 活着（[9.3](#93-为什么必须是两个-broadcaster)）。所以 `buildFrameIndex` 不是"把 publish 的活提前做了"，**它是那三条 static TF 唯一存在的地方**。如果 publish 里迭代 `nbody`，还得每周期把 static 那些跳过去（又一次重复筛选逻辑），而且得另外找地方处理 static。
+
+**⑥ 父子关系要配对使用。** publish 里每个 frame 需要 `body_id` **和** `parent_id` 两个 id（算 $T_P^{-1}T_C$），以及对应的两个名字。把这四样打成一个 `DynamicFrame` 存起来，比每周期做 `parent = body_parentid[i]; parent_name = id2name(...)` 更难写错。
+
+**诚实的反面**：对 9 个 body / 100Hz 这个规模，②④ 的性能论证**完全不重要**（几微秒）。真正立得住的是 ①③⑤⑥——**不变量、失败时机、和"static 只能在这里做"**。多出的一次间接（`joints_[i].qpos_adr` vs `model_->jnt_qposadr[i]`）是真实代价。
+
+### 9.8 frame tree 必须是树
+
+tf2 要求每个 frame **恰好一个父**，且整体连通无环。我们天然满足：MJCF 的 body 层级本身就是树，`body_parentid` 是一个到父的单射，一条 body 一条边。`view_frames` 的输出（12 frame / 11 条边 / 只有 `world` 从不作为 child 出现）就是这个性质的直接体现。
+
+真会破坏它的是**"第二个发布者也发同一条边"**——比如 Stage E 起了 `robot_state_publisher`（[9.10](#910-权衡为什么不用-robot_state_publisher)），它也要发 `link0->link1`，那条边就有两个说法在打架，tf2 会按到达顺序反复覆盖，表现为**机器人抖动/跳变**而不是报错。[3.1](#31-为什么必须先约定-frame关键规则有哪些) 里"相机外参只允许在 `mujoco_bridge` 发一份"是同一个规则。
+
+### 9.9 命名：我们发 MJCF 的原生名
+
+这是 Stage C 开工前定的一个决策（三个选项：全按 MJCF / 全对齐 `architecture.md` / 只补 `link8`），选了**MJCF 原生 + 仅合成 `hand_tcp`**：
+
+- 基座是 **`link0`**，不是 `base_link`。
+- **没有 `link8`**。MJCF 直接写了 `link7 -> hand`（`pos="0 0 0.107"` + 绕 z −45°），正好是 URDF 侧 `link7->link8->hand` 两步的合并（[4.3.3](#433-urdf--mjcf-交叉验证这是判断代码正误的主要手段) 验证过是同一个变换，拆开不引入误差）。
+- 指尖是 **`left_finger`/`right_finger`**（下划线），URDF 侧是 `leftfinger`/`rightfinger`。
+- `hand_tcp` 是唯一的合成例外（[4.4](#44-hand_tcp-是什么以及-01034-这个-magic-number)）。
+
+**理由**：代码里零硬编码名字，全从模型推导（延续 [9.4](#94-static--dynamic-怎么划分用结构而不是名字) 的判据）。**代价**是 `architecture.md` 第1节的 frame 表和实现对不上（写了 `base_link` 和 `link8`）——已经回头改掉了。按 [STUDY_NOTES_GUIDE.md](../../STUDY_NOTES_GUIDE.md) 第1节，`architecture.md` 是权威来源，不能留着和代码不一致。
+
+另两个选项的代价是**代码里要出现 2~3 处硬编码的 name 特判**（合成一个单位变换的 `link0->base_link` 别名、把 `link7->hand` 人为拆成两步），通用推导循环被打断。
+
+### 9.10 权衡：为什么不用 `robot_state_publisher`
+
+这是 Stage C 最重要的替代方案，而且是 ROS 圈里的**标准做法**。在**今天这个模型上确实"两者都行"**（[4.3.3](#433-urdf--mjcf-交叉验证这是判断代码正误的主要手段) 刚逐行验证了两份描述几何一致），但"都行"是这个特定模型的巧合，不是这两个方案的性质。
+
+**两者回答的是不同的问题：**
+
+| | `robot_state_publisher` | 我们（Stage C） |
+|---|---|---|
+| TF 的来源 | $\text{TF} = \text{FK}(\text{URDF},\ /joint\_states)$ | $\text{TF} = $ MuJoCo 的 `xpos`/`xquat` |
+| 回答的问题 | "**给定这些关节角和这个运动学模型，各 link 应该在哪？**" | "**仿真里各 body 实际在哪？**" |
+| 性质 | **派生量**（用第二个模型算出来的） | **原始量**（物理引擎的状态本身） |
+
+四个它们会分叉的地方：
+
+**① 第3周的 FK 测试会变成循环论证（决定性的一条）。** 第3周要写"我的 FK 实现 vs 仿真真值"的 gtest。如果 TF 本身是 `robot_state_publisher` 用 URDF 做一遍 FK 得到的，那就是在**拿自己的 FK 和别人的 FK 比**——两边都对不上真值也能互相对上，测试毫无意义。TF 必须来自物理引擎，测试才有参照。
+
+**② 两份模型的一致性没有任何东西在守。** [4.3.3](#433-urdf--mjcf-交叉验证这是判断代码正误的主要手段) 那张表是**手工跑出来的、没进 CI**。任何人动一下 vendor 的 `panda.xml`（比如把机器人装到桌子上，改 `link0` 的 `pos`），`robot_state_publisher` 会**继续按旧 URDF 报告**，TF 和物理静静地分叉，没有报错。用 `xpos` 不存在这个接缝——按定义一致。
+
+**③ `robot_state_publisher` 表达不了 MJCF 里的一大类东西。** 它的输入只有 `/joint_states`，所以只能摆放"位姿是关节角的函数"的 link。摆不了：第4周要丢进场景的待抓物体（free joint，位姿不是任何关节角的函数）、mocap body、第二个机器人、任何没写进 URDF 的东西。这些都得**另开一个发布者**——于是同时维护两套机制，还得小心别发同一条边（[9.8](#98-frame-tree-必须是树)）。我们的 `body_jntnum` 判据对这些是零改动自动支持。
+
+**④ 命名会从 MJCF 切到 URDF。** URDF 侧是 `fer_link0`、`fer_leftfinger`、有 `fer_link8`、根是 `base`；MJCF 侧是 `link0`、`left_finger`、无 `link8`、根是 `world`。用 rsp 意味着 TF 里的名字**不再是我们用来索引 `mjData` 的 body 名**，任何"从 TF frame 反查仿真 body"的代码都要过一张翻译表。
+
+**一条论断更正（留档）**：我最初讲这条权衡时写的是"代价是 RViz 里只能看 TF 坐标轴、看不到机器人网格"。**不准确。** `robot_state_publisher` 实际上捆了两件事：(1) 发布 `/robot_description`（URDF 字符串，transient_local）；(2) 发布 FK 推出来的 TF。RViz 的 `RobotModel` 显示只需要 **(1)** 拿网格、再**按 link 名去 TF 里查位置**——所以要看到网格需要的是 (1)，**不需要 (2)**。
+
+于是第6周接 MoveIt 时（MoveIt 无论如何都要 `/robot_description`）的正确做法是：**让 URDF 进图，但不让 rsp 发 TF**（remap 掉它的 `/tf`、`/tf_static`，或自己发那个 String）。职责就干净了：**URDF 负责"长什么样和怎么规划"，MuJoCo 负责"现在在哪"**。这条已记进 [第10节](#10-后续计划与-session-交接) 第6周待决项。
+
+### 9.11 权衡：`tf_rate_hz` 独立于 `joint_state_rate_hz`
+
+把 Stage B 的抽取逻辑（[8.5](#85-权衡发布频率和物理步进频率怎么解耦)）提成了 `decimationFor()`，然后给 `/tf` 开了独立参数（默认同样 100Hz）。理由是两者的下游消费者不同——`/tf` 给 RViz 和坐标变换查询，`/joint_states` 给控制器和 MoveIt，需求可以不一样。
+
+**但默认值故意设成相同**：一旦不同，下游"拿 `/joint_states` 的 stamp 去 `lookupTransform`"就会命中 tf2 的插值/外推路径，得到一个两个采样点之间的数**而不是任何真实的仿真状态**。
+
+诚实地说，这是我**自己引进来的一个可配置不一致源**，而且设成不同值不会有任何告警。属于 C 类问题，进 [11.2](#112-反向清单现在就该做的属于缺一次推演)（备选解：构造期加一条 `RCLCPP_WARN`，或者干脆共用一个参数）。
+
+另外 [2.5](#25-declare_parameterros-参数到底是什么为什么不用-const-double) 记录的那个缺陷同样适用于这两个参数：**运行时 `ros2 param set` 会报成功但无效果**。
+
+### 9.12 失败模式与验证手段
+
+| 失败模式 | 现象 | 怎么发现 / 防住 | 这个 stage 验过？ |
+|---|---|---|---|
+| 发绝对位姿而非父相对 | RViz 里机器人形状离谱但"连着"，无报错 | `tf2_echo` 在 `q≈0` 时比对 MJCF 的 `body_pos`（[9.1](#91-改动清单与验证结果)） | ✅ 验过 |
+| 四元数分量顺序写混（memcpy 类写法） | 姿态乱但模长合法，tf2 **不报** `invalid quaternion` | 逐字段具名赋值从结构上避开；数值上看 RPY 是否等于 MJCF 的 `quat` | ✅ 结构上避开 + 数值验过 |
+| `mulQuat` 参数顺序反 | **仅在关节角非零处**偏差 | 需要一个明显偏离零位的关节 | ⚠️ 靠 `joint6=0.192` **偶然**覆盖 |
+| static 从 `xpos` 算而非 `body_pos` | 三条 static 全零，且因 latched **永不纠正** | 用 `body_pos` 从根上避开；或构造期调 `mj_forward` | ✅ 结构上避开 |
+| 双发布者发同一条边 | 机器人抖动/跳变，无报错 | `ros2 topic info /tf --verbose` 看 publisher count | ✅ 本 stage 只有一个 |
+| TF 树断成两棵 | `lookupTransform` 抛 `ConnectivityException` | `view_frames` 看根节点数 | ✅ 验过 |
+| 未命名 body | 它的**子 body 会被静默重挂到错误的父上** | 代码里 `RCLCPP_WARN` + `continue` | ⚠️ 只有日志，没测过 |
+| mocap body 被判成 static | 位姿永不更新，无报错 | 判据应加 `body_mocapid[i] < 0`（[9.4](#94-static--dynamic-怎么划分用结构而不是名字)） | ❌ 当前模型无 mocap body |
+| `/tf` 和 `/joint_states` 频率不同 | 下游静默走 tf2 插值路径 | 无任何告警（[9.11](#911-权衡tf_rate_hz-独立于-joint_state_rate_hz)） | ❌ 未防 |
+| `0.1034` 上游漂移 | TCP 位置错 103.4mm 量级，无报错 | 具名常量 + 注释里的核对命令（[4.4.2](#442-为什么这个数没有自动共享)） | ⚠️ 只靠人工核对 |
+
+**反查一遍**（按 [STUDY_NOTES_GUIDE.md](../../STUDY_NOTES_GUIDE.md) 5.1 的要求）：这张表里有 3 条 ⚠️ 和 3 条 ❌。**整套相对变换数学的验证全是人眼看 `tf2_echo`，没有一条自动化断言**，这是 E 类的空缺，见 [11.2](#112-反向清单现在就该做的属于缺一次推演)。
+
+### 9.13 排查记录：第三次遗留进程（同一个坑的第三次）
+
+**现象**：验证 `tf_rate_hz` 参数覆盖时，日志明明写着 `38.5 Hz actual`，但 `ros2 topic hz /tf` 读到：
+
+```
+average rate: 138.539
+	min: 0.000s max: 0.010s std dev: 0.00330s
+```
+
+而且 `ros2 param get /mujoco_bridge tf_rate_hz` 返回 `100.0`——和刚传进去的 `40.0` 不符。
+
+**线索**：`138.5 = 100 + 38.5`。按 [3.2 的规则](../../STUDY_NOTES_GUIDE.md)（荒谬的数字先怀疑尺子），这个和式立刻指向两个发布者。`min: 0.000s` 和偏大的 std dev 也是多发布者的特征信号。
+
+**根因**：启动前的检查打印了 `STALE: 277928`——上一轮验证的节点没清掉。`param get` 打到的也是那个旧节点（同名 `/mujoco_bridge`，服务名冲突，谁应答不确定）。
+
+**修复**：按数字 PID 循环清理，确认 `ros2 topic info /tf` → `Publisher count: 1` 后重测，得到 `38.462` ✅。
+
+**留下的经验（新增两条，前两次见 [8.7](#87-排查记录环境不干净导致的两次误判)）**：
+
+1. **`ros2 param get` 在多实例下和 `topic echo --once` 一样不可信**。同名节点的参数服务会冲突，读到的是哪个实例不确定。此前 8.7 的结论只覆盖了话题，**服务/参数也适用同一条规则**。
+2. **`ps -eo pid,args | grep 'lib/mujoco_bridg[e]'` 会匹配到自己的命令行**——这次清理后它报了 `DIRTY`，其实是假警报（grep 匹配到了那条 bash `-c` 的完整命令字符串）。这是 [3.1](../../STUDY_NOTES_GUIDE.md) 里 `pkill -f` 自匹配那个坑的 grep 版本。**用 `ps -eo pid,comm`（只匹配可执行文件名）更可靠**：
+   ```bash
+   ps -eo pid,comm | awk '$2 ~ /^mujoco_bridge/ {print $1}'
+   ```
+
+---
+
+## 10. 后续计划与 Session 交接
+
+Stage A（[第7节](#7-stage-amujoco_bridge_node-最小实现模型加载--物理步进定时器)）、Stage B（[第8节](#8-stage-bclock--joint_states)）、Stage C（[第9节](#9-stage-ctfstatic--dynamic)）均已完成、build+run 验证通过、讲解已记录。以下是 Stage D-E 的简要计划，供下一个 session 接着做（原始完整计划见 `.claude/plans` 下已批准的计划文件，这里只摘录关键点方便快速回忆上下文）。
 
 **执行方式约定**（沿用 Stage A 的模式，不要跳过）：每个 stage 写完代码后先 `colcon build` + 实际跑一遍验证，验证通过再讲解涉及的概念，讲解完追问/确认理解后再写进本文件，最后才进入下一个 stage。每个 stage 建议除了"这段代码怎么工作"之外，再补至少一条**权衡/替代方案对比**和一条**失败模式/怎么验证**类问题（这是第 4 轮反思后定下的规矩，避免只深挖单段代码语法）。
 
@@ -1360,39 +1927,51 @@ Stage A 已完成（见第6节）。Stage B 已完成、build+run 验证通过�
 
 另外时间戳统一走 `simTime()`（`std::llround(data_->time * 1e9)`），**不要**用 `get_clock()->now()`——理由见 [8.2](#82-sim-time-vs-wall-time以及-use_sim_time)。Stage C 的 TF 时间戳也必须用它，否则 TF 和 JointState 会落在两个时间轴上。
 
-### Stage C — TF（static + dynamic）
+### Stage C — TF（static + dynamic）✅ 已完成
 
-- 新增依赖：无新增 ROS 包（`tf2_ros` 已在 CMakeLists 里），需要 `#include <tf2_ros/transform_broadcaster.h>` 和 `<tf2_ros/static_transform_broadcaster.h>`。
-- 动态 TF：遍历 MJCF 里所有带关节的 body，用 `xpos`/`xquat` + `body_parentid` 算出父子相对变换（不能直接发 `xpos`/`xquat`，那是相对 world 的绝对位姿，TF 需要的是相对父 frame 的变换），通过 `tf2_ros::TransformBroadcaster` 发布。
-- 静态 TF（启动时发一次）：`world -> base_link`，`link8`、`hand` 这类 fixed joint 的 body，以及**合成的** `hand -> hand_tcp`（偏移量 `xyz=(0,0,0.1034)`，来自 `docs/architecture.md` 已经记录的说明，MJCF 本身没有这个 frame）。
-- 需要讲解的概念：`TransformBroadcaster` vs `StaticTransformBroadcaster` 的区别和为什么要分开、frame tree 必须是树（单一父节点）、`body_parentid` 怎么用、指尖命名差异（`left_finger`/`right_finger` vs URDF 的 `leftfinger`/`rightfinger`，见 architecture.md）。
+详见[第9节](#9-stage-ctfstatic--dynamic)。相对原计划的三处偏离，后续 stage 需要知道：
+
+1. **frame 名全部用 MJCF 原生名**（[9.9](#99-命名我们发-mjcf-的原生名)）：基座是 `link0` 不是 `base_link`，**没有 `link8`**（MJCF 把 `link7->link8->hand` 合并成一步）。原计划写的 `world -> base_link` 和 `link8` 都不存在。`docs/architecture.md` 第1节的 frame 表已回头改正。
+2. **static/dynamic 的划分是 `body_jntnum[i] == 0`，不是按名字列举**（[9.4](#94-static--dynamic-怎么划分用结构而不是名字)）。第4周加 free joint 物体会自动变成 `world -> object`，零代码改动。**已知反例：mocap body**（判据该加 `body_mocapid[i] < 0`）。
+3. **新增参数 `tf_rate_hz`**（默认 100.0，故意和 `joint_state_rate_hz` 相同，见 [9.11](#911-权衡tf_rate_hz-独立于-joint_state_rate_hz)）。`MujocoApi` 新增了 `mju_negQuat`/`mju_mulQuat`/`mju_rotVecQuat` 三个字段（现在共 11 个，[7.2.6](#726-当前方案的扩展性代价以及怎么改善) 说的"涨到十几二十个就该上 `decltype`"的触发点在接近）。
 
 ### Stage D — reset service
 
 - 新增依赖：无（`std_srvs` 已在）。
 - `std_srvs::srv::Trigger` 类型的 `~/reset` service，回调里调 `mj_resetDataKeyframe(model_, data_, keyframe_id)`。`keyframe_id` 要在构造函数里用 `mj_name2id(model_, mjOBJ_KEY, "home")` 按名字查一次并缓存，不要硬编码成 `0`。
 - 需要讲解的概念：service（请求/响应）vs topic（发布/订阅）的适用场景区别、MJCF 里 keyframe 是什么（预定义的一组 `qpos` 值）、reset 之后要不要额外调 `mj_forward`（把 `xpos`/`xquat` 等派生量刷新，不然发出去的第一帧 TF/JointState 可能还是旧值——这是个值得验证的失败模式）。
+- **Stage C 补充的一条**：`mj_forward` 这个问题现在更值得验证了，因为 TF 直接读 `xpos`/`xquat`。[9.4](#94-static--dynamic-怎么划分用结构而不是名字) 已经踩到它的另一面（构造期 `xpos` 全 0）。注意 `keyframe` 里除了 `qpos` 还有 `ctrl="0 0 0 -1.57079 0 1.57079 -0.7853 255"`（8 个数，对应 `nu=8`）——reset 时**要不要一起恢复 `ctrl`** 是个必须定的问题：只 reset `qpos` 而 `ctrl` 留着旧目标，机器人会立刻被伺服拉回旧位姿。
 
 ### Stage E — 命令订阅 + sine 测试脚本 + demo launch/rviz
 
 - 新增依赖：`control_msgs`/`trajectory_msgs` 已在 CMakeLists 里。
 - 订阅 `~/joint_command`（`trajectory_msgs::msg::JointTrajectory`），收到后把第一个 trajectory point 的 `positions` 按 joint name 写进 `mjData::ctrl`（MJCF 里的 position-servo actuator 会自己把 `ctrl` 值当目标位置去伺服，不是直接改 `qpos`）。
+- **⚠️ Stage C 读 `<actuator>` 段时挖出三颗地雷，动手前必读 [4.3.4](#434-每个关节的状态变量应该是什么样以及一个-stage-e-地雷)**：(a) `ctrl` 长度是 `nu`=8 不是 `nq`=9，索引是 **actuator id 不是 joint id**，臂关节碰巧对齐、夹爪会错位；(b) `actuator8`（夹爪）的 `ctrlrange` 被上游重映射成 **`0..255`**，不是 `0..0.04`，直接写关节角进去会几乎全闭；(c) 两指由一个 tendon + 一个 equality 约束耦合，**物理上不能独立指令**。
+- **RViz 的 `RobotModel` 显示需要 `/robot_description`**，不只是 TF（[9.10](#910-权衡为什么不用-robot_state_publisher) 更正过一次的论断）。`demo.rviz` 先只放 TF + Grid 的计划不变，但原因不是"做不到"，而是这个 stage 不想引入 URDF。
 - 新建 `src/mujoco_bridge/launch/demo.launch.py`（起 `mujoco_bridge_node` + `rviz2`）和 `src/mujoco_bridge/rviz/demo.rviz`（先只放 TF + Grid，不接 RobotModel），`CMakeLists.txt` 加 `install(DIRECTORY launch rviz DESTINATION share/${PROJECT_NAME})`。
 - 新建 `scripts/sine_joint_test.py`（rclpy 脚本），发一个缓慢正弦振荡的 `JointTrajectory` 给 `~/joint_command`，人工在 RViz 里确认对应关节的 TF 帧在动。
 - 需要讲解的概念：position-servo actuator 的本质是什么（是一种简化的 PD 控制器，MJCF 里怎么定义增益）、`ctrl` 写入和真实机器人控制器接口的对应关系、launch 文件基础语法。
 
 ### 验收标准（沿用已批准计划里的定义）
 
-1. `ros2 launch mujoco_bridge demo.launch.py` 后确认 `/clock`、`/joint_states`、`/tf`、`/tf_static` 都在发布（`ros2 topic list` / `ros2 topic hz /joint_states`），RViz 里 TF 树非爆炸、根节点是 `world`。
+1. `ros2 launch mujoco_bridge demo.launch.py` 后确认 `/clock`、`/joint_states`、`/tf`、`/tf_static` 都在发布（`ros2 topic list` / `ros2 topic hz /joint_states`），RViz 里 TF 树非爆炸、根节点是 `world`。← 话题部分 Stage C 已单独验过（[9.1](#91-改动清单与验证结果)），剩 launch 文件本身。
 2. `ros2 service call /mujoco_bridge/reset std_srvs/srv/Trigger {}` 后 `/joint_states` 数值应该跳回 home pose。
 3. 跑 `scripts/sine_joint_test.py`，RViz 里对应关节的 frame 应该能看到周期性摆动。
+
+### 第6周接 MoveIt 时的待决项（Stage C 识别出来的）
+
+MoveIt 无论如何都需要 `/robot_description`（URDF），而 `robot_state_publisher` **同时**发 URDF 和 TF。届时必须显式决定**谁发 `link0->link7` 这几条边**，否则出现 [9.8](#98-frame-tree-必须是树) 说的双发布者打架（表现为机器人抖动，不报错）。
+
+倾向的做法：**让 URDF 进图，但 remap 掉 rsp 的 `/tf`、`/tf_static`**（或干脆自己发那个 String）。职责划分是 **URDF 负责"长什么样和怎么规划"，MuJoCo 负责"现在在哪"**。理由见 [9.10](#910-权衡为什么不用-robot_state_publisher)。同时要处理 URDF 侧的 `fer_` 前缀和 `leftfinger`/`left_finger` 命名差异。
+
+这个决定值得在第6周补一份 `docs/adr/`。
 ---
 
-## 10. 悬挂问题（等有了参照系再回来）
+## 11. 悬挂问题（等有了参照系再回来）
 
 这一节专门存放**现在还答不了、或者答了也存不住的问题**。
 
-### 10.0 为什么要单开这一节
+### 11.0 为什么要单开这一节
 
 > Q: 作为初学者，在缺少横向对比和真机经验的情况下，很难问出设计决策的问题。如果认为"还无法提问，说明还不是现在这个阶段应该解决的"，这个思路对吗？
 
@@ -1417,9 +1996,11 @@ Stage A 已完成（见第6节）。Stage B 已完成、build+run 验证通过�
 
 回头看，Stage B 这轮最好的两个追问已经是这个形状了：[8.8](#88-墙钟定时器与-sim-time-的关系为什么不可能严格一致不一致会怎样) 的后半句"如果它们不一致会出现什么问题"就是它；[2.1](#21-rclcppnode-基类常用属性与方法) 的"我没看到 `use_sim_time` 定义在哪"是它的变体。所以这个动作不是新技能，是把已经在用的东西显式化、可复用化。
 
-### 10.1 清单（Stage B 阶段识别出的）
+**Stage C 的补充观察**：这一轮最有产出的追问是另一个形状——**"我不知道怎么检查这个东西"**（[4.3](#43-怎么检查和分析-mjcf--urdf以及怎么据此判断代码正误) 那问）。它既不是 A 类（不是"这是什么"）也不是 C 类，而是在问**工具和方法**。产出：一条 URDF↔MJCF 交叉验证流程、`architecture.md` 的两处错误、以及 Stage E 的三颗地雷（[4.3.4](#434-每个关节的状态变量应该是什么样以及一个-stage-e-地雷)）。值得记下来的是——**这三颗地雷全部是在"学怎么读文件"的过程中顺手捡到的，不是在找 bug 时找到的**。另外 [9.6](#96-四元数分量顺序一次讲错的更正) 和 [9.10](#910-权衡为什么不用-robot_state_publisher) 各纠正了讲解里的一处错误论断，都是质疑论断（[4.4 提问方式](../../STUDY_NOTES_GUIDE.md)）问出来的。
 
-格式：问题 / 为什么现在答不了 / 什么时候回来。
+### 11.1 清单
+
+格式：问题 / 为什么现在答不了 / 什么时候回来。第 1~4 条是 Stage B 识别的，第 5~6 条是 Stage C 新增的。
 
 | # | 问题 | 现在答不了的原因 | 解锁条件 |
 |---|---|---|---|
@@ -1427,19 +2008,26 @@ Stage A 已完成（见第6节）。Stage B 已完成、build+run 验证通过�
 | 2 | **timestep = 0.002 凭什么？** 谁定的、和控制频率的关系、什么时候必须调小 | 现在场景里只有机器人本体、没有接触，改 timestep 看不出任何差别，无从验证任何结论 | 第4周加入待抓物体和桌面接触之后。那时可以实验：调大 timestep 直到出现穿透/抖动 |
 | 3 | **`effort` 填 `qfrc_actuator` 对吗？** 它和真机关节力矩传感器的读数可比吗？ | 需要真机 `franka_ros2` 的 `effort` 字段实际数值做对照。仿真里无法自证 | 上真机之后；或找到 `franka_ros2` 里 effort 来源的文档/源码 |
 | 4 | **100Hz 的 `/joint_states` 够吗？** 下游 MoveIt / 控制器的真实需求是多少 | [8.5.1](#851-为什么是-5-倍decimation-到底管什么) 里列的 50~100Hz 是我查来的经验值，不是自己测出来的 | 第6周 MoveIt 实际跑起来，可以实验：降到 20Hz 看规划执行是否退化 |
+| 5 | **TF 由仿真直接发、而不用 `robot_state_publisher`，在真实项目里是常规做法还是异类？** | [9.10](#910-权衡为什么不用-robot_state_publisher) 的四条理由都立得住，但"别人怎么做"需要参照系。Gazebo 的 `gazebo_ros2_control`、Isaac Sim 的 ROS bridge 各自怎么处理这个职责划分，我没读过 | 第6周接 MoveIt 时必须面对（见[第10节](#10-后续计划与-session-交接)待决项）；或任何一次读别人的 sim bridge 源码。和本清单第 1 条是同一类问题 |
+| 6 | **`body_jntnum == 0 → static` 这个判据的完整例外集合有多大？** | 已知 mocap body 是一个反例（[9.4](#94-static--dynamic-怎么划分用结构而不是名字)）。但"MuJoCo 里还有哪些让 body 动起来的机制不经过 joint"需要对 MuJoCo 更全面的了解，现在只能逐个撞上 | 第4~5周真用到 mocap（遥操作/给定末端目标）时；届时至少要把判据改成 `body_jntnum == 0 && body_mocapid < 0`。这条也是 F 类（知识边界）的典型 |
 
-### 10.2 反向清单：现在就该做的（属于"缺一次推演"）
+### 11.2 反向清单：现在就该做的（属于"缺一次推演"）
 
-这些不进悬挂清单，是待办：
+这些不进悬挂清单，是待办。前四条 Stage B 留下，后五条 Stage C 新增：
 
 - [ ] **`jnt_qposadr` / `jnt_dofadr` 写混了没有任何东西会告警**——Panda 上两者数值相同，测不出来；等第4周加 free joint 物体才炸。该写一个用**带 free joint 的最小 MJCF** 做的单元测试，现在就能写，不需要任何新知识（对应 [6.2](#62-广义坐标qpos--qvel-的表示方法以及为什么维度不相等) 第1条影响）。
 - [ ] **`MujocoApi` 的签名手抄错了编译器不会报错**——解药是 `decltype(&mj_xxx)`，约 20 行改动，触发条件已写在 [7.2.6](#726-当前方案的扩展性代价以及怎么改善)。
 - [ ] **没有常驻 RTF 监控**——约 6 行，见 [8.6](#86-失败模式与验证手段) 末尾。
 - [ ] **Stage B 的验证全是人眼看 `echo`/`hz`，没有一条自动化断言**。第3周要写 FK/Jacobian 的 gtest，届时"这段桥接代码怎么单元测试"会变成主要矛盾（难点：`mjModel` 加载依赖文件路径、`rclcpp::Node` 构造依赖 DDS）。
+- [ ] **`publishTransforms` 的相对变换数学没有任何自动化断言**（E 类，Stage C）。[9.1](#91-改动清单与验证结果) 全是人眼看 `tf2_echo`，而且恰好挑在 `q≈0` 附近；`mulQuat` 参数顺序只靠 `joint6=0.192` **偶然**覆盖到（[9.12](#912-失败模式与验证手段)）。这段其实是整个节点里**最容易写成纯函数单测**的一块——给一组 `xpos`/`xquat` 和父子关系，断言输出的相对变换。难点和上一条（第3周 FK gtest）**完全重叠**，一起写更划算。注意断言四元数要比 $|q_1 \cdot q_2| \approx 1$，不能逐字段比（[6.3.1](#631-一个单位四元数就是一个旋转) 的 double cover）。
+- [ ] **`mj_forward` 在构造期/reset 后的必要性**（Stage C 识别，Stage D 就会撞上）。[9.4](#94-static--dynamic-怎么划分用结构而不是名字) 靠改用 `body_pos` 绕开了构造期的 `xpos` 全 0，但 Stage D 的 reset 之后没有东西绕得开。属于"跑一次实验就能答"。
+- [ ] **`tf_rate_hz` 和 `joint_state_rate_hz` 设成不同值没有任何告警**（C 类，[9.11](#911-权衡tf_rate_hz-独立于-joint_state_rate_hz)）。这是 Stage C 自己引进来的不一致源。约 3 行：构造期比一下，不等就 `RCLCPP_WARN`。
+- [ ] **`ros2 param set` 报成功但无效果**（C 类，[2.5](#25-declare_parameterros-参数到底是什么为什么不用-const-double)）。触发条件写明：等真的需要在跑动中调频率时，用 `add_on_set_parameters_callback` 重算 decimation。现在不做的理由是"当前够用"，不是"不该做"。
+- [ ] **把 `0.1034` 搬进 vendor 的 MJCF**（`<site name="hand_tcp" pos="0 0 0.1034"/>`），代码改成从模型读（[4.4.2](#442-为什么这个数没有自动共享)）。顺手能消掉 `kHandBodyName` 那个硬编码字符串。这是个改 vendor 文件的独立决定，值得配一份 `docs/adr/`。
 
-### 10.3 维护约定
+### 11.3 维护约定
 
-- 每个 stage 结束时过一遍：新攒的问题按 10.0 的判据分流——进 10.1（等参照系）还是 10.2（现在就做）。
+- 每个 stage 结束时过一遍：新攒的问题按 11.0 的判据分流——进 11.1（等参照系）还是 11.2（现在就做）。
 - **解锁条件满足时要回头看**。第4周加物体、第6周接 MoveIt、上真机，这三个节点各自对应上表里几行，到时候主动回来答，别等它自然遗忘。
 - 答掉的问题从清单里删掉，答案写进对应的 stage 小节（不要堆在这一节里，这节只放"未答"）。
 
