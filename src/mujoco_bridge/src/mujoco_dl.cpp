@@ -39,6 +39,9 @@ MujocoApi & loadMujocoApi()
     resolve(handle, "mj_name2id", api.name2id);
     resolve(handle, "mj_id2name", api.id2name);
     resolve(handle, "mj_resetDataKeyframe", api.resetDataKeyframe);
+    resolve(handle, "mju_negQuat", api.negQuat);
+    resolve(handle, "mju_mulQuat", api.mulQuat);
+    resolve(handle, "mju_rotVecQuat", api.rotVecQuat);
     return api;
   }();
   return api;

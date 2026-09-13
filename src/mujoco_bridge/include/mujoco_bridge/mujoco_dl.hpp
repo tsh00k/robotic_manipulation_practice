@@ -37,6 +37,12 @@ struct MujocoApi
   int (*name2id)(const mjModel * m, int type, const char * name);
   const char * (*id2name)(const mjModel * m, int type, int id);
   void (*resetDataKeyframe)(const mjModel * m, mjData * d, int key);
+  // Quaternion helpers, used to turn absolute body poses (xpos/xquat, relative to
+  // world) into the parent-relative transforms TF wants. Array parameters decay to
+  // pointers, so these signatures are ABI-identical to the mju_* declarations.
+  void (*negQuat)(mjtNum * res, const mjtNum * quat);
+  void (*mulQuat)(mjtNum * res, const mjtNum * quat1, const mjtNum * quat2);
+  void (*rotVecQuat)(mjtNum * res, const mjtNum * vec, const mjtNum * quat);
 };
 
 // Loads libmujoco.so in isolated (RTLD_LOCAL | RTLD_DEEPBIND) mode and resolves all
