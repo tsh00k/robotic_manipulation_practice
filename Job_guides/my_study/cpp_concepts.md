@@ -358,7 +358,7 @@ void resolve(void * handle, const char * symbol, FuncPtr & out)
 
 - **`dlopen(path, flags)`**：运行时把共享库加载进当前进程地址空间，返回不透明的 `void*` handle（失败返回 `nullptr`）。这里用的三个 flag：
   - `RTLD_NOW`：加载时立刻解析库内所有未定义符号（而非惰性），加载失败会立刻暴露。
-  - `RTLD_LOCAL`：这个库导出的符号**不进入进程全局符号表**，别的库看不到、不会误用它内部的符号（隔离 `tinyxml2` 冲突的手段之一，详见 [week1.md 6.2](week1.md#62-调试时踩到的段错误根因为什么改成-dlopen)）。
+  - `RTLD_LOCAL`：这个库导出的符号**不进入进程全局符号表**，别的库看不到、不会误用它内部的符号（隔离 `tinyxml2` 冲突的手段之一，详见 [week1.md 7.2](week1.md#72-调试时踩到的段错误符号冲突与-dlopen-隔离)）。
   - `RTLD_DEEPBIND`：glibc 扩展，让库内部对自己符号的引用优先用自己的定义，不理会进程里其他地方已加载的同名符号——双重保险。
 - **`dlsym(handle, symbol)`**：拿一个符号名字符串，去 `handle` 对应库的符号表（ELF `.dynsym`/`.dynstr`）里精确查找，返回该符号在当前进程虚拟地址空间里的实际地址；找不到返回 `nullptr`。
 - **`dlerror()`**：返回上一次 `dl*` 调用失败的具体原因，用来给抛出的异常附带详细信息。
