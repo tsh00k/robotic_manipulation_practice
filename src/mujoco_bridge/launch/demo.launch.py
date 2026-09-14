@@ -18,6 +18,12 @@ def generate_launch_description():
         executable='mujoco_bridge_node',
         name='mujoco_bridge',
         output='screen',
+        # This node *is* the /clock source, so use_sim_time is a no-op for it (it
+        # never calls get_clock()->now() -- see mujoco_bridge_node.cpp simTime()).
+        # Set anyway to establish the pattern: every node added to this launch file
+        # going forward (task_executor in Stage I) must set it too, or its timeouts
+        # run on wall time instead of sim time.
+        parameters=[{'use_sim_time': True}],
     )
 
     rviz_node = Node(

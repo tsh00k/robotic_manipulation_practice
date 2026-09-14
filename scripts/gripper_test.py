@@ -18,6 +18,7 @@ which is missing rclpy's compiled extension. See CLAUDE.md, "变体二".
 """
 import rclpy
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 # Finger joint range per panda.xml's `finger` default class: <joint type="slide"
@@ -32,7 +33,12 @@ PUBLISH_RATE_HZ = 10.0
 class GripperTest(Node):
 
     def __init__(self):
-        super().__init__('gripper_test')
+        # See sine_joint_test.py: without this, HOLD_S is measured against wall time
+        # rather than /clock.
+        super().__init__(
+            'gripper_test',
+            parameter_overrides=[Parameter('use_sim_time', Parameter.Type.BOOL, True)],
+        )
         self.pub = self.create_publisher(JointTrajectory, '/mujoco_bridge/joint_command', 10)
         self.is_open = False
         self.start_time = self.get_clock().now()

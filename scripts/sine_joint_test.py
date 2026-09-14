@@ -14,6 +14,7 @@ import math
 
 import rclpy
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 # joint4's `home` keyframe angle (see panda.xml <key name="home">). Chosen as the
@@ -31,7 +32,14 @@ PUBLISH_RATE_HZ = 20.0
 class SineJointTest(Node):
 
     def __init__(self):
-        super().__init__('sine_joint_test')
+        # Without this, get_clock().now() below returns wall time (mujoco_bridge_node
+        # publishes /clock but nothing here subscribes to it unless use_sim_time is
+        # set), so the "10s period" sine only matches sim time when RTF happens to be
+        # ~1. See CLAUDE.md's sim-time rule and week2 Stage F.
+        super().__init__(
+            'sine_joint_test',
+            parameter_overrides=[Parameter('use_sim_time', Parameter.Type.BOOL, True)],
+        )
         self.pub = self.create_publisher(JointTrajectory, '/mujoco_bridge/joint_command', 10)
         self.start_time = self.get_clock().now()
         self.create_timer(1.0 / PUBLISH_RATE_HZ, self.tick)

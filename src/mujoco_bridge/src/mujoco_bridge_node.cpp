@@ -20,7 +20,9 @@
 #include <unordered_set>
 #include <vector>
 
+#include "mujoco_bridge/frame_math.hpp"
 #include "mujoco_bridge/mujoco_dl.hpp"
+#include "mujoco_bridge/state_ops.hpp"
 
 namespace mujoco_bridge
 {
@@ -80,6 +82,12 @@ public:
     joint_state_decimation_ =
       decimationFor("joint_state_rate_hz", "/joint_states", timestep_s);
     tf_decimation_ = decimationFor("tf_rate_hz", "/tf", timestep_s);
+    if (joint_state_decimation_ != tf_decimation_) {
+      RCLCPP_WARN(
+        get_logger(), "joint_state_rate_hz and tf_rate_hz decimate differently (%d vs %d "
+        "steps); /joint_states and /tf samples will not line up 1:1",
+        joint_state_decimation_, tf_decimation_);
+    }
 
     // ClockQoS: best-effort, keep-last depth 1, volatile. Deliberately NOT reliable:
     // a /clock sample that needs retransmitting is already stale by the time it
@@ -387,35 +395,21 @@ private:
     const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
     std::shared_ptr<std_srvs::srv::Trigger::Response> response)
   {
-    if (reset_keyframe_id_ < 0) {
+    // mj_resetDataKeyframe restores qpos, qvel, act, ctrl and mocap from the keyframe
+    // -- ctrl included. That matters: the `home` key carries its own
+    // ctrl="0 0 0 -1.57079 0 1.57079 -0.7853 255", so the position servos get targets
+    // consistent with the new qpos. Resetting qpos alone would leave the old targets
+    // in place and the servos would immediately drag the arm back out of home pose.
+    // Sim time is kept monotonic and derived quantities (xpos/xquat, qfrc_actuator)
+    // are refreshed inside resetToKeyframe (state_ops.hpp) -- see that function for
+    // why both matter.
+    if (!resetToKeyframe(api_, model_, data_, reset_keyframe_id_)) {
       response->success = false;
       response->message =
         std::string("model has no keyframe `") + kResetKeyframeName + "`";
       RCLCPP_ERROR(get_logger(), "%s", response->message.c_str());
       return;
     }
-
-    // mj_resetDataKeyframe restores qpos, qvel, act, ctrl and mocap from the keyframe
-    // -- ctrl included. That matters: the `home` key carries its own
-    // ctrl="0 0 0 -1.57079 0 1.57079 -0.7853 255", so the position servos get targets
-    // consistent with the new qpos. Resetting qpos alone would leave the old targets
-    // in place and the servos would immediately drag the arm back out of home pose.
-    // It also rewinds mjData::time to the keyframe's time (0), which we undo below.
-    const mjtNum time_before = data_->time;
-    api_.resetDataKeyframe(model_, data_, reset_keyframe_id_);
-
-    // Keep sim time monotonic. /clock is a clock: rewinding it to 0 is a backwards
-    // time jump for every node in the graph -- tf2 buffers get cleared, action
-    // servers and message_filters see timestamps from "the future", and any node
-    // that cached a stamp is now wrong. Resetting *state* is a simulation concept;
-    // resetting *time* is a much bigger hammer and is not what callers ask for here.
-    data_->time = time_before;
-
-    // Without this, everything derived from qpos is stale until the next mj_step:
-    // xpos/xquat still hold the pre-reset pose, so a /tf or /joint_states publish
-    // landing between the reset and the next step would report the old configuration
-    // with a new timestamp. qfrc_actuator is the same story for `effort`.
-    api_.forward(model_, data_);
 
     response->success = true;
     response->message = std::string("reset to keyframe `") + kResetKeyframeName + "`";
@@ -504,10 +498,29 @@ private:
     }
   }
 
+  // Logs realtime factor (sim seconds advanced / wall seconds elapsed) once a second.
+  // Physics steps and publish rates are both defined in sim time; once episodes run
+  // long, an RTF that has drifted from ~1 silently changes what a wall-clock timeout
+  // (or a human watching RViz) actually means, with no other symptom.
+  void logRtfIfDue()
+  {
+    const auto wall_now = std::chrono::steady_clock::now();
+    const double wall_elapsed_s =
+      std::chrono::duration<double>(wall_now - rtf_window_wall_start_).count();
+    if (wall_elapsed_s < 1.0) {
+      return;
+    }
+    const double sim_elapsed_s = data_->time - rtf_window_sim_start_;
+    RCLCPP_INFO(get_logger(), "RTF: %.2f", sim_elapsed_s / wall_elapsed_s);
+    rtf_window_wall_start_ = wall_now;
+    rtf_window_sim_start_ = data_->time;
+  }
+
   void onTimer()
   {
     api_.step(model_, data_);
     ++step_count_;
+    logRtfIfDue();
 
     rosgraph_msgs::msg::Clock clock_msg;
     clock_msg.clock = simTime();
@@ -532,33 +545,24 @@ private:
     tf_batch_.reserve(dynamic_frames_.size());
 
     for (auto & frame : dynamic_frames_) {
-      const mjtNum * child_pos = data_->xpos + 3 * frame.body_id;
-      const mjtNum * child_quat = data_->xquat + 4 * frame.body_id;
-      const mjtNum * parent_pos = data_->xpos + 3 * frame.parent_id;
-      const mjtNum * parent_quat = data_->xquat + 4 * frame.parent_id;
+      Pose child;
+      std::copy_n(data_->xpos + 3 * frame.body_id, 3, child.pos);
+      std::copy_n(data_->xquat + 4 * frame.body_id, 4, child.quat);
+      Pose parent;
+      std::copy_n(data_->xpos + 3 * frame.parent_id, 3, parent.pos);
+      std::copy_n(data_->xquat + 4 * frame.parent_id, 4, parent.quat);
 
-      mjtNum parent_quat_inv[4];
-      api_.negQuat(parent_quat_inv, parent_quat);
-
-      const mjtNum delta[3] = {
-        child_pos[0] - parent_pos[0],
-        child_pos[1] - parent_pos[1],
-        child_pos[2] - parent_pos[2],
-      };
-      mjtNum rel_pos[3];
-      api_.rotVecQuat(rel_pos, delta, parent_quat_inv);
-      mjtNum rel_quat[4];
-      api_.mulQuat(rel_quat, parent_quat_inv, child_quat);
+      const Pose rel = relativePose(api_, child, parent);
 
       // Only the numbers change; frame_id/child_frame_id were filled once at startup.
       frame.msg.header.stamp = stamp;
-      frame.msg.transform.translation.x = rel_pos[0];
-      frame.msg.transform.translation.y = rel_pos[1];
-      frame.msg.transform.translation.z = rel_pos[2];
-      frame.msg.transform.rotation.w = rel_quat[0];
-      frame.msg.transform.rotation.x = rel_quat[1];
-      frame.msg.transform.rotation.y = rel_quat[2];
-      frame.msg.transform.rotation.z = rel_quat[3];
+      frame.msg.transform.translation.x = rel.pos[0];
+      frame.msg.transform.translation.y = rel.pos[1];
+      frame.msg.transform.translation.z = rel.pos[2];
+      frame.msg.transform.rotation.w = rel.quat[0];
+      frame.msg.transform.rotation.x = rel.quat[1];
+      frame.msg.transform.rotation.y = rel.quat[2];
+      frame.msg.transform.rotation.z = rel.quat[3];
       tf_batch_.push_back(frame.msg);
     }
 
@@ -604,6 +608,8 @@ private:
   int joint_state_decimation_ = 1;
   int tf_decimation_ = 1;
   uint64_t step_count_ = 0;
+  std::chrono::steady_clock::time_point rtf_window_wall_start_ = std::chrono::steady_clock::now();
+  double rtf_window_sim_start_ = 0.0;
 };
 
 }  // namespace mujoco_bridge

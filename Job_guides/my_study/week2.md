@@ -30,6 +30,16 @@
 - [6. 悬挂问题（本周新增）](#6-悬挂问题本周新增)
   - [6.1 清单](#61-清单)
   - [6.2 反向清单：现在就该做的](#62-反向清单现在就该做的)
+- [7. Stage F：测试地基与胶水层收口](#7-stage-f测试地基与胶水层收口)
+  - [7.0 一句话总结](#70-一句话总结)
+  - [7.1 改动清单与验证结果](#71-改动清单与验证结果)
+  - [7.2 `decltype` 签名：把手抄错误从运行时 UB 变成编译错误](#72-decltype-签名把手抄错误从运行时-ub-变成编译错误)
+  - [7.3 剥离边界画在哪：为什么 frame_math/state_ops 剥，`buildJointIndex` 暂不剥](#73-剥离边界画在哪为什么-frame_mathstate_ops-剥buildjointindex-暂不剥)
+  - [7.4 测试里怎么拿模型文件路径：三个选项](#74-测试里怎么拿模型文件路径三个选项)
+  - [7.5 `colcon test` / `gtest` 怎么用：三层机制](#75-colcon-test--gtest-怎么用三层机制)
+  - [7.6 RTF 是什么，为什么要常驻监控，为什么 `tf_rate_hz` 要和 `joint_state_rate_hz` 一致](#76-rtf-是什么为什么要常驻监控为什么-tf_rate_hz-要和-joint_state_rate_hz-一致)
+  - [7.7 失败模式与验证手段](#77-失败模式与验证手段)
+  - [7.8 排查记录：`free_body.xml` 注释里的 `--` 为什么没被 gtest 挡住](#78-排查记录free_bodyxml-注释里的----为什么没被-gtest-挡住)
 
 ---
 
@@ -186,3 +196,210 @@
 ### 6.2 反向清单：现在就该做的
 
 > 待填（缺一次推演 → 这里）。第1周遗留、本周不打算做的条目**不要**复制过来，仍以 [week1.md 13.2](week1.md#132-反向清单现在就该做的属于缺一次推演) 为权威，本节只放本周新产生的。
+
+- **`ament_lint_auto` 从未通过过，涉及 `mujoco_bridge` 全部源文件**——Stage F 第一次跑 `colcon test`（本仓库此前一次都没跑过），暴露出 `cpplint`（版权头缺失、include 顺序）、`uncrustify`（`mujoco_bridge_node.cpp` 9 行、`mujoco_dl.cpp` 44 行格式差异）全部不过。gtest 部分（`test_frame_math`、`test_state_ops`）已全绿，这批是独立的风格债务，不是逻辑 bug，本周决定不修（`uncrustify --fix` 会改动 week1 笔记里逐行引用过的代码，需要专门一次处理并核对笔记引用是否还对得上行号）。
+- **RTF 监控目前只打日志，没有阈值告警**（[7.6](#76-rtf-是什么为什么要常驻监控为什么-tf_rate_hz-要和-joint_state_rate_hz-一致)、[7.7](#77-失败模式与验证手段)）——FSM/episode runner 要知道"RTF 掉到多少算异常"必须人眼盯日志。解锁条件：Stage I 给 FSM 超时判据接入 RTF 时，评估要不要把这个做成可查询的话题或参数化阈值。
+- **`tf_rate_hz != joint_state_rate_hz` 的告警本周加了代码但从没被真实触发过**（[7.6](#76-rtf-是什么为什么要常驻监控为什么-tf_rate_hz-要和-joint_state_rate_hz-一致)、[7.7](#77-失败模式与验证手段)）——两者目前都还是默认的 100Hz。解锁条件：以后真的把 `tf_rate_hz` 调开（比如给 FSM 提供更高频姿态反馈）时，第一次触发也是第一次验证这段代码本身是对的。
+
+## 7. Stage F：测试地基与胶水层收口
+
+### 7.0 一句话总结
+
+给 `mujoco_bridge` 建了本仓库第一个 `colcon test` 目标：把 `publishTransforms` 里的相对变换数学剥成不依赖 `rclcpp`/`mjModel` 的纯函数 [frame_math](../../src/mujoco_bridge/include/mujoco_bridge/frame_math.hpp)，把 `onReset` 里对 `mjData` 的操作剥成不依赖节点生命周期的自由函数 [state_ops](../../src/mujoco_bridge/include/mujoco_bridge/state_ops.hpp)，各配一个 gtest 目标；`MujocoApi` 的 12 个函数指针字段改成 `decltype(&mj_xxx)`，把"签名手抄错"从运行时 UB 变成编译错误；新增一个带 `freejoint` 的最小 MJCF fixture，专门用来抓 `jnt_qposadr`/`jnt_dofadr` 混用（Panda 上 `nq==nv` 测不出这类 bug）；顺手加了 RTF 常驻监控、`tf_rate_hz`/`joint_state_rate_hz` 不一致告警、两个手动验证脚本的 `use_sim_time`。过程中意外抓到一个真语法错误（[7.8](#78-排查记录free_bodyxml-注释里的----为什么没被-gtest-挡住)）。
+
+### 7.1 改动清单与验证结果
+
+**改动**：
+
+- [mujoco_dl.hpp](../../src/mujoco_bridge/include/mujoco_bridge/mujoco_dl.hpp)：`MujocoApi` 12 个字段全部改 `decltype(&mj_xxx)` / `decltype(&mju_xxx)`
+- [frame_math.hpp](../../src/mujoco_bridge/include/mujoco_bridge/frame_math.hpp) / [frame_math.cpp](../../src/mujoco_bridge/src/frame_math.cpp)：新增 `relativePose`，从 `publishTransforms` 剥出来的纯函数
+- [state_ops.hpp](../../src/mujoco_bridge/include/mujoco_bridge/state_ops.hpp) / [state_ops.cpp](../../src/mujoco_bridge/src/state_ops.cpp)：新增 `resetToKeyframe`，从 `onReset` 剥出来的自由函数
+- [mujoco_bridge_node.cpp](../../src/mujoco_bridge/src/mujoco_bridge_node.cpp)：`publishTransforms`/`onReset` 改为调用上面两个函数；`onTimer` 里加 `logRtfIfDue()`；`decimationFor` 两次调用后加 `tf_rate_hz != joint_state_rate_hz` 的 `WARN`
+- [test/fixtures/free_body.xml](../../src/mujoco_bridge/test/fixtures/free_body.xml)（新）：一个 free-joint box + 一个 hinge joint 的最小场景，`nq=8, nv=7`
+- [test/test_frame_math.cpp](../../src/mujoco_bridge/test/test_frame_math.cpp)、[test/test_state_ops.cpp](../../src/mujoco_bridge/test/test_state_ops.cpp)（新）
+- [CMakeLists.txt](../../src/mujoco_bridge/CMakeLists.txt)：两个 `ament_add_gtest` 目标；`state_ops` 测试用 `target_compile_definitions` 传 fixture 目录
+- [demo.launch.py](../../src/mujoco_bridge/launch/demo.launch.py)：bridge node 加 `parameters=[{'use_sim_time': True}]`
+- [sine_joint_test.py](../../scripts/sine_joint_test.py) / [gripper_test.py](../../scripts/gripper_test.py)：构造函数加 `parameter_overrides=[Parameter('use_sim_time', ...)]`
+
+**编译**：
+
+```
+Starting >>> robot_description
+Finished <<< robot_description [0.08s]
+Starting >>> mujoco_bridge
+Finished <<< mujoco_bridge [5.95s]
+
+Summary: 2 packages finished [6.14s]
+```
+
+**测试**（`colcon test --packages-select mujoco_bridge`，最终状态）：
+
+```
+test_frame_math.gtest.xml: 3 tests, 0 errors, 0 failures, 0 skipped
+test_state_ops.gtest.xml:  6 tests, 0 errors, 0 failures, 0 skipped
+xmllint.xunit.xml:         2 tests, 0 errors, 0 failures, 0 skipped
+```
+
+`ament_lint_auto` 剩余的 `cpplint`/`uncrustify` 失败是独立的历史风格债务（本仓库这是第一次跑 `colcon test`），不属于本 stage 范围，见 [6.2](#62-反向清单现在就该做的)。
+
+**"故意注入错误，测试必须变红"实测**（本周 §3 新加的验收标准）：
+
+| 注入的错误 | 位置 | 结果 |
+|---|---|---|
+| `mulQuat` 参数顺序颠倒 | `frame_math.cpp` | 最初两个用例**没有变红**——两个用例都恰好有一侧是单位四元数，四元数乘法和单位元可交换，颠倒参数结果不变。补了第三个双方都非平凡旋转的用例后，注入同样的错误：**1 个测试失败**，抓到了 |
+| 去掉 `resetToKeyframe` 里保持 `d->time` 的那两行 | `state_ops.cpp` | `ResetPreservesSimTime` **变红**（1 failure / 6 tests） |
+| 改回原状 | 两处都还原 | 全绿（3/0、6/0） |
+
+第一次尝试没抓到 bug 这件事本身就是发现——见 [7.7](#77-失败模式与验证手段) 和 [7.8](#78-排查记录free_bodyxml-注释里的----为什么没被-gtest-挡住)。
+
+**行为回归验证**（重构没有改变运行时行为）：环境卫生按 [STUDY_NOTES_GUIDE 3.1](../../STUDY_NOTES_GUIDE.md) 确认 `ps -eo pid,comm` 干净、`/clock` 无残留发布者，直接跑可执行文件（不经 `ros2 run`）：
+
+```
+[INFO] [mujoco_bridge]: Loaded .../panda.xml (nq=9, timestep=0.0020s)
+[INFO] [mujoco_bridge]: 9 actuated joints: joint1, joint2, ..., finger_joint1, finger_joint2
+[INFO] [mujoco_bridge]: TF: 3 static, 9 dynamic frames
+[INFO] [mujoco_bridge]: actuators: 7 arm joint(s) mapped, gripper actuator found
+[INFO] [mujoco_bridge]: /joint_states every 5 steps (100.0 Hz requested, 100.0 Hz actual)
+[INFO] [mujoco_bridge]: /tf every 5 steps (100.0 Hz requested, 100.0 Hz actual)
+[INFO] [mujoco_bridge]: RTF: 0.64
+[INFO] [mujoco_bridge]: RTF: 1.00   # 之后稳定在 1.00
+```
+
+`ros2 topic echo /tf --once`：`link0 -> link1`，`z: 0.333`，旋转四元数为单位——和重构前 [9.1](week1.md#91-改动清单与验证结果) 记录的值一致，`relativePose` 替换手写数学没有改变结果。
+
+`ros2 service call /mujoco_bridge/reset std_srvs/srv/Trigger`：`success=True, message='reset to keyframe `home`'`——`resetToKeyframe` 替换 `onReset` 里手写的三行也没有改变行为。
+
+`tf_rate_hz`/`joint_state_rate_hz` 一致性告警本次**没有**观察到触发（两者都是默认 100Hz），这条留在了 [6.2](#62-反向清单现在就该做的) 里——代码加了但从没被验证过真的会响。
+
+### 7.2 `decltype` 签名：把手抄错误从运行时 UB 变成编译错误
+
+Week1 的 `MujocoApi` 是手写函数指针签名：
+
+```cpp
+void (*mulQuat)(mjtNum * res, const mjtNum * quat1, const mjtNum * quat2);
+```
+
+如果手抄时哪个参数类型、个数、顺序抄错了，`resolve()` 里的 `reinterpret_cast<FuncPtr>(dlsym(...))` **无条件成功**——`dlsym` 只按符号名字查，不关心调用方声明的签名对不对，编译器也没有真实的 `mj_mulQuat` 声明可以拿来比对。错误的后果是运行时未定义行为（参数个数不匹配可能栈错位，类型不匹配可能读错内存），且很可能"恰好没崩"，长期潜伏。
+
+改成：
+
+```cpp
+decltype(&mju_mulQuat) mulQuat;
+```
+
+`decltype(&mju_mulQuat)` 直接从 `<mujoco/mujoco.h>` 里那个真实声明推导出函数指针类型，`resolve()` 赋值给 `api.mulQuat` 时走的是普通的指针类型检查——如果 `<mujoco/mujoco.h>` 升级后 `mju_mulQuat` 的签名变了，`resolve` 模板内部那个 `reinterpret_cast` 目标类型也会跟着变，之前"手抄的签名和头文件不一致"这类错误从"运行时可能崩可能不崩"变成"编译不过"。
+
+值得注意的一点：这只解决"签名和头文件不一致"，解决不了"头文件声明是对的，但我们对这个函数该怎么用的理解错了"——比如上一轮已经在 `frame_math` 测试里抓到的 `mulQuat` 参数顺序错误，`decltype` 对这类错误完全无能为力，因为两种参数顺序在 C++ 类型系统看来是**同一个类型**（`void(*)(mjtNum*, const mjtNum*, const mjtNum*)` 不区分"第二个参数该传 parent 还是 child"）。这类错误仍然只能靠 [7.7](#77-失败模式与验证手段) 里说的单测抓。
+
+### 7.3 剥离边界画在哪：为什么 frame_math/state_ops 剥，`buildJointIndex` 暂不剥
+
+`buildJointIndex`/`buildFrameIndex`/`buildActuatorIndex` 同样在遍历 `mjModel`，但这次没有剥它们。判据不是代码长度，是**本周计划书 [2.1.1](#211-这类系统该怎么测四层本周只取前两层) 定的一句话**："如果这个东西写错了，第一个发现它的是人眼看 RViz，那它就该有测试"——反过来说，如果写错了本来就会在启动日志里立刻炸出来（比如 `buildJointIndex` 打印的关节名列表一眼就能看出顺序不对/缺关节），剥离的边际收益低。
+
+`frame_math`/`state_ops` 剥的理由正好相反：`relativePose` 算错了，TF 显示出来的是"看起来合理但差几度"的姿态——不崩溃、不报警、只有拿基准值比对才能发现（[9.12](week1.md#912-失败模式与验证手段) 早就把这个记成"⚠️"）。`resetToKeyframe` 里漏了保持 sim time 那一步，症状是"reset 之后时间跳回 0"，这种事故会传播到整张 TF 树和所有下游节点的时间缓存，但**不会有任何一条日志或异常报出来**——这正是 [4.2 C类问题](../../STUDY_NOTES_GUIDE.md) 定义的"改了没人发现"。
+
+### 7.4 测试里怎么拿模型文件路径：三个选项
+
+写 `test_state_ops.cpp` 时要加载 `test/fixtures/free_body.xml`，路径怎么给测试二进制是个真实取舍：
+
+| 方案 | 做法 | 问题 |
+|---|---|---|
+| `ament_index_cpp::get_package_share_directory` | 运行时按包名查 share 目录 | 要求先 `install`；纯源码树、还没装的包查不到；而且这是给"生产代码"用的机制，测试引入这个依赖只是为了找一个开发时的固定文件，方向反了 |
+| 相对当前工作目录拼路径 | `"test/fixtures/free_body.xml"` | `colcon test` 从哪个 cwd 调用测试二进制不是测试作者能控制的约定，脆弱 |
+| **编译期宏**（本次用的） | `CMakeLists.txt` 里 `target_compile_definitions(test_state_ops PRIVATE TEST_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures")` | 路径写死在这次编译的构建配置里，换机器要求重新配置（但 `CMAKE_CURRENT_SOURCE_DIR` 在配置阶段求值，换机器时 CMake 会重新算，其实不算真代价） |
+
+选第三种的理由是它和 `install`、和 cwd 完全解耦——测试二进制自己知道源码在哪，不用猜运行时环境。
+
+### 7.5 `colcon test` / `gtest` 怎么用：三层机制
+
+> Q: 你还要讲讲测试方面的知识，比如 colcon test，gtest 等等要怎么使用，具体来说，怎么针对这个 Node 的 test 文件夹使用。
+
+分三层，各自独立，排查时经常要跳到最底层：
+
+**第一层，CMake 声明**：`ament_add_gtest(test_frame_math test/test_frame_math.cpp src/frame_math.cpp src/mujoco_dl.cpp)` 是对"编一个可执行文件 + 链接 gtest 的 `main` + 向 CTest 注册一条测试用例"的封装。**每个 `ament_add_gtest` 调用产出一个独立可执行文件**，不是所有 `TEST()` 挤进一个二进制——这次是两个文件对两个可执行文件。两个测试目标各自重新列出自己需要的 `.cpp`，不链接 `mujoco_bridge_node` 主可执行文件：测试不需要、也不该依赖 `main()` 和整个节点，只需要被测函数依赖的那几个源文件。这也是"剥成自由函数"在构建层面的必要性——如果 `resetToKeyframe` 还焊在 `MujocoBridgeNode` 类里，这里就没法只拉一个函数出来单独编译测试。
+
+**第二层，`colcon test` 驱动**：
+
+```bash
+colcon build --packages-select mujoco_bridge
+colcon test --packages-select mujoco_bridge
+colcon test-result --verbose
+```
+
+`colcon test` 对每个包在其 CMake 构建目录里跑 `ctest`——`ament_lint_auto` 注册的那些静态检查也是通过 `add_test()` 挂到 CTest 上的，对 CTest 来说 gtest 和 lint 检查是**同一种东西**：一条测试用例，一个通过/失败。这就是为什么这次 2 条 gtest 失败和 41 条 lint 失败会混进同一份汇总（[7.1](#71-改动清单与验证结果)）。结果写到 `build/mujoco_bridge/test_results/mujoco_bridge/*.xml`（JUnit 格式），`colcon test-result` 只是读这些 xml 汇总打印，不重新跑测试。`--ctest-args -R "test_frame_math|test_state_ops"` 把正则透传给底层 `ctest`，用来只跑匹配的测试、跳过已知的 lint 失败。
+
+**第三层，直接跑 gtest 二进制**（日常开发最快的路径）：`ament_add_gtest` 编出来的可执行文件本身是个标准 gtest 二进制，装在 `build/mujoco_bridge/` 下，可以完全绕开 colcon/ctest：
+
+```
+$ ./build/mujoco_bridge/test_frame_math --gtest_list_tests
+FrameMath.
+  IdentityParentReturnsChildPoseVerbatim
+  RotatedParentRotatesRelativePosition
+  NonCommutingRotationsCatchArgumentOrderSwap
+
+$ ./build/mujoco_bridge/test_state_ops --gtest_filter="*ResetPreservesSimTime*"
+[==========] Running 1 test from 1 test suite.
+[ RUN      ] StateOps.ResetPreservesSimTime
+[       OK ] StateOps.ResetPreservesSimTime (1 ms)
+[  PASSED  ] 1 test.
+```
+
+常用参数：`--gtest_list_tests`（列出不执行）、`--gtest_filter=Suite.Case`（支持 `*` 通配符，`-` 前缀排除）、`--gtest_repeat=N`（重复跑，抓偶发失败——这个包目前都是确定性 fixture，用不上，Stage G/H 涉及物理仿真后会有用）、`--gtest_break_on_failure`（失败即 abort，方便接 `gdb --args`——它是个普通可执行文件，不需要 ROS 那一层）。
+
+三层的关系：**`ament_add_gtest` 决定"编出什么"，`colcon test` 决定"批量跑哪些、汇总到哪"，直接调用二进制决定"这一次具体盯哪个用例"**。改代码→ 增量 `colcon build` → 直接跑 `./build/mujoco_bridge/test_state_ops --gtest_filter=...` 是最快的循环；提交前再跑一次 `colcon test` 做全量确认。
+
+### 7.6 RTF 是什么，为什么要常驻监控，为什么 `tf_rate_hz` 要和 `joint_state_rate_hz` 一致
+
+> Q: RTF是什么意思，为什么会需要常驻RTF监控，为什么joint state的发布频率要和tf的发布频率一致？
+
+**RTF（Real-Time Factor，实时率）** = 一段窗口内 **sim time 前进的量 / wall time 经过的量**。`logRtfIfDue()`（[mujoco_bridge_node.cpp](../../src/mujoco_bridge/src/mujoco_bridge_node.cpp)）按 1 秒窗口算：
+
+```cpp
+RTF = (data_->time 这次 - data_->time 上次) / (墙钟这次 - 墙钟上次)
+```
+
+`RTF ≈ 1` 是仿真跟真实时间同步前进；`RTF < 1` 是仿真变慢（"慢放"）；`RTF > 1` 是变快。这次实测日志：
+
+```
+RTF: 0.64   ← 刚启动那一秒，进程/DDS 初始化开销拉慢了这一窗口
+RTF: 1.00   ← 之后稳定
+```
+
+**为什么需要常驻监控**：`onTimer()` 是墙钟定时器（[week1 8.2](week1.md#82-sim-time-vs-wall-time以及-use_sim_time)），每 `timestep_s`（2ms）触发一次 `mj_step`，隐含假设是"`mj_step` 本身的计算耗时远小于 2ms"。这个假设一旦破了——**什么都不会发生**：不报错、不崩溃、不告警。ROS2 的墙钟定时器只是"尽量按周期触发"，跟不上就在下一个机会点再触发，`data_->time` 前进的速度悄悄变慢，`/clock`/`/joint_states` 照常在发，只是它们描述的仿真世界慢了，没有任何一条日志说明这件事。这正是 [C 类问题](../../STUDY_NOTES_GUIDE.md)（"如果这里变慢了，我怎么知道？"）：本周开始才真的会咬人——Stage I 的 FSM 到位判据按 sim time 定超时阈值，RTF 掉下去时一个正常推进的任务可能被误判超时；Stage J 的 20 次连跑如果某几次 RTF 意外下降，episode 耗时这个指标就会失真，分不清是任务变难还是机器打嗝。RTF 监控把这个本来完全不可观测的失效模式变成一条每秒能看到的数字。
+
+**为什么 `tf_rate_hz` 要和 `joint_state_rate_hz` 一致**：不是硬性物理约束，是**避免下游拿到不同步快照**的工程约定。两者都从同一条物理步进流水线按整数步数抽取（`decimationFor`），如果 decimation 不同（比如 5 步 vs 10 步），`/joint_states` 和 `/tf` 描述的**不是同一批物理步**。具体到本周场景：Stage H 的抓取成功判据要同时看夹爪实测宽度（来自 `/joint_states`）和 box 相对 `hand_tcp` 的位置（来自 `/tf`）——如果两个话题发布节奏不对齐，"取最新一帧拼起来判断"拼出来的两个数字可能来自不同的仿真时刻。大多数时候差几十毫秒看不出来，但在快速运动（抓取瞬间）时会让联合判据出现说不清楚的抖动，**且没有任何报错**，只表现成"这个 stage 的验收有时候莫名其妙不过"。代码本身不阻止把两个频率配成不同值，配成不同值就是把"同一时刻的联合判断"从自动成立变成需要额外时间对齐才能保证——而当前所有下游代码都没做这个对齐，所以这条告警才存在。目前两者都还是默认 100Hz，这条告警从没被真实触发验证过（见 [6.2](#62-反向清单现在就该做的)）。
+
+### 7.7 失败模式与验证手段
+
+| 失败模式 | 现象 | 怎么发现 / 怎么防住 |
+|---|---|---|
+| `MujocoApi` 签名手抄错 | 以前是运行时 UB，可能崩可能不崩 | 改 `decltype(&mj_xxx)`，签名不一致直接编译失败（[7.2](#72-decltype-签名把手抄错误从运行时-ub-变成编译错误)） |
+| `mulQuat`/`negQuat`/`rotVecQuat` 参数顺序颠倒 | TF 姿态"看起来合理但差几度"，不崩溃不报警 | `test_frame_math`；**但两个"一侧是单位四元数"的用例测不出参数顺序颠倒**（四元数乘法和单位元可交换），必须有一个双方都非平凡旋转的用例（[7.1](#71-改动清单与验证结果) 的注入实验当场证实） |
+| `jnt_qposadr`/`jnt_dofadr` 混用 | Panda 上 `nq==nv`，两套地址数值相同，完全测不出来 | `free_body.xml` fixture 故意做出 `nq=8, nv=7`，让 hinge joint 的两个地址不同（`test_state_ops.HingeJointQposAdrAndDofAdrDiffer`） |
+| `resetToKeyframe` 漏保持 sim time | reset 后时间跳回 0，传播到整张 TF 树和所有下游节点的时间缓存，**没有任何日志或异常** | `test_state_ops.ResetPreservesSimTime`；注入去掉那两行的错误，实测变红 |
+| XML 注释里出现连续 `--` | 严格解析器（`xmllint`）报错，但 `mj_loadXML`（MuJoCo bundle 的宽松 tinyxml2）照常加载，gtest 全绿 | 见 [7.8](#78-排查记录free_bodyxml-注释里的----为什么没被-gtest-挡住)。**"能被某个解析器接受"不等于"合规"**，两种解析器对同一份文件的判断可以完全相反 |
+| RTF 掉到 <1 | 系统只是"慢放"，不报任何错 | 常驻 RTF 监控（[7.1](#71-改动清单与验证结果) 日志里的 `RTF: 0.64 → 1.00`），继承自 week1 [8.6](week1.md#86-失败模式与验证手段) 记的缺口，本周补上 |
+| `tf_rate_hz` != `joint_state_rate_hz` | `/tf` 和 `/joint_states` 样本对不齐，下游拿不到"同一时刻"的数据 | 已加告警，但**本次两者都是默认值，从没触发过**——见 [6.2](#62-反向清单现在就该做的)，这是"写了但没验证过"的已知缺口 |
+
+### 7.8 排查记录：`free_body.xml` 注释里的 `--` 为什么没被 gtest 挡住
+
+**现象**：上一轮 `colcon test` 有 41 条失败，全部当作"`ament_lint_auto` 风格债务、本周不修"归进了反向清单。用户追问："当前的 `free_body.xml` 是存在语法错误的，`--` 符号会被识别成特殊用途字符，所以你的测试为什么还能通过？"
+
+**线索**：先用严格校验器直接测：
+
+```
+$ xmllint --noout test/fixtures/free_body.xml
+free_body.xml:4: parser error : Double hyphen within comment: <!-- ... differ -- a jnt_qposadr ...
+exit code: 1
+```
+
+确认这确实是一个真语法错误——XML 规范规定注释内部不能出现连续 `--`（唯一允许出现的位置是注释结尾的 `-->`）。再去翻上一轮 `ament_lint_auto` 跑出的 `xmllint.xunit.xml`，`test/fixtures/free_body.xml` 那条失败信息第一行就是这句 parser error——**这个 bug 早就被抓到过，只是被我整批归进"风格问题"时没有单独打开看内容**。
+
+**根因**：`test_state_ops` 走的是 `mj_loadXML`，也就是 MuJoCo bundle 的那份 tinyxml2（[mujoco_dl.hpp](../../src/mujoco_bridge/include/mujoco_bridge/mujoco_dl.hpp) 开头那段注释讲过它为什么要 dlopen 隔离）。这份解析器处理注释的实现只找"下一个 `-->`"作为结束标记，**不检查内容里有没有出现 `--`**——一个宽松但不严格合规的实现。`xmllint` 是严格校验器，会执行这条规则。同一份文件，两个解析器给出相反的判断，因为它们检查的东西本来就不一样。
+
+**修复**：把注释里的 `differ -- a jnt_qposadr` 改成 `differ: a jnt_qposadr`，`xmllint --noout` 退出码变 0，重新跑 `colcon test`，`xmllint.xunit.xml` 从 1 failure 变 0 failure，两个 gtest 目标不受影响（本来就没依赖这条规则）。
+
+**留下的经验**：
+
+1. **"能被某个解析器接受"不等于"合规"**——宽松的解析器不会替你验证规范，它只是恰好没在检查这条规则。这类问题两边跑出的结果会互相矛盾，矛盾本身就是排查的起点。
+2. **批量失败列表不能整批归为同一类问题**。上一轮把 41 条失败一次性打包成"风格债务、本周不修"，其中夹带了一条真语法错误没被单独看到。以后遇到成批失败，至少要扫一遍每条失败信息的第一行，不能只看"哪个 checker 报的"就归类。
+3. 这条 bug 是**用户直接读代码发现的**，不是靠工具或者我主动检查出来的——再一次印证 [4.2](../../STUDY_NOTES_GUIDE.md) 里"C类问题（如果这里写错了我怎么知道）"的价值：这次的答案是"要看你信的是哪个解析器"。

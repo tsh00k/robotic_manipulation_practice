@@ -26,6 +26,30 @@ distrobox enter robotics-dev -- bash -lc '<command>'
 distrobox enter robotics-dev
 ```
 
+**坑：Claude 的沙盒工具执行环境可能没有 `docker`/`podman` 客户端，导致 `distrobox enter` 报 "we need a container manager"。** 现象：`/var/run/docker.sock` 存在（通常是软链到 `/run/host/run/docker.sock`，说明宿主机 docker 确实挂进来了），但 `docker`/`podman` 二进制不在 PATH 上，`distrobox` 内部找不到客户端就直接报错——不是权限问题，是缺 CLI。
+
+**解法**：宿主机的 docker 二进制通常原样挂在 `/run/host/usr/bin/docker`，可以直接调用（`/run/host/usr/bin/docker --version` 验证）。把这个目录加进 PATH 前面再调 `distrobox`：
+
+```bash
+export PATH="/run/host/usr/bin:$PATH"
+distrobox enter robotics-dev -- bash -ic '...'
+```
+
+**副作用，务必注意**：这样加的 PATH 会被 `distrobox`/`docker exec` 透传进容器内部 shell，导致容器里 `/run/host/usr/bin` 排到了容器自己 `/usr/bin` 前面。这会让 pyenv 的 "system" python3 判定失真——pyenv shim 找的是 PATH 上（除 shims 目录外）第一个 `python3`，现在变成了**宿主机的** python3（没有 `catkin_pkg`），而不是容器里装了 `catkin_pkg` 的那个，即使 `pyenv version` 依然正确显示 `system`。症状和下面"变体一"完全一样（`ModuleNotFoundError: No module named 'catkin_pkg'`），但根因是这条 PATH 污染，不是 `.python-version` 失效。
+
+**对策**：进容器后，实际跑 ROS2/colcon 命令前，先把 `/run/host/*` 开头的 PATH 项过滤掉：
+
+```bash
+distrobox enter robotics-dev -- bash -ic '
+  export PATH=$(echo "$PATH" | tr ":" "\n" | grep -v "^/run/host" | paste -sd: -)
+  source /opt/ros/humble/setup.bash
+  cd <repo_root>
+  colcon build ...
+'
+```
+
+这条只在"执行 `distrobox enter` 本身就需要先修 PATH 才能找到容器管理器"的沙盒环境里才会出现；在能直接访问 `docker`/`podman` 的正常环境里不会触发，可以跳过两条 PATH 处理。
+
 容器内已确认可用：
 - `colcon`、`/opt/ros/humble`（需要 `source /opt/ros/humble/setup.bash` 才能用 `ros2` 命令，`.bashrc` 里已配置好，交互式 shell 自动生效）
 - **MuJoCo 3.3.7 的 C/C++ 库**安装在 `/opt/mujoco-3.3.7`（非包管理器安装，是本机手动装的）。CMake 的 `find_package(mujoco REQUIRED)` 默认就能找到它（CMake 的 `CMAKE_SYSTEM_PREFIX_PATH` 本身包含 `/opt`），不需要额外设置 `CMAKE_PREFIX_PATH`。运行 `simulate`/`compile` 等 MuJoCo 自带工具需要 `PATH`/`LD_LIBRARY_PATH`，已在 `~/.bashrc` 追加：

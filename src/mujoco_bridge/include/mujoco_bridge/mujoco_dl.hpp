@@ -27,27 +27,29 @@
 namespace mujoco_bridge
 {
 
+// Fields are decltype'd off the real mj_*/mju_* declarations rather than hand-typed,
+// so a signature that no longer matches mujoco.h is a compile error here instead of
+// undefined behavior at the dlsym call site in mujoco_dl.cpp.
 struct MujocoApi
 {
-  mjModel * (*loadXML)(const char * filename, const mjVFS * vfs, char * error, int error_sz);
-  mjData * (*makeData)(const mjModel * m);
-  void (*step)(const mjModel * m, mjData * d);
-  void (*deleteData)(mjData * d);
-  void (*deleteModel)(mjModel * m);
-  int (*name2id)(const mjModel * m, int type, const char * name);
-  const char * (*id2name)(const mjModel * m, int type, int id);
-  void (*resetDataKeyframe)(const mjModel * m, mjData * d, int key);
+  decltype(&mj_loadXML) loadXML;
+  decltype(&mj_makeData) makeData;
+  decltype(&mj_step) step;
+  decltype(&mj_deleteData) deleteData;
+  decltype(&mj_deleteModel) deleteModel;
+  decltype(&mj_name2id) name2id;
+  decltype(&mj_id2name) id2name;
+  decltype(&mj_resetDataKeyframe) resetDataKeyframe;
   // Recomputes every derived quantity (xpos/xquat, jacobians, contacts, qfrc_*) from
   // the current qpos/qvel *without* advancing time. Needed after a reset: the reset
   // only rewrites the state vector, so anything we publish from mjData before the
   // next mj_step would still be the pre-reset derived values.
-  void (*forward)(const mjModel * m, mjData * d);
+  decltype(&mj_forward) forward;
   // Quaternion helpers, used to turn absolute body poses (xpos/xquat, relative to
-  // world) into the parent-relative transforms TF wants. Array parameters decay to
-  // pointers, so these signatures are ABI-identical to the mju_* declarations.
-  void (*negQuat)(mjtNum * res, const mjtNum * quat);
-  void (*mulQuat)(mjtNum * res, const mjtNum * quat1, const mjtNum * quat2);
-  void (*rotVecQuat)(mjtNum * res, const mjtNum * vec, const mjtNum * quat);
+  // world) into the parent-relative transforms TF wants.
+  decltype(&mju_negQuat) negQuat;
+  decltype(&mju_mulQuat) mulQuat;
+  decltype(&mju_rotVecQuat) rotVecQuat;
 };
 
 // Loads libmujoco.so in isolated (RTLD_LOCAL | RTLD_DEEPBIND) mode and resolves all

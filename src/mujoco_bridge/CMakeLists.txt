@@ -21,6 +21,8 @@ find_package(mujoco REQUIRED)
 add_executable(mujoco_bridge_node
   src/mujoco_bridge_node.cpp
   src/mujoco_dl.cpp
+  src/frame_math.cpp
+  src/state_ops.cpp
 )
 target_include_directories(mujoco_bridge_node PRIVATE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -60,6 +62,28 @@ install(DIRECTORY launch rviz
 )
 
 if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+
+  ament_add_gtest(test_frame_math
+    test/test_frame_math.cpp
+    src/frame_math.cpp
+    src/mujoco_dl.cpp
+  )
+  target_include_directories(test_frame_math PRIVATE include ${MUJOCO_INCLUDE_DIRS})
+  target_link_libraries(test_frame_math dl)
+
+  ament_add_gtest(test_state_ops
+    test/test_state_ops.cpp
+    src/state_ops.cpp
+    src/mujoco_dl.cpp
+  )
+  target_include_directories(test_state_ops PRIVATE include ${MUJOCO_INCLUDE_DIRS})
+  target_link_libraries(test_state_ops dl)
+  # Compile-time path rather than ament_index or a cwd-relative path: colcon test
+  # may invoke the test binary from an arbitrary working directory.
+  target_compile_definitions(test_state_ops PRIVATE
+    TEST_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures")
+
   find_package(ament_lint_auto REQUIRED)
   ament_lint_auto_find_test_dependencies()
 endif()
