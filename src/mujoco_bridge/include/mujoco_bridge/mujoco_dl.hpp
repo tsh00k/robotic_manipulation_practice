@@ -37,6 +37,11 @@ struct MujocoApi
   int (*name2id)(const mjModel * m, int type, const char * name);
   const char * (*id2name)(const mjModel * m, int type, int id);
   void (*resetDataKeyframe)(const mjModel * m, mjData * d, int key);
+  // Recomputes every derived quantity (xpos/xquat, jacobians, contacts, qfrc_*) from
+  // the current qpos/qvel *without* advancing time. Needed after a reset: the reset
+  // only rewrites the state vector, so anything we publish from mjData before the
+  // next mj_step would still be the pre-reset derived values.
+  void (*forward)(const mjModel * m, mjData * d);
   // Quaternion helpers, used to turn absolute body poses (xpos/xquat, relative to
   // world) into the parent-relative transforms TF wants. Array parameters decay to
   // pointers, so these signatures are ABI-identical to the mju_* declarations.

@@ -4,15 +4,20 @@
 #include <rclcpp/rclcpp.hpp>
 #include <rosgraph_msgs/msg/clock.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
+#include <std_srvs/srv/trigger.hpp>
 #include <tf2_ros/static_transform_broadcaster.h>
 #include <tf2_ros/transform_broadcaster.h>
+#include <trajectory_msgs/msg/joint_trajectory.hpp>
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "mujoco_bridge/mujoco_dl.hpp"
@@ -32,6 +37,10 @@ namespace mujoco_bridge
 // and see docs/architecture.md section 1. Note the -45 deg wrist rotation is NOT part
 // of this transform -- it lives in hand_joint (link8 -> hand), which the MJCF folds
 // into the `hand` body's own quat.
+// The MJCF's only keyframe. Looked up by name at startup rather than hardcoded as
+// index 0, so adding a second keyframe upstream cannot silently repoint the reset.
+constexpr const char * kResetKeyframeName = "home";
+
 constexpr const char * kHandBodyName = "hand";
 constexpr const char * kTcpFrameName = "hand_tcp";
 constexpr double kHandToTcpZ = 0.1034;
@@ -63,6 +72,7 @@ public:
 
     buildJointIndex();
     buildFrameIndex();
+    buildActuatorIndex();
 
     // Physics runs at 1/timestep; the state publishers run slower. Decimating by an
     // integer number of steps keeps every published sample aligned with an exact
@@ -93,6 +103,30 @@ public:
       tf.header.stamp = simTime();
     }
     static_tf_broadcaster_->sendTransform(static_transforms_);
+
+    // Resolved once here, not inside the callback: a missing keyframe is a property
+    // of the model, so it should be visible at startup rather than on the first
+    // reset call. The service is still created (and reports the failure) so callers
+    // get an explicit "no such keyframe" rather than a missing service.
+    reset_keyframe_id_ = api_.name2id(model_, mjOBJ_KEY, kResetKeyframeName);
+    if (reset_keyframe_id_ < 0) {
+      RCLCPP_WARN(
+        get_logger(), "model has no keyframe `%s`; ~/reset will fail", kResetKeyframeName);
+    }
+    // Private name (~/reset -> /mujoco_bridge/reset): unlike /joint_states and /clock
+    // this is not a system-wide singleton -- a second sim instance in the same graph
+    // must be resettable independently.
+    reset_service_ = create_service<std_srvs::srv::Trigger>(
+      "~/reset",
+      std::bind(
+        &MujocoBridgeNode::onReset, this, std::placeholders::_1, std::placeholders::_2));
+
+    // Private name, same reasoning as ~/reset (10.4): this is a capability of *this*
+    // sim instance, not a system-wide singleton, and the name must not collide with
+    // whatever a real robot driver calls its command topic.
+    joint_command_sub_ = create_subscription<trajectory_msgs::msg::JointTrajectory>(
+      "~/joint_command", rclcpp::QoS(10),
+      std::bind(&MujocoBridgeNode::onJointCommand, this, std::placeholders::_1));
 
     timer_ = create_wall_timer(
       std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -227,6 +261,72 @@ private:
       static_transforms_.size(), dynamic_frames_.size());
   }
 
+  // Maps joint name -> actuator id, so ~/joint_command can look up "which ctrl
+  // index does joint4 drive" instead of assuming ctrl[i] and qpos[i] line up. They
+  // do for this model's 7 arm joints (actuatorN drives jointN), but mjData::ctrl is
+  // indexed by actuator id, not joint id -- nu=8, not nq=9, because the two fingers
+  // share a single tendon-driven actuator. Deriving this from actuator_trntype
+  // instead of hardcoding "actuator1..7" keeps the same "read it from the model"
+  // discipline as buildJointIndex/buildFrameIndex, and doesn't break if the arm
+  // actuators are ever reordered or renamed upstream.
+  //
+  // The gripper is handled separately below because it has no per-joint actuator at
+  // all: actuator8 drives the "split" tendon, which couples finger_joint1 and
+  // finger_joint2 with a fixed 0.5/0.5 split (see docs/architecture.md and
+  // week1.md 4.3.4). There is exactly one control input for both fingers.
+  void buildActuatorIndex()
+  {
+    for (int i = 0; i < model_->nu; ++i) {
+      if (model_->actuator_trntype[i] == mjTRN_JOINT) {
+        const int joint_id = model_->actuator_trnid[2 * i];
+        const char * joint_name = api_.id2name(model_, mjOBJ_JOINT, joint_id);
+        if (joint_name) {
+          actuator_by_joint_[joint_name] = i;
+        }
+        continue;
+      }
+      if (model_->actuator_trntype[i] != mjTRN_TENDON) {
+        continue;
+      }
+
+      // A tendon-driven actuator. Walk the tendon's wrap list to find which joints
+      // it couples, rather than assuming this is "the gripper" by name -- the only
+      // fact we rely on is the transmission type.
+      const int tendon_id = model_->actuator_trnid[2 * i];
+      const int wrap_begin = model_->tendon_adr[tendon_id];
+      const int wrap_end = wrap_begin + model_->tendon_num[tendon_id];
+      int representative_joint_id = -1;
+      for (int w = wrap_begin; w < wrap_end; ++w) {
+        if (model_->wrap_type[w] != mjWRAP_JOINT) {
+          continue;
+        }
+        const int joint_id = model_->wrap_objid[w];
+        const char * joint_name = api_.id2name(model_, mjOBJ_JOINT, joint_id);
+        if (joint_name) {
+          gripper_joint_names_.insert(joint_name);
+          representative_joint_id = joint_id;
+        }
+      }
+      if (representative_joint_id < 0) {
+        continue;
+      }
+
+      // ctrlrange for this actuator has been remapped by the upstream MJCF (here
+      // 0..255) to whatever the tendon's *own* actuators used before the remap --
+      // it does not have to match the joint's own range (0..0.04 m). Rather than
+      // hardcode that 255/0.04 ratio, read both ranges from the model and take
+      // their ratio, so a command expressed in the joint's native units (finger
+      // opening in meters) converts to the actuator's ctrl units.
+      gripper_actuator_id_ = i;
+      gripper_ctrl_scale_ =
+        model_->actuator_ctrlrange[2 * i + 1] / model_->jnt_range[2 * representative_joint_id + 1];
+    }
+
+    RCLCPP_INFO(
+      get_logger(), "actuators: %zu arm joint(s) mapped, gripper actuator %s",
+      actuator_by_joint_.size(), gripper_actuator_id_ >= 0 ? "found" : "NOT found");
+  }
+
   // The order hazard is on the *input* side: MuJoCo packs quaternions into a raw
   // mjtNum[4] as (w, x, y, z), so quat[0] is w, not x. geometry_msgs has named
   // fields, so assigning them by name (rather than memcpy'ing four doubles into the
@@ -271,6 +371,137 @@ private:
     // steps*timestep lands a hair below the exact value and truncation would turn
     // 4.858s into 4.857999999s.
     return rclcpp::Time(std::llround(data_->time * 1e9), RCL_ROS_TIME);
+  }
+
+  // Snaps the simulation back to the `home` keyframe. Trigger (no request fields) is
+  // the right service type here precisely because there is nothing to parameterise:
+  // if a caller could pass a keyframe name or an arbitrary qpos, this would need a
+  // custom .srv -- and that is the point at which "reset" stops being one operation.
+  //
+  // Thread safety comes for free from the default single-threaded executor: this
+  // callback and onTimer() are both in the node's default (mutually exclusive)
+  // callback group, so a reset can never land halfway through an mj_step. Moving
+  // either one to a separate callback group, or switching to a MultiThreadedExecutor,
+  // would make this a data race on mjData with no compiler or runtime complaint.
+  void onReset(
+    const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
+    std::shared_ptr<std_srvs::srv::Trigger::Response> response)
+  {
+    if (reset_keyframe_id_ < 0) {
+      response->success = false;
+      response->message =
+        std::string("model has no keyframe `") + kResetKeyframeName + "`";
+      RCLCPP_ERROR(get_logger(), "%s", response->message.c_str());
+      return;
+    }
+
+    // mj_resetDataKeyframe restores qpos, qvel, act, ctrl and mocap from the keyframe
+    // -- ctrl included. That matters: the `home` key carries its own
+    // ctrl="0 0 0 -1.57079 0 1.57079 -0.7853 255", so the position servos get targets
+    // consistent with the new qpos. Resetting qpos alone would leave the old targets
+    // in place and the servos would immediately drag the arm back out of home pose.
+    // It also rewinds mjData::time to the keyframe's time (0), which we undo below.
+    const mjtNum time_before = data_->time;
+    api_.resetDataKeyframe(model_, data_, reset_keyframe_id_);
+
+    // Keep sim time monotonic. /clock is a clock: rewinding it to 0 is a backwards
+    // time jump for every node in the graph -- tf2 buffers get cleared, action
+    // servers and message_filters see timestamps from "the future", and any node
+    // that cached a stamp is now wrong. Resetting *state* is a simulation concept;
+    // resetting *time* is a much bigger hammer and is not what callers ask for here.
+    data_->time = time_before;
+
+    // Without this, everything derived from qpos is stale until the next mj_step:
+    // xpos/xquat still hold the pre-reset pose, so a /tf or /joint_states publish
+    // landing between the reset and the next step would report the old configuration
+    // with a new timestamp. qfrc_actuator is the same story for `effort`.
+    api_.forward(model_, data_);
+
+    response->success = true;
+    response->message = std::string("reset to keyframe `") + kResetKeyframeName + "`";
+    RCLCPP_INFO(get_logger(), "%s (sim time preserved at %.3fs)", response->message.c_str(),
+      data_->time);
+  }
+
+  // Writes the first trajectory point's positions into mjData::ctrl. Only the first
+  // point is used -- there is no trajectory *execution* here (no interpolation
+  // between points, no timing), just "set today's target and let the position
+  // servos in the MJCF (gainprm/biasprm, see 4.3.4) do the rest". A real trajectory
+  // follower belongs upstream of this bridge, e.g. as a ros2_control controller or
+  // a node that resamples a trajectory into a fast stream of single-point commands.
+  //
+  // Same callback-group reasoning as onReset (10.8.3): this runs on the default
+  // single-threaded executor alongside onTimer(), so a command can never be applied
+  // to ctrl mid-mj_step.
+  void onJointCommand(const trajectory_msgs::msg::JointTrajectory::SharedPtr msg)
+  {
+    if (msg->points.empty()) {
+      RCLCPP_WARN(get_logger(), "~/joint_command: trajectory has no points, ignoring");
+      return;
+    }
+    if (msg->points.size() > 1) {
+      // Not a bug -- this node was never a trajectory follower -- but a message with
+      // N points and only the first one taking effect is exactly the kind of thing
+      // that should be loud once rather than silent forever, since it produces
+      // correct-looking behavior (something moves) for the wrong reason.
+      RCLCPP_WARN_ONCE(
+        get_logger(),
+        "~/joint_command: message has %zu points; only points[0] is applied "
+        "(no interpolation, no timing -- see Stage E notes)",
+        msg->points.size());
+    }
+    const auto & point = msg->points.front();
+    if (point.positions.size() != msg->joint_names.size()) {
+      RCLCPP_WARN(
+        get_logger(), "~/joint_command: %zu joint_names but %zu positions, ignoring",
+        msg->joint_names.size(), point.positions.size());
+      return;
+    }
+
+    // The two fingers share one control DOF (the "split" tendon), so a command that
+    // names finger_joint1 and/or finger_joint2 is buffered here and applied once,
+    // instead of writing ctrl[gripper_actuator_id_] twice from two different targets.
+    double gripper_target = std::numeric_limits<double>::quiet_NaN();
+
+    for (size_t i = 0; i < msg->joint_names.size(); ++i) {
+      const std::string & name = msg->joint_names[i];
+      const double target = point.positions[i];
+
+      if (gripper_joint_names_.count(name) > 0) {
+        if (!std::isnan(gripper_target) && gripper_target != target) {
+          RCLCPP_WARN(
+            get_logger(),
+            "~/joint_command: finger joints commanded to different positions "
+            "(%.4f vs %.4f) but they share one actuator; using %.4f",
+            gripper_target, target, target);
+        }
+        gripper_target = target;
+        continue;
+      }
+
+      const auto it = actuator_by_joint_.find(name);
+      if (it == actuator_by_joint_.end()) {
+        RCLCPP_WARN(get_logger(), "~/joint_command: unknown joint `%s`, ignoring", name.c_str());
+        continue;
+      }
+      // it->second is an actuator id, not a joint id -- ctrl is indexed by the
+      // former. Using the joint's own qpos_adr/dof_adr here would be the Stage E
+      // landmine from 4.3.4: it happens to work for the 7 arm joints because
+      // actuatorN drives jointN, and would silently misfire for anything else.
+      data_->ctrl[it->second] = target;
+    }
+
+    if (!std::isnan(gripper_target)) {
+      if (gripper_actuator_id_ < 0) {
+        RCLCPP_WARN(get_logger(), "~/joint_command: no gripper actuator in this model, ignoring");
+      } else {
+        // Convert from the finger joint's own units (meters of opening) to the
+        // actuator's remapped ctrl range, using the ratio derived in
+        // buildActuatorIndex() instead of the hardcoded 255/0.04 from the MJCF
+        // comment.
+        data_->ctrl[gripper_actuator_id_] = gripper_target * gripper_ctrl_scale_;
+      }
+    }
   }
 
   void onTimer()
@@ -358,6 +589,13 @@ private:
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_state_pub_;
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
   std::unique_ptr<tf2_ros::StaticTransformBroadcaster> static_tf_broadcaster_;
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr reset_service_;
+  int reset_keyframe_id_ = -1;
+  rclcpp::Subscription<trajectory_msgs::msg::JointTrajectory>::SharedPtr joint_command_sub_;
+  std::unordered_map<std::string, int> actuator_by_joint_;  // joint name -> actuator id
+  std::unordered_set<std::string> gripper_joint_names_;     // finger_joint1, finger_joint2
+  int gripper_actuator_id_ = -1;
+  double gripper_ctrl_scale_ = 1.0;  // ctrl units per meter of finger opening
   std::vector<JointEntry> joints_;
   sensor_msgs::msg::JointState joint_state_msg_;
   std::vector<geometry_msgs::msg::TransformStamped> static_transforms_;
