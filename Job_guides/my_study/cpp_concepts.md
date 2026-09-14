@@ -16,6 +16,7 @@
 | **更安全的默认写法** | `#cpp_更安全的默认写法` | `{}` 初始化、`nullptr`、范围 `for`、`const`、`enum class` | 将常见错误变成编译期错误，或让代码更难写错 |
 | **零成本抽象** | `#cpp_零成本抽象` | 模板、内联、移动语义、RAII、ranges | 写出高层、可读的代码，同时接近手写 C 的性能 |
 | **组合式编程** | `#cpp_组合式编程` | lambda、算法、ranges、结构化绑定 | 从"手写循环和状态控制"转向"描述数据处理意图" |
+| **并发与内存模型**（未直接对应上表） | `#cpp_并发与内存模型` | `std::atomic`、`std::mutex`、`lock_guard`/`scoped_lock`、memory order | 让"这块内存会被多个线程访问"进入类型系统，而不是靠祈祷 |
 | **语言组织机制**（未直接对应上表，但常配合其他标签出现） | `#cpp_语言组织机制` | 命名空间、内部链接、编译单元、类/继承/访问控制 | 控制符号可见性、避免命名冲突、组织代码结构 |
 | **设计模式**（未直接对应上表） | `#cpp_设计模式` | 单例（Meyer's Singleton）、RAII 包装、工厂等 | 用语言机制（如 static 局部变量的初始化保证）实现经典设计模式 |
 
@@ -35,10 +36,12 @@
 | 标签 | 涉及的问答 |
 |---|---|
 | `#cpp_语言组织机制` | [namespace 与匿名 namespace](#namespace-与匿名-namespace)、[class 基础（以 MujocoBridgeNode 为例）](#class-基础以-mujocobridgenode-为例)、[头文件声明 vs .cpp 定义、无命名空间的 C 类型](#头文件声明-vs-cpp-定义无命名空间的-c-类型)、[单例初始化用匿名 lambda 的原因](#单例初始化用匿名-lambda-的原因)、[resolve 模板与 dlopen/dlsym](#resolve-模板与-dlopendlsym) |
-| `#cpp_更安全的默认写法` | [namespace 与匿名 namespace](#namespace-与匿名-namespace)、[class 基础（以 MujocoBridgeNode 为例）](#class-基础以-mujocobridgenode-为例) |
+| `#cpp_更安全的默认写法` | [namespace 与匿名 namespace](#namespace-与匿名-namespace)、[class 基础（以 MujocoBridgeNode 为例）](#class-基础以-mujocobridgenode-为例)、[并发：data race 是 UB，以及为什么不要提前加锁](#并发data-race-是-ub以及为什么不要提前加锁) |
 | `#cpp_所有权明确化` | [class 基础（以 MujocoBridgeNode 为例）](#class-基础以-mujocobridgenode-为例)、[头文件声明 vs .cpp 定义、无命名空间的 C 类型](#头文件声明-vs-cpp-定义无命名空间的-c-类型) |
 | `#cpp_设计模式` | [单例初始化用匿名 lambda 的原因](#单例初始化用匿名-lambda-的原因) |
 | `#cpp_泛型与抽象增强` | [resolve 模板与 dlopen/dlsym](#resolve-模板与-dlopendlsym) |
+| `#cpp_并发与内存模型` | [并发：data race 是 UB，以及为什么不要提前加锁](#并发data-race-是-ub以及为什么不要提前加锁) |
+| `#cpp_资源自动管理` | [并发：data race 是 UB，以及为什么不要提前加锁](#并发data-race-是-ub以及为什么不要提前加锁) |
 
 ## 目录
 
@@ -47,6 +50,7 @@
 - [头文件声明 vs .cpp 定义、无命名空间的 C 类型](#头文件声明-vs-cpp-定义无命名空间的-c-类型)
 - [单例初始化用匿名 lambda 的原因](#单例初始化用匿名-lambda-的原因)
 - [resolve 模板与 dlopen/dlsym](#resolve-模板与-dlopendlsym)
+- [并发：data race 是 UB，以及为什么不要提前加锁](#并发data-race-是-ub以及为什么不要提前加锁)
 - [待补充问答模板](#待补充问答模板)
 
 ---
@@ -375,6 +379,94 @@ void resolve(void * handle, const char * symbol, FuncPtr & out)
 跟正常链接对比：正常链接下，"查符号表、拿地址"是**链接器在编译期**做的，一次性焊死调用点；这里是把同一个动作挪到了**运行时**，用 `dlopen`+`dlsym` 手动做一遍——查到的还是**同一个符号、同一份机器码**，只是查的时机和方式变了，多了一步"裸地址转带类型函数指针"。所以本质上确实就是"把共享库里的同名函数接过来"，只是这次是运行时手动接线，而不是编译期焊死。
 
 **失败路径**：符号名字打错、或库升级后符号被删/改名，`dlsym` 返回 `nullptr`，`resolve` 立刻 `throw`。因为这发生在 `static MujocoApi api = []() { ... }();` 的 lambda 初始化表达式内部——按 C++ 标准，静态局部变量初始化中途抛异常，这次初始化被视为"没有发生过"，下次调用 `loadMujocoApi()` 会重新尝试整个初始化过程（呼应 [单例初始化用匿名 lambda 的原因](#单例初始化用匿名-lambda-的原因) 的 `static` 单例初始化保证）。
+
+---
+
+### 并发：data race 是 UB，以及为什么不要提前加锁
+
+`#cpp_并发与内存模型` `#cpp_资源自动管理` `#cpp_更安全的默认写法`
+
+> Q: 你先前提到线程安全，我想要对 cpp 写 ros2 或者 python 写 ros2 的并发相关的知识，实践中使用频繁吗，是否写代码的时候总是要考虑未来 go parallel 的可能性？
+
+这条只记 **C++ 语言层面**的部分。ROS2 的执行器/回调组模型、`spin_until_future_complete` 死锁、以及"要不要为并行做准备"的工程结论，在 [week1.md 10.8](week1.md#108-并发ros2-的执行器模型以及要不要提前为并行做准备)。
+
+#### 最重要的一条：data race 是 UB，不是"读到旧值"
+
+这是最容易建错的心智模型。很多人以为数据竞争最坏也就是读到过时的数据——**不是**。C++ 标准规定，两个线程在没有同步的情况下访问同一内存位置、且至少一个是写，程序行为**未定义**。
+
+后果不是"值不新鲜"，而是编译器**基于"无竞争"这个前提做优化**。经典例子：
+
+```cpp
+bool done = false;                 // 裸 bool，没有同步
+
+// 线程 A
+while (!done) { /* 等 */ }         // 编译器：done 在这个循环里没被改过
+                                   // → 可以提到循环外读一次 → 变成 while(true)
+// 线程 B
+done = true;
+```
+
+这个循环可能**永远不退出**，而且是在 `-O2` 下才出现、`-O0` 下正常——这类"加了优化才挂"的 bug 极难查。编译器没做错任何事：既然标准说无竞争，它就可以假设 `done` 不会被别人改。
+
+正确写法是让"这个变量会被并发访问"进入类型系统：
+
+```cpp
+std::atomic<bool> done{false};     // 现在编译器知道不能这么优化
+```
+
+`std::atomic` 的两层含义要分清：
+
+1. **操作不可分割**——`++counter` 对 `int` 是"读-改-写"三步，可以被打断；对 `std::atomic<int>` 是一步。
+2. **建立了同步关系**——这是更常被忽略的一层。它约束编译器和 CPU **不许把周围的读写重排到它两侧**，从而让"线程 B 写 `done` 之前做的事，线程 A 看到 `done` 之后也能看到"。
+
+memory order 的细节（`relaxed`/`acquire`/`release`/`seq_cst`）现阶段不需要精通。**默认的 `seq_cst` 最强也最慢，但永远正确**；先用它，等真的测出瓶颈再考虑放松。需要的直觉只有一句：**放松 memory order 是拿正确性换性能，而且错了不会报错。**
+
+#### `std::mutex` 与 RAII：永远不要手动 lock/unlock
+
+```cpp
+std::mutex mu_;
+
+// ❌ 别这么写
+void bad() {
+  mu_.lock();
+  if (something) return;        // ☠️ 忘了 unlock，死锁
+  mayThrow();                   // ☠️ 抛异常也不会 unlock
+  mu_.unlock();
+}
+
+// ✅ RAII
+void good() {
+  std::lock_guard<std::mutex> lk(mu_);   // 构造时 lock
+  if (something) return;                 // 析构自动 unlock
+  mayThrow();                            // 栈展开也会析构 → 自动 unlock
+}
+```
+
+这就是 [RAII](#class-基础以-mujocobridgenode-为例) 在并发场景的应用：**把"必须成对出现的操作"绑到对象生命周期上**，让所有退出路径（正常 return、提前 return、异常）都自动走对。和 `unique_ptr` 管内存、`ifstream` 管文件句柄是同一个模式。
+
+三个常用的锁包装：
+
+| 类型 | 用途 |
+|---|---|
+| `std::lock_guard<M>` | 最简单，构造即锁、析构即解，不能中途解锁。默认选它 |
+| `std::unique_lock<M>` | 可以中途 `unlock()`/重新 `lock()`、可延迟加锁、可移动。配合 `condition_variable` 必须用它 |
+| `std::scoped_lock<Ms...>` | **一次锁多个 mutex，且内部用避免死锁的算法**。要同时持有两把锁时用它，不要写两个 `lock_guard` |
+
+最后那条值得解释：两个线程分别按 (A,B) 和 (B,A) 的顺序加锁，就可能各持一把、互等另一把——**死锁**。`std::scoped_lock lk(mu_a, mu_b)` 内部处理了这个。这也说明**每多一把锁，复杂度不是线性增长的**。
+
+#### 为什么这些我们一个都没用
+
+`mujoco_bridge` 里没有任何 `atomic`/`mutex`，`mjData` 被两个回调裸着访问。这是对的，因为默认的单线程执行器保证了两个回调不并发（[week1.md 10.8.1](week1.md#1081-并发模型是执行器--回调组不是裸线程)）。
+
+而**提前加锁是纯亏损**：保护 `mjData` 意味着 500Hz × 一个大结构体的加锁开销、要想清楚粒度和顺序、多把锁还要防死锁。更糟的是它给人虚假的安全感——真要并发了，需要的往往不是"每个成员加把锁"，而是重新设计数据流（双缓冲、消息传递），那时原来的锁全要推倒。
+
+替代动作是**把依赖的串行前提写成注释**，让未来改成并发的人看见代价。成本几乎为零，收益是把一个静默的 UB 变成一个有人读过的决定。完整论证在 [week1.md 10.8.3](week1.md#1083-不要提前加锁但要把串行前提写下来)。
+
+#### Python 侧的区别：GIL
+
+`rclpy` 的 `MultiThreadedExecutor` **不能给你 CPU 并行**——GIL 保证同一时刻只有一个线程执行 Python 字节码。它只能解决"阻塞等待"类问题（比如在回调里等另一个服务的响应）。CPU 密集的活要用多进程，或把热点下沉到 C++。
+
+反过来说，Python 里**大部分 data race 不会表现成 UB**：GIL 让单个字节码操作原子化，所以 `self.flag = True` 这种简单赋值是安全的。但**复合操作仍然不安全**（`self.counter += 1` 是读-改-写三个字节码，中间可以切换线程），而且不要指望这个保证——它是 CPython 的实现细节，不是语言规范。
 
 ---
 

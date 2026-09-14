@@ -148,10 +148,14 @@ print(f'TOC {len(toc)} entries, {len(bad)} broken anchors', bad)
 每次跑验证**之前**确认环境干净：
 
 ```bash
-ps -eo pid,args | grep 'lib/mujoco_bridg[e]'   # 应为空
-ros2 node list
-ros2 topic info /clock                          # 应为 Publisher count: 1
+ps -eo pid,comm | awk '$2 ~ /^mujoco_bridge/ {print $1}'   # 应为空（权威判据）
+ros2 topic info /clock                                      # 应为 Publisher count: 1（权威判据）
+ros2 node list                                              # 仅辅助，见下面的警告
 ```
+
+> ⚠️ **`ros2 node list` 不是可靠的干净判据**（第四次遗留进程踩坑后降级）。它按**节点名**列举，同名节点会被**去重成一个**——两个 `mujoco_bridge` 实例在跑时它照样只显示一个，**给出干净的假象**。这是它的设计，不是 bug。权威判据只有上面两条。
+>
+> 同理，`ps -eo pid,args | grep 'lib/mujoco_bridg[e]'` 也不可靠：`-o args` 会匹配到自己所在的那条 `bash -c` 命令行，报假警报（`pkill -f` 自匹配那个坑的 grep 版本）。用 `-o comm` 按可执行文件名匹配。
 
 起后台节点**直接跑可执行文件**，不要经过 `ros2 run`：
 
@@ -162,14 +166,18 @@ sleep 30
 kill $PID; wait $PID 2>/dev/null
 ```
 
-原因和两个踩过的坑：
-- `ros2 run` 是 Python wrapper，`fork`/`exec` 出真正的 C++ 子进程。`kill` wrapper 的 PID 只杀 Python 那层，子进程被 init 收养后继续发话题。`timeout N ros2 run ...` 同理。
+原因和踩过的坑（Stage E 新增了两条，六种变体的完整清单见 [week1.md 11.13](Job_guides/my_study/week1.md#1113-排查记录-链式后台化产生的孤儿进程第六种变体)）：
+- `ros2 run` 是 Python wrapper，`fork`/`exec` 出真正的 C++ 子进程。`kill` wrapper 的 PID（默认 SIGTERM）只杀 Python 那层，子进程被 init 收养后继续发话题。`timeout N ros2 run ...` 同理。
+- **只给 wrapper 一个 PID 发 SIGINT 是"假死"，不是杀不掉**：wrapper 的 `except KeyboardInterrupt: pass` 假设信号是发给整个前台进程组的（终端 Ctrl+C 确实是），只打 wrapper 单个 PID 时它什么都不做，两边都不会退出，等多久都一样。终端里 Ctrl+C 能退出，是因为它同时杀了 child；脚本/工具单独 `kill -INT <wrapper_pid>` 不会有同样效果。
 - **`setsid ... &` + `kill -- -$!` 也不可靠**（`setsid` 会先 fork，`$!` 不是新进程组的 PGID）——这曾是笔记里写下的"正确做法"，第二次栽在它上面。
+- **`cmd1 && cmd2 && cmd3 &` 这种链式命令背景化同样留孤儿**：`$!` 拿到的是执行这条串联列表的 bash 子 shell 的 PID，真正的最后一条命令是这个子 shell 的子进程，`kill $!` 只杀了子 shell。
 - **`pkill -f <名字>` 会杀掉自己所在的 shell**（`-f` 全行匹配，命令行自匹配）。要按数字 PID 杀：
   ```bash
   P=$(ps -eo pid,comm | awk '$2 ~ /^mujoco_bridge/ {print $1}')
   [ -n "$P" ] && kill $P
   ```
+
+> ⚠️ **`ros2 node list`/`ros2 topic info` 也不是"立刻查到就是当下事实"**（Stage E 新增）：这两个命令走的是 `ros2` CLI 的后台守护进程（`ros2-daemon`），它缓存图状态，杀掉进程后可能仍显示旧的重复条目。真正即时的只有 `ps -eo pid,comm`；如果 `ros2 node list` 的结果和 `ps` 的结论矛盾，先信 `ps`，再用 `ros2 daemon stop` 强制刷新后重查。
 
 ### 3.2 测量类结论的合理性检查
 
@@ -230,6 +238,7 @@ kill $PID; wait $PID 2>/dev/null
 - **给出自己的假设**（"是否继承自 Node？"）比开放式问更高效——能让对方精确指出错在哪一层。
 - **明确标出上一轮没懂的地方**（"关于 X 我仍不理解"）。这个动作很少有人做，但价值高：它暴露的是解释失败点，不是理解力问题。
 - **质疑论断**优于请求解释。"怎么可能总是保证一致性"这种问法能逼出实测；"请解释一下 X"通常只能换来一段可能凭印象的叙述。
+- **质疑证据链**优于质疑结论（Stage D 归纳）。"你是怎么测出来的 / 这个数据从哪来的"比"这个结论对吗"更有效——因为讲解者引用数据时**省略来源是常态**，而省略的那一步往往正是结论成立的关键条件。Stage D 的实例："`/tf` 不是只有父子关系吗，你怎么拿到 `world→link4` 的？"——答案是 `tf2_echo` 沿树做矩阵连乘，而这一步我原本没交代。这类追问的产出不是"纠正了一个错误"，而是"补上了复现所需的信息"。
 
 ### 4.5 悬挂问题机制
 

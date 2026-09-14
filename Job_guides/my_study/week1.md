@@ -90,18 +90,55 @@
   - [9.11 权衡：`tf_rate_hz` 独立于 `joint_state_rate_hz`](#911-权衡tf_rate_hz-独立于-joint_state_rate_hz)
   - [9.12 失败模式与验证手段](#912-失败模式与验证手段)
   - [9.13 排查记录：第三次遗留进程（同一个坑的第三次）](#913-排查记录第三次遗留进程同一个坑的第三次)
-- [10. 后续计划与 Session 交接](#10-后续计划与-session-交接)
+- [10. Stage D：reset service](#10-stage-dreset-service)
+  - [10.0 一句话总结](#100-一句话总结)
+  - [10.1 改动清单与验证结果](#101-改动清单与验证结果)
+  - [10.2 service vs topic：什么时候用哪个](#102-service-vs-topic什么时候用哪个)
+    - [10.2.1 那 6 个服务来自 `Node` 基类](#1021-那-6-个服务来自-node-基类)
+    - [10.2.2 一个服务名只对应一个类型，类型写错的表现是"永远等下去"](#1022-一个服务名只对应一个类型类型写错的表现是永远等下去)
+  - [10.3 MJCF keyframe 是什么，以及它和描述文件初始位姿的关系](#103-mjcf-keyframe-是什么以及它和描述文件初始位姿的关系)
+    - [10.3.1 keyframe 是一组完整的状态快照，不只是 qpos](#1031-keyframe-是一组完整的状态快照不只是-qpos)
+    - [10.3.2 三处"初始位姿"互不一致，第6周会咬人](#1032-三处初始位姿互不一致第6周会咬人)
+  - [10.4 真机上误用 reset 会发生什么](#104-真机上误用-reset-会发生什么)
+  - [10.5 为什么保持 sim time 单调](#105-为什么保持-sim-time-单调)
+  - [10.6 `mj_forward`：为什么需要它，以及它当前其实是冗余的](#106-mj_forward为什么需要它以及它当前其实是冗余的)
+  - [10.7 怎么快速做一次独立的 FK 验证](#107-怎么快速做一次独立的-fk-验证)
+    - [10.7.1 关键：别用 MuJoCo 验 MuJoCo](#1071-关键别用-mujoco-验-mujoco)
+    - [10.7.2 实测结果：mm 级吻合](#1072-实测结果mm-级吻合)
+    - [10.7.3 三个踩到的坑](#1073-三个踩到的坑)
+  - [10.8 并发：ROS2 的执行器模型，以及要不要提前为并行做准备](#108-并发ros2-的执行器模型以及要不要提前为并行做准备)
+    - [10.8.1 并发模型是"执行器 + 回调组"，不是裸线程](#1081-并发模型是执行器--回调组不是裸线程)
+    - [10.8.2 实践中用得多吗](#1082-实践中用得多吗)
+    - [10.8.3 不要提前加锁，但要把串行前提写下来](#1083-不要提前加锁但要把串行前提写下来)
+  - [10.9 失败模式与验证手段](#109-失败模式与验证手段)
+  - [10.10 排查记录：第四次遗留进程（换了个更隐蔽的马甲）](#1010-排查记录第四次遗留进程换了个更隐蔽的马甲)
+- [11. Stage E：命令订阅 + sine 测试脚本 + demo launch/rviz](#11-stage-e命令订阅--sine-测试脚本--demo-launchrviz)
+  - [11.0 一句话总结](#110-一句话总结)
+  - [11.1 改动清单与验证结果](#111-改动清单与验证结果)
+  - [11.2 `buildActuatorIndex`：关节驱动与 tendon 驱动的两种索引](#112-buildactuatorindex关节驱动与-tendon-驱动的两种索引)
+  - [11.3 命令回调怎么工作：`ctrl` 是持续生效的寄存器，不是一次性动作](#113-命令回调怎么工作ctrl-是持续生效的寄存器不是一次性动作)
+  - [11.4 position-servo actuator 的本质：一个 PD 控制器](#114-position-servo-actuator-的本质一个-pd-控制器)
+  - [11.5 权衡：为什么只取 `points[0]`，不做真正的轨迹跟随](#115-权衡为什么只取-points0不做真正的轨迹跟随)
+  - [11.6 私有命名（`~`）语法：只存在于源码里，解析后不可见](#116-私有命名语法只存在于源码里解析后不可见)
+  - [11.7 launch 文件机制：两阶段执行、`DeclareLaunchArgument` 与 `LaunchConfiguration`](#117-launch-文件机制两阶段执行declarelaunchargument-与-launchconfiguration)
+  - [11.8 RViz 怎么拿到 TF 数据：TF 显示项没有 Topic 属性](#118-rviz-怎么拿到-tf-数据tf-显示项没有-topic-属性)
+  - [11.9 三节点联调](#119-三节点联调)
+  - [11.10 失败模式与验证手段](#1110-失败模式与验证手段)
+  - [11.11 排查记录：rviz2 硬件加速 GL 卡死](#1111-排查记录rviz2-硬件加速-gl-卡死)
+  - [11.12 排查记录：`ros2 run` 对 SIGINT/SIGTERM 的反应不对称](#1112-排查记录ros2-run-对-sigintsigterm-的反应不对称)
+  - [11.13 排查记录：`&&` 链式后台化产生的孤儿进程（第六种变体）](#1113-排查记录-链式后台化产生的孤儿进程第六种变体)
+- [12. 后续计划与 Session 交接](#12-后续计划与-session-交接)
   - [Stage B — `/clock` + `/joint_states` ✅ 已完成](#stage-b--clock--joint_states--已完成)
   - [Stage C — TF（static + dynamic）✅ 已完成](#stage-c--tfstatic--dynamic-已完成)
-  - [Stage D — reset service](#stage-d--reset-service)
-  - [Stage E — 命令订阅 + sine 测试脚本 + demo launch/rviz](#stage-e--命令订阅--sine-测试脚本--demo-launchrviz)
+  - [Stage D — reset service ✅ 已完成](#stage-d--reset-service--已完成)
+  - [Stage E — 命令订阅 + sine 测试脚本 + demo launch/rviz ✅ 已完成](#stage-e--命令订阅--sine-测试脚本--demo-launchrviz--已完成)
   - [验收标准（沿用已批准计划里的定义）](#验收标准沿用已批准计划里的定义)
   - [第6周接 MoveIt 时的待决项（Stage C 识别出来的）](#第6周接-moveit-时的待决项stage-c-识别出来的)
-- [11. 悬挂问题（等有了参照系再回来）](#11-悬挂问题等有了参照系再回来)
-  - [11.0 为什么要单开这一节](#110-为什么要单开这一节)
-  - [11.1 清单](#111-清单)
-  - [11.2 反向清单：现在就该做的（属于"缺一次推演"）](#112-反向清单现在就该做的属于缺一次推演)
-  - [11.3 维护约定](#113-维护约定)
+- [13. 悬挂问题（等有了参照系再回来）](#13-悬挂问题等有了参照系再回来)
+  - [13.0 为什么要单开这一节](#130-为什么要单开这一节)
+  - [13.1 清单](#131-清单)
+  - [13.2 反向清单：现在就该做的（属于"缺一次推演"）](#132-反向清单现在就该做的属于缺一次推演)
+  - [13.3 维护约定](#133-维护约定)
 
 ---
 
@@ -463,7 +500,7 @@ $ ros2 topic hz /tf
 average rate: 38.457              ← 频率一点没变
 ```
 
-因为构造函数里**读一次就算成 `tf_decimation_` 存起来了**，运行时改参数只改了字典里那个 double，没人再去看它。这是典型的 C 类问题：**接口报告成功、实际无效果、无任何告警**。要真支持热改需要 `add_on_set_parameters_callback` 重算 decimation。现在没做，进了 [11.2](#112-反向清单现在就该做的属于缺一次推演) 反向清单。
+因为构造函数里**读一次就算成 `tf_decimation_` 存起来了**，运行时改参数只改了字典里那个 double，没人再去看它。这是典型的 C 类问题：**接口报告成功、实际无效果、无任何告警**。要真支持热改需要 `add_on_set_parameters_callback` 重算 decimation。现在没做，进了 [13.2](#132-反向清单现在就该做的属于缺一次推演) 反向清单。
 
 ---
 
@@ -699,7 +736,7 @@ constexpr double kHandToTcpZ = 0.1034;
 - **(a) 把这个数搬进 vendor 的 MJCF**：给 `hand` body 加 `<site name="hand_tcp" pos="0 0 0.1034"/>`，代码从模型里读。数值就住在**描述层**、和其它几何参数待在一起，代码里零 magic number。**倾向这个做法**，还顺手能消掉 `kHandBodyName` 那个硬编码字符串（改成"找 site 存不存在"）。
 - **(b) 写测试**：展开 xacro、断言 `tcp_xyz == 0.1034`。能抓上游漂移，但要跑 xacro，比较重。
 
-没在 Stage C 做，因为改 vendor 的模型文件是个独立决定。进 [11.2](#112-反向清单现在就该做的属于缺一次推演)。
+没在 Stage C 做，因为改 vendor 的模型文件是个独立决定。进 [13.2](#132-反向清单现在就该做的属于缺一次推演)。
 
 ---
 
@@ -1642,7 +1679,7 @@ P=$(ps -eo pid,comm | awk '$2 ~ /^mujoco_bridge/ {print $1}')
 | [mujoco_dl.cpp](../../src/mujoco_bridge/src/mujoco_dl.cpp) | 对应三行 `resolve(handle, "mju_...", ...)` |
 | [mujoco_bridge_node.cpp](../../src/mujoco_bridge/src/mujoco_bridge_node.cpp) | `buildFrameIndex()`、`makeTransform()`、`publishTransforms()`、`decimationFor()`（把 Stage B 的抽取逻辑提成复用函数）、两个 broadcaster、常量 `kHandToTcpZ` 等、新参数 `tf_rate_hz` |
 
-`CMakeLists.txt` / `package.xml` **没动**——`tf2_ros`、`geometry_msgs` 早就在里面了。新增的 `mju_*` 按 [第10节](#10-后续计划与-session-交接) 那条硬约束走了 `MujocoApi` 结构体，没有直接链接 MuJoCo。
+`CMakeLists.txt` / `package.xml` **没动**——`tf2_ros`、`geometry_msgs` 早就在里面了。新增的 `mju_*` 按 [第12节](#12-后续计划与-session-交接) 那条硬约束走了 `MujocoApi` 结构体，没有直接链接 MuJoCo。
 
 **启动日志**：
 
@@ -1725,7 +1762,7 @@ if (model_->body_jntnum[i] == 0) { /* static */ } else { /* dynamic */ }
 
 还有一个不明显的收益：**用 `body_pos` 而不是 `xpos` 算 static，就不需要在构造函数里调 `mj_forward`**。`mj_makeData` 之后 `xpos` 还是全 0（要走一遍前向运动学才会填），如果从 `xpos` 推 static 变换，构造期发出去的三条 static TF 全是零——而且因为 static 是 latched、只发一次，**这个错会永久生效、不会被后面任何一帧纠正**。（Stage D 的 reset 之后要不要补 `mj_forward`，是同一个坑的另一面。）
 
-**这条判据的已知反例：mocap body。** MuJoCo 的 mocap body 没有任何关节，但位姿由用户每步直接写 `mjData::mocap_pos`/`mocap_quat`——它会动。现在的代码会把它判成 static、发一次就再也不更新。正确判据应该是 `body_jntnum[i] == 0 && body_mocapid[i] < 0`。当前 MJCF 里没有 mocap body，所以这是"写着的假设暂时成立"，进 [11.1](#111-清单) 的知识边界条目。
+**这条判据的已知反例：mocap body。** MuJoCo 的 mocap body 没有任何关节，但位姿由用户每步直接写 `mjData::mocap_pos`/`mocap_quat`——它会动。现在的代码会把它判成 static、发一次就再也不更新。正确判据应该是 `body_jntnum[i] == 0 && body_mocapid[i] < 0`。当前 MJCF 里没有 mocap body，所以这是"写着的假设暂时成立"，进 [13.1](#131-清单) 的知识边界条目。
 
 ### 9.5 从 `xpos`/`xquat` 到父相对变换：推导与代码对应
 
@@ -1851,7 +1888,7 @@ tf2 要求每个 frame **恰好一个父**，且整体连通无环。我们天�
 
 **一条论断更正（留档）**：我最初讲这条权衡时写的是"代价是 RViz 里只能看 TF 坐标轴、看不到机器人网格"。**不准确。** `robot_state_publisher` 实际上捆了两件事：(1) 发布 `/robot_description`（URDF 字符串，transient_local）；(2) 发布 FK 推出来的 TF。RViz 的 `RobotModel` 显示只需要 **(1)** 拿网格、再**按 link 名去 TF 里查位置**——所以要看到网格需要的是 (1)，**不需要 (2)**。
 
-于是第6周接 MoveIt 时（MoveIt 无论如何都要 `/robot_description`）的正确做法是：**让 URDF 进图，但不让 rsp 发 TF**（remap 掉它的 `/tf`、`/tf_static`，或自己发那个 String）。职责就干净了：**URDF 负责"长什么样和怎么规划"，MuJoCo 负责"现在在哪"**。这条已记进 [第10节](#10-后续计划与-session-交接) 第6周待决项。
+于是第6周接 MoveIt 时（MoveIt 无论如何都要 `/robot_description`）的正确做法是：**让 URDF 进图，但不让 rsp 发 TF**（remap 掉它的 `/tf`、`/tf_static`，或自己发那个 String）。职责就干净了：**URDF 负责"长什么样和怎么规划"，MuJoCo 负责"现在在哪"**。这条已记进 [第12节](#12-后续计划与-session-交接) 第6周待决项。
 
 ### 9.11 权衡：`tf_rate_hz` 独立于 `joint_state_rate_hz`
 
@@ -1859,7 +1896,7 @@ tf2 要求每个 frame **恰好一个父**，且整体连通无环。我们天�
 
 **但默认值故意设成相同**：一旦不同，下游"拿 `/joint_states` 的 stamp 去 `lookupTransform`"就会命中 tf2 的插值/外推路径，得到一个两个采样点之间的数**而不是任何真实的仿真状态**。
 
-诚实地说，这是我**自己引进来的一个可配置不一致源**，而且设成不同值不会有任何告警。属于 C 类问题，进 [11.2](#112-反向清单现在就该做的属于缺一次推演)（备选解：构造期加一条 `RCLCPP_WARN`，或者干脆共用一个参数）。
+诚实地说，这是我**自己引进来的一个可配置不一致源**，而且设成不同值不会有任何告警。属于 C 类问题，进 [13.2](#132-反向清单现在就该做的属于缺一次推演)（备选解：构造期加一条 `RCLCPP_WARN`，或者干脆共用一个参数）。
 
 另外 [2.5](#25-declare_parameterros-参数到底是什么为什么不用-const-double) 记录的那个缺陷同样适用于这两个参数：**运行时 `ros2 param set` 会报成功但无效果**。
 
@@ -1878,7 +1915,7 @@ tf2 要求每个 frame **恰好一个父**，且整体连通无环。我们天�
 | `/tf` 和 `/joint_states` 频率不同 | 下游静默走 tf2 插值路径 | 无任何告警（[9.11](#911-权衡tf_rate_hz-独立于-joint_state_rate_hz)） | ❌ 未防 |
 | `0.1034` 上游漂移 | TCP 位置错 103.4mm 量级，无报错 | 具名常量 + 注释里的核对命令（[4.4.2](#442-为什么这个数没有自动共享)） | ⚠️ 只靠人工核对 |
 
-**反查一遍**（按 [STUDY_NOTES_GUIDE.md](../../STUDY_NOTES_GUIDE.md) 5.1 的要求）：这张表里有 3 条 ⚠️ 和 3 条 ❌。**整套相对变换数学的验证全是人眼看 `tf2_echo`，没有一条自动化断言**，这是 E 类的空缺，见 [11.2](#112-反向清单现在就该做的属于缺一次推演)。
+**反查一遍**（按 [STUDY_NOTES_GUIDE.md](../../STUDY_NOTES_GUIDE.md) 5.1 的要求）：这张表里有 3 条 ⚠️ 和 3 条 ❌。**整套相对变换数学的验证全是人眼看 `tf2_echo`，没有一条自动化断言**，这是 E 类的空缺，见 [13.2](#132-反向清单现在就该做的属于缺一次推演)。
 
 ### 9.13 排查记录：第三次遗留进程（同一个坑的第三次）
 
@@ -1907,13 +1944,792 @@ average rate: 138.539
 
 ---
 
-## 10. 后续计划与 Session 交接
+## 10. Stage D：reset service
 
-Stage A（[第7节](#7-stage-amujoco_bridge_node-最小实现模型加载--物理步进定时器)）、Stage B（[第8节](#8-stage-bclock--joint_states)）、Stage C（[第9节](#9-stage-ctfstatic--dynamic)）均已完成、build+run 验证通过、讲解已记录。以下是 Stage D-E 的简要计划，供下一个 session 接着做（原始完整计划见 `.claude/plans` 下已批准的计划文件，这里只摘录关键点方便快速回忆上下文）。
+### 10.0 一句话总结
+
+给桥接节点加了第一个"被调用"的接口：一个 `std_srvs/srv/Trigger` 类型的 `~/reset` 服务，回调里调 `mj_resetDataKeyframe` 把仿真状态snap回 MJCF 的 `home` keyframe。两个显式决定构成了这个 stage 的实质内容——**保持 sim time 单调**（keyframe 会把 `mjData::time` 清零，我存了旧值再写回，理由是 `/clock` 回退等于对全图做一次时间倒流）和**reset 后调 `mj_forward`**（重算派生量，虽然当前代码里恰好冗余）。顺带验证了 keyframe 一并恢复 `ctrl` 这件事——这是 Stage C 留下的"必须定的问题"，答案是 MuJoCo 替我们定了。
+
+### 10.1 改动清单与验证结果
+
+| 文件 | 改动 |
+|---|---|
+| [mujoco_dl.hpp](../../src/mujoco_bridge/include/mujoco_bridge/mujoco_dl.hpp) | `MujocoApi` 新增 `forward` 字段（`mj_forward`），现在共 **12 个** |
+| [mujoco_dl.cpp](../../src/mujoco_bridge/src/mujoco_dl.cpp) | `resolve(handle, "mj_forward", api.forward)` |
+| [mujoco_bridge_node.cpp](../../src/mujoco_bridge/src/mujoco_bridge_node.cpp) | 常量 `kResetKeyframeName`、成员 `reset_service_`/`reset_keyframe_id_`、构造函数里按名查 keyframe + 建 service、新增 `onReset()` |
+
+`CMakeLists.txt` / `package.xml` **没动**——`std_srvs` 从第一周建包时就在里面了。新增的 `mj_forward` 按 [第12节](#12-后续计划与-session-交接) 那条硬约束走了 `MujocoApi` 结构体，没有直接链接 MuJoCo。
+
+实测（干净环境，`Publisher count: 1`；节点跑起来 → 调 reset → 再观察 3 秒）：
+
+| 观测量 | reset 前 | reset 后 | 结论 |
+|---|---|---|---|
+| `position[joint4]` | −0.0696 | **−1.5771** | qpos 跳到 home ✅ |
+| `position[joint6]` | 0.1921 | **1.5696** | ✅ |
+| `position[finger_joint1]` | ~0 | **0.0400** | ✅ |
+| `effort[joint6]` | **−12.0**（力矩上限，饱和） | 2.28（不饱和） | `ctrl` 一并恢复 ✅ |
+| reset 后 3 秒的 `position` | —— | 仍在 home | 伺服在**保持**新位姿，没被旧目标拽回 ✅ |
+| `world→link4` 姿态（RPY pitch） | 4.06° | **89.26°** | 动态 TF 跟着变 ✅ |
+| `/clock` | 5.504s | 7.664s（继续递增） | 时间没有回退 ✅ |
+| service 响应 | —— | `success=True, message='reset to keyframe \`home\`'` | ✅ |
+
+节点日志里那行 `reset to keyframe \`home\` (sim time preserved at 5.780s)` 是"时间没被清零"的直接证据。
+
+### 10.2 service vs topic：什么时候用哪个
+
+> Q: 关于 service 的一些问题：我注意到除了 reset 之外还有几个 service，它们也是来自 Node 父类的吗？每次 call service 都需要显式指定服务的类型吗，难道一个 service 还会有不同类型的子服务？
+
+先把两种通信模式摆一起：
+
+| | topic（发布/订阅） | service（请求/响应） |
+|---|---|---|
+| 通信形状 | 单向，一对多，**匿名** | 双向，一对一，**有调用者** |
+| 谁驱动 | 发布者按自己的节奏推 | 调用者按需拉，服务端被动 |
+| 有没有回执 | 没有。`publish()` 返回不代表任何人收到 | 有。响应里能带 `success`/`message` |
+| 失败怎么表达 | 表达不了 | 天然有位置放（我们填了"没有这个 keyframe"） |
+| 阻塞语义 | 不阻塞 | 调用者等到服务端回调返回为止 |
+| 适合 | **状态流**：`/joint_states`、`/tf`、`/clock` | **动作 + 要知道结果**：reset、加载模型、切换控制模式 |
+
+reset 必须是 service，理由不是笼统的"它是个动作"，而是**调用者需要知道它发生了没有、以及在什么时候发生**。做成 topic（发 `std_msgs/Empty` 到 `~/reset_cmd`）的话，调用者发完就没了：不知道节点起没起来（volatile QoS 下消息直接丢弃）、不知道 keyframe 存不存在、也不知道什么时候可以开始读复位后的状态。测试脚本里"reset 然后断言关节角是 home"这种序列，用 topic 写只能靠 `sleep`。
+
+**再上一层是 action**（`rclcpp_action`）：service 的回调必须尽快返回，因为它占着执行器。如果 reset 变成"平滑地把机械臂移动回 home 姿态"（要几秒钟），就该用 action——有 feedback、可取消、可长时间运行。我们这个是瞬间改内存里的数，service 正合适。这条在 [10.4](#104-真机上误用-reset-会发生什么) 还会再出现一次。
+
+#### 10.2.1 那 6 个服务来自 `Node` 基类
+
+实测节点上一共 7 个服务：
+
+```
+$ ros2 service list -t
+/mujoco_bridge/describe_parameters       [rcl_interfaces/srv/DescribeParameters]
+/mujoco_bridge/get_parameter_types       [rcl_interfaces/srv/GetParameterTypes]
+/mujoco_bridge/get_parameters            [rcl_interfaces/srv/GetParameters]
+/mujoco_bridge/list_parameters           [rcl_interfaces/srv/ListParameters]
+/mujoco_bridge/set_parameters            [rcl_interfaces/srv/SetParameters]
+/mujoco_bridge/set_parameters_atomically [rcl_interfaces/srv/SetParametersAtomically]
+/mujoco_bridge/reset                     [std_srvs/srv/Trigger]     ← 我们的
+```
+
+前 6 个是 `rclcpp::Node` 构造时由它内部的 `NodeParameters` 组件自动创建的，一行代码都不用写。它们是**参数系统的网络接口**——`ros2 param get/set/list` 底层就是在调这 6 个服务。所以 [2.5](#25-declare_parameterros-参数到底是什么为什么不用-const-double) 里声明的 `joint_state_rate_hz`/`tf_rate_hz` 才能从外面被读写：
+
+```
+$ ros2 service call /mujoco_bridge/list_parameters rcl_interfaces/srv/ListParameters "{prefixes: [], depth: 0}"
+names=['joint_state_rate_hz', 'qos_overrides./tf.publisher.depth', ..., 'tf_rate_hz', 'use_sim_time']
+```
+
+**这顺带答掉了 [2.1](#21-rclcppnode-基类常用属性与方法) 留下的一个疑问**："我没看到 `use_sim_time` 定义在哪"——它就在这个列表里，是 `Node` 基类替我们声明的参数，定义在 `rclcpp` 里而不在我们代码里。
+
+#### 10.2.2 一个服务名只对应一个类型，类型写错的表现是"永远等下去"
+
+**一个服务名对应且仅对应一个类型**，这是 ROS2 的强约束（topic 同理）。不存在"一个 service 下挂多个类型的子服务"。要让一个服务干多件事，只能靠**请求消息里的字段**分支——`SetBool` 用一个 `bool data` 区分开/关，或者自定义带 `string mode` 的 `.srv`。这也是为什么"如果 reset 要能指定 keyframe 名字，`Trigger` 就不够了"。
+
+CLI 要求你写类型，但类型本身是能查出来的——这两件事要分开：
+
+```bash
+$ ros2 service type /mujoco_bridge/reset      # 能查
+std_srvs/srv/Trigger
+
+$ ros2 service call /mujoco_bridge/reset      # 但 call 还是要你写
+error: the following arguments are required: service_type
+```
+
+类型信息本来就在 DDS 的发现数据里（`ros2 service list -t` 就是这么打印的）。`ros2 service call` 仍要求显式传，理由大概是它需要在**服务还没起来**时也能构造请求（`-r N` 反复调、脚本里先调后起），自动发现会引入竞态。C++ 侧是编译期定死的，没有"查"这回事——类型是模板参数。
+
+**一条实测出来的 C 类结论**：用错误的类型去调同一个服务名会怎样？
+
+```bash
+$ ros2 service call /mujoco_bridge/reset std_srvs/srv/Empty {}
+（一直挂着，8 秒后被我 timeout 杀掉）
+```
+
+**没有报错，没有"类型不匹配"提示，就是永远等下去。** 因为 DDS 的匹配是按 (名字, 类型) 这个组合做的：类型不同 = 两个不相干的端点，客户端在等一个根本不存在的服务端。**"服务名对但类型错"和"服务压根不存在"在现象上完全一样。**
+
+C++ 客户端里同样成立，而且更隐蔽：`client->wait_for_service(1s)` 返回 false、日志写"service not available"，于是你去查服务端是不是没起来，真正原因却是客户端的模板参数写错了。排查手段是 `ros2 service list -t` 对一眼实际类型。
+
+### 10.3 MJCF keyframe 是什么，以及它和描述文件初始位姿的关系
+
+> Q: keyframe 和 description 文件里预先定义的初始位姿是一致的吗？
+
+#### 10.3.1 keyframe 是一组完整的状态快照，不只是 qpos
+
+```xml
+<key name="home" qpos="0 0 0 -1.57079 0 1.57079 -0.7853 0.04 0.04"
+                 ctrl="0 0 0 -1.57079 0 1.57079 -0.7853 255"/>
+```
+
+见 [panda.xml:281](../../robot_description/mujoco/franka_emika_panda/panda.xml#L281)。`mj_resetDataKeyframe(m, d, key)` 恢复 `qpos`、`qvel`、`act`、`ctrl`、`mocap_pos/quat`（keyframe 里没写的取默认值，例如 `qvel` 全零）。
+
+**`ctrl` 被一起恢复是这个 stage 最关键的一点**——Stage C 的笔记把它标成了"reset 时要不要一起恢复 `ctrl`，是个必须定的问题"（[第12节](#12-后续计划与-session-交接) Stage D 那条）。答案：不用我们定，MuJoCo 已经定了，而且定得对。
+
+注意两行数长度不同：`qpos` 是 9（`nq`），`ctrl` 是 8（`nu`）。这正是 [4.3.4](#434-每个关节的状态变量应该是什么样以及一个-stage-e-地雷) 记的那颗地雷——两根手指共用一个 actuator。还有 `ctrl` 末尾那个 `255`：夹爪 actuator 的 `ctrlrange` 被上游重映射成 `0..255`，`255` 表示全开，对应 `qpos` 里的 `0.04 0.04`（4cm）。**这两个数是同一件事的两种表述，keyframe 自己保证了它们自洽**——这就是该用 keyframe 而不是自己手写一组数的理由。
+
+实测里 `effort[joint6]` 从 −12.0（打满）变成 2.28，是"自洽"的直接证据：启动时 `ctrl` 全零、目标是手臂竖直伸展，重力压不住所以饱和（[8.1](#81-改动清单与验证结果) 那个"顺带发现"）；`home` 是手肘弯曲的构型，伺服轻松撑住。
+
+#### 10.3.2 三处"初始位姿"互不一致，第6周会咬人
+
+查了手边所有定义了"初始位姿"的地方：
+
+| 来源 | joint1 | joint2 | joint3 | joint4 | joint5 | joint6 | joint7 | 手指 |
+|---|---|---|---|---|---|---|---|---|
+| **MJCF** `<key name="home">` | 0 | **0** | 0 | **−1.5708** | 0 | 1.5708 | **−0.7853** | 0.04 |
+| **SRDF** `group_state name="ready"` | 0 | **−0.785** | 0 | **−2.356** | 0 | 1.571 | **+0.785** | 0.035（`open`） |
+| **URDF 本身** | —— 没有这个概念 —— | | | | | | | |
+
+路径分别是 [panda.xml:281](../../robot_description/mujoco/franka_emika_panda/panda.xml#L281)、`/opt/ros/humble/share/moveit_resources_panda_moveit_config/config/panda.srdf:20`、同目录 `initial_positions.yaml`（给 `ros2_control` fake system 用，数值 = `ready`）。
+
+三点：
+
+1. **URDF 里根本没有"初始位姿"这个东西。** URDF 只描述几何和关节限位，不含状态。所谓"URDF 的初始位姿"永远是"所有关节 = 0"这个隐含约定（`joint_state_publisher_gui` 打开时滑块全在 0 就是它）。Panda 全零位是手臂笔直向上伸展，这也是 Stage B 看到启动时 joint6 饱和的原因。
+2. **`home` 和 `ready` 是两个不同姿态，joint7 连符号都相反。** `ready` 是 Franka 官方文档里的标准起始位姿（手肘更弯、末端更靠身体）；`home` 是 mujoco_menagerie 自己挑的。一个在 apt 装的 SRDF 里，一个在我们 vendor 进仓库的 MJCF 里，**两边都不知道对方存在，没有任何机制保证一致**。
+3. **第6周会咬人**：MoveIt 会用 SRDF 的 `ready` 做"回到初始位姿"，而我们的 `~/reset` 用 MJCF 的 `home`。同一句"复位"在两个子系统里指向两个不同构型，**而且不会有任何报错**——只表现为"我点了 reset，然后 MoveIt 说当前不在 ready 位姿"。已同步进 `docs/architecture.md` 并记入 [第12节](#12-后续计划与-session-交接) 第6周待决项（倾向：让 MJCF 的 keyframe 对齐 SRDF 的 `ready`，因为后者是真机生态的约定俗成）。
+
+这和 [4.4.2](#442-为什么这个数没有自动共享) 的 `0.1034` 是同一类问题的第二个实例：**两份描述文件之间的数值一致性没有任何机制保障，只能靠人工核对 + 写进 architecture.md**。
+
+### 10.4 真机上误用 reset 会发生什么
+
+> Q: 看上去 reset 对于仿真器来说是一个瞬时的变化，如果对于实机设备，误使用了 reset 会发生什么？
+
+这个问题的价值在于它暴露了**"reset 这个操作在真机上根本不存在对应物"**。分三层：
+
+**第一层：物理上做不到。** `mj_resetDataKeyframe` 干的事是"把内存里那 9 个数改掉"。真机上没有任何接口能让关节瞬移——机械臂有质量、有惯量、电机有力矩上限。所以真机驱动**不可能**提供语义相同的服务。
+
+**第二层：硬接到真机驱动上，最可能的实现是"把伺服目标一步设成 home"。** 控制器看到巨大的位置误差（joint4 要从 0 跳到 −1.57，差 90°），PD 按误差乘增益输出力矩 → **瞬间打满力矩，机械臂猛地甩过去**。Franka 自己的安全层大概率先一步触发（速度/加速度/力矩超限），进 reflex 模式锁死，需要人去 Desk 界面手动解锁。这是**好的失败**——响，但安全。
+
+**第三层，最危险：如果 reset 改的是"状态估计"而不是"指令"。** 设想一个桥接节点同时负责"发布机器人在哪"和"接收指令"。如果 reset 被实现成"把我发布的 `/joint_states` 改成 home"，那机器人**物理上没动**，但整个系统都认为它在 home。碰撞检测、运动规划、抓取位姿全部基于一个谎言运行，下一条规划出来的轨迹会直接撞上真实环境。这种失败**不会立刻报错**，会在几秒后以一次碰撞的形式出现。
+
+所以正确的真机对应物不是 service 而是 **action**：规划一条从当前位姿到 home 的轨迹，几秒钟执行完，过程中可取消、有 feedback。MoveIt 的 `setNamedTarget("ready")` + `move()` 就是它。
+
+**这反过来印证了一个命名决定**：`~/reset` 用私有名（解析成 `/mujoco_bridge/reset`）而不是全局 `/reset` 是对的。它带着 `mujoco_bridge` 前缀，明说了"我是仿真器的能力"。真机驱动不会提供这个名字，所以任何调用它的代码在换到真机时会**立刻失败于"服务不存在"**——早、响、无歧义。如果当初起名 `/reset`，就有人会在真机上实现一个同名服务，然后我们回到第三层。
+
+（顺带：这和 [8.1](#81-改动清单与验证结果) 里 `/joint_states` 用全局名的决定不矛盾。判据是**"这个东西在系统里是唯一的吗"**：状态源全局唯一 → 全局名；"复位这个特定仿真器"是实例的能力，同一张图里可以有两个仿真实例各自独立复位 → 私有名。）
+
+### 10.5 为什么保持 sim time 单调
+
+`mj_resetDataKeyframe` 会把 `mjData::time` 一起清零。代码里显式存旧值再写回：
+
+```cpp
+const mjtNum time_before = data_->time;
+api_.resetDataKeyframe(model_, data_, reset_keyframe_id_);
+data_->time = time_before;
+```
+
+理由：这个节点是全系统 `/clock` 的唯一来源（[8.2](#82-sim-time-vs-wall-time以及-use_sim_time)）。让它回退到 0 等于对图里每个节点做了一次**时间倒流**——tf2 的 buffer 检测到时间倒退会整个清空、action server 的 goal 时间戳变成"未来"、任何缓存过 stamp 的节点都错了。而 ROS2 对此的处理是 `rclcpp::TimeSource` 的 jump callback，**没人注册就静默发生**。
+
+**"reset 状态"和"reset 时间"是两件事，调用者要的是前者。** 对照 Gazebo：它的 `/reset_world`（只复位物体位姿）和 `/reset_simulation`（连仿真时间一起清零）是**两个不同的 service**，正是因为这个区别太大不能混。我们实现的是 `reset_world` 那一款。哪天真需要时间也归零，应该是第二个 service 或者 request 里的一个字段（那时 `Trigger` 就不够了）。
+
+### 10.6 `mj_forward`：为什么需要它，以及它当前其实是冗余的
+
+> Q: mj_forward 不是不会推进时间步吗？
+
+对，**它不推进时间，这正是选它的理由**。两个函数摆一起就清楚了：
+
+```
+mj_forward(m, d):   读 qpos/qvel/ctrl  →  算出所有派生量（xpos/xquat、雅可比、接触、qfrc_*、qacc）
+                    ↑ d->time 不变
+
+mj_step(m, d):      mj_forward 的全部工作
+                  + 用算出的 qacc 做一次数值积分，更新 qpos/qvel
+                  + d->time += m->opt.timestep
+```
+
+即 **`mj_step` ≈ `mj_forward` + 积分一步**。
+
+reset 之后我要的恰恰是"重算派生量，但不动状态、不动时间"：
+
+- 调 `mj_forward`：`xpos` 刷新成 home 姿态对应的值，`d->time` 不变，`qpos` 保持 keyframe 的精确值。✅
+- 改调 `mj_step`：派生量也会刷新，但**副作用是仿真凭空前进 2ms**，`qpos` 会离开 keyframe 给的精确值一点点，`d->time` 也多 2ms。所以不能用它来"刷新"。
+
+**但要说实话：在当前代码里这个 `mj_forward` 是冗余的，我没能构造出一个它真正救场的场景。** `onTimer()` 的顺序是「先 `mj_step` 再发布」，而 `mj_step` 内部本来就包含一次完整前向计算——reset 和下一次发布之间永远隔着一个 `mj_step`。它现在是纵深防御，会在这三种情况下变成必需：
+
+1. reset 回调里直接补发一帧 `/joint_states`/`/tf`（很可能会加，好让调用者立刻拿到新状态）；
+2. 换成 `MultiThreadedExecutor`，或把定时器挪到别的 callback group；
+3. 加一个读 `xpos` 的服务（比如"查询当前 TCP 位姿"）。
+
+留着的成本是一次前向计算（只在 reset 时发生，无所谓）；删掉的成本是上面任一条发生时**静默发布旧位姿配新时间戳**。所以留着，并把这三个触发条件写在这里——**这是「`mj_forward` 是这件事的正确工具」和「这件事当前恰好有别人顺带做了」两句话的区别，后者是会随代码改动失效的巧合。**
+
+这是 Stage C 那个坑的另一面：当时发现 `mj_makeData` 之后 `xpos` 全是 0（还没跑过 FK），所以 static TF 只能从 `body_pos` 算（[9.4](#94-static--dynamic-怎么划分用结构而不是名字)）。
+
+### 10.7 怎么快速做一次独立的 FK 验证
+
+> Q: keyframe 里记录的是位姿参数对吗，所以要验证你说的 world->link4，还需要自己做一次 FK。告诉我，如果我现在就要快速做一次验证，应该怎么办？
+
+先纠一个术语：**`qpos` 是关节空间的位置（joint position / configuration），不是位姿（pose）。** 它是 9 个标量（7 个转角 + 2 个手指位移），不含任何笛卡尔坐标。"位姿"通常对应 `pose` = 位置 + 姿态，是笛卡尔空间的 6 自由度量；MJCF 里 `<body pos>` 才是位姿。两者是 FK 的两端——所以要得到 `world → link4`，确实必须做一次 FK。
+
+#### 10.7.1 关键：别用 MuJoCo 验 MuJoCo
+
+我们的 TF 数据本来就是 MuJoCo 算的。再调一次 MuJoCo 的 FK 来核对，只能验证"MuJoCo 自己前后一致"，**验不出模型描述文件写错了**这类错误。要有意义，得找一个**独立的 FK 实现 + 独立的模型描述**。
+
+手边正好两样都有：`franka_description` 的 URDF（独立描述）+ `robot_state_publisher` 的 KDL（独立 FK 实现）。整套不用装任何东西，跑完不到一分钟：
+
+```bash
+source /opt/ros/humble/setup.bash
+export ROS_DOMAIN_ID=42          # 关键：和正在跑的 bridge 隔离，否则两边的 /tf 会进同一棵树
+
+# 1. URDF（xacro 展开，见 4.3.1）
+ros2 run xacro xacro /opt/ros/humble/share/franka_description/robots/fer/fer.urdf.xacro \
+    hand:=true ros2_control:=false > /tmp/fer.urdf
+
+# 2. rsp 读 URDF，订阅 /joint_states，用 KDL 做 FK 后发 /tf
+ros2 run robot_state_publisher robot_state_publisher /tmp/fer.urdf &
+
+# 3. 把 home 的 qpos 喂进去（脚本见下，不能用 ros2 topic pub）
+/usr/bin/python3 /tmp/jsp.py &
+
+# 4. 查任意两个 frame
+ros2 run tf2_ros tf2_echo fer_link0 fer_link4
+ros2 run tf2_ros tf2_echo fer_link0 fer_hand_tcp
+```
+
+`/tmp/jsp.py`：
+
+```python
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import JointState
+
+NAMES = ['fer_joint1','fer_joint2','fer_joint3','fer_joint4','fer_joint5',
+         'fer_joint6','fer_joint7','fer_finger_joint1','fer_finger_joint2']
+POS = [0.0, 0.0, 0.0, -1.57079, 0.0, 1.57079, -0.7853, 0.04, 0.04]   # home 的 qpos
+
+class P(Node):
+    def __init__(self):
+        super().__init__('home_pose_pub')
+        self.pub = self.create_publisher(JointState, '/joint_states', 10)
+        self.create_timer(0.05, self.tick)
+    def tick(self):
+        m = JointState()
+        m.header.stamp = self.get_clock().now().to_msg()   # ← 必须是真时间戳
+        m.name, m.position = NAMES, POS
+        self.pub.publish(m)
+
+rclpy.init(); rclpy.spin(P())
+```
+
+#### 10.7.2 实测结果：mm 级吻合
+
+| frame | URDF + KDL（精确 home） | MuJoCo（伺服保持中） | 差 |
+|---|---|---|---|
+| `link4` 平移 | [0.083, 0.000, **0.649**] | [0.085, −0.000, **0.648**] | **2 mm** |
+| `link4` 旋转 (xyzw) | (0.500, 0.500, −0.500, 0.500) | (−0.497, −0.503, 0.503, −0.497) | **约 0.3°** |
+| `hand_tcp` 平移 | [0.554, 0.000, **0.521**] | [0.555, −0.000, **0.514**] | **7 mm** |
+
+**结论：两套独立的描述 + 两套独立的 FK 在 mm 级吻合，TF 链条（[9.5](#95-从-xposxquat-到父相对变换推导与代码对应) 那套相对变换数学）是对的。** 这是第一次对它做非 MuJoCo 的交叉验证——[9.12](#912-失败模式与验证手段) 那张表里"整套相对变换数学全靠人眼看 `tf2_echo`"的状态改善了一半（还是人眼，但至少有了独立参照）。
+
+两个细节值得单独记：
+
+**(a) 四元数看着符号全反，其实是同一个旋转。** `(0.5, 0.5, −0.5, 0.5)` 和 `(−0.497, −0.503, 0.503, −0.497)` 差一个整体负号——**q 和 −q 表示完全相同的旋转**（单位四元数双覆盖 SO(3)，见 [6.3.1](#631-一个单位四元数就是一个旋转)）。所以比较两个四元数**绝不能逐分量比**，必须比 `|q1·q2|` 是否接近 1，或转成旋转矩阵/角度差再比。**这是 E 类问题写断言时的第一个坑：直接 `assertAlmostEqual(q1.x, q2.x)` 会在数学上完全正确的情况下失败。**
+
+**(b) 那 2mm / 7mm 的差不是 bug，是重力。** 看 reset 之后的实际关节角：
+
+```
+joint2 = 0.006582   （keyframe 里写的是 0）
+joint4 = -1.577103  （keyframe 里写的是 -1.57079）
+```
+
+position servo 是有限增益的 PD 控制器，靠**位置误差**产生力矩对抗重力——**误差为零就没有力矩，所以稳态误差必然非零**。KDL 那侧算的是"关节角精确等于 home 时"的位置，MuJoCo 这侧是"伺服顶着重力能守住的位置"。误差沿运动链累积，所以末端 `hand_tcp`（7mm）比 `link4`（2mm）大。
+
+**这给了一条 E 类的重要提示：写 FK 断言时，输入必须用实际读到的 `qpos`，不能用 keyframe 的标称值**，否则容差得放到厘米级才能过——那就基本测不出东西了。用实际 `qpos` 喂给 KDL，容差可以收到 1e-6。
+
+#### 10.7.3 三个踩到的坑
+
+1. **`ros2 topic pub` 不能用来喂 `/joint_states`**。它发的 `header.stamp` 恒为 0，tf2 收到 stamp=0 的变换后，`tf2_echo` 查"最新"会一直 `Waiting for transform`，**没有任何报错说"是时间戳的问题"**。必须用带真时间戳的脚本。这和 [10.2.2](#1022-一个服务名只对应一个类型类型写错的表现是永远等下去) 那个"类型写错 = 无限等待"是同一形状：**tf2 和 service 的失败模式几乎都是"静默地等"**。
+2. **`ROS_DOMAIN_ID` 必须隔离**，否则 rsp 发的 `fer_*` 会和 bridge 发的 `link*` 进同一棵 TF 树。这次因为 URDF 带 `fer_` 前缀，两棵树只是并存不冲突——但这纯属运气，**第6周接 MoveIt 时前缀问题会正面撞上来**（[9.10](#910-权衡为什么不用-robot_state_publisher) 的待决项）。
+3. **pyenv 又咬了一口，而且和 CLAUDE.md 记的形状不同。** 仓库根的 `.python-version`（内容 `system`）确实生效，`pyenv version` 显示 `system`，但 `python3` 仍解析到 3.11.11 → `ModuleNotFoundError: No module named 'rclpy._rclpy_pybind11'`。根因是 `PATH` 最前面直接放着 `/home/anby/.pyenv/versions/3.11.11/bin`——**这个路径绕过了 pyenv 的 shim 机制，`.python-version` 管不着它**。跑 rclpy 脚本要显式用 `/usr/bin/python3`。已补进 CLAUDE.md（原来只记了 colcon/`catkin_pkg` 那个变体）。
+
+### 10.8 并发：ROS2 的执行器模型，以及要不要提前为并行做准备
+
+> Q: 你先前提到线程安全，我想要对 cpp 写 ros2 或者 python 写 ros2 的并发相关的知识，实践中使用频繁吗，是否写代码的时候总是要考虑未来 go parallel 的可能性？
+
+结论先行：**默认的单线程执行器覆盖了绝大多数节点，包括我们这个；但"什么时候必须多线程"有几个非常具体的触发条件，不靠感觉判断。至于"是否总要为未来的并行做准备"——不要，但要把你依赖的串行前提写下来。**
+
+（纯 C++ 语言层面的部分——`std::atomic`、`mutex`、data race 为什么是 UB——写在 [cpp_concepts.md](cpp_concepts.md) 的 `#cpp_concurrency` 节，这里只记 ROS2 工程侧。）
+
+#### 10.8.1 并发模型是"执行器 + 回调组"，不是裸线程
+
+这是和普通 C++ 并发最大的区别：**你几乎从不自己 `std::thread`**，而是配置执行器怎么调度回调。
+
+```
+Executor（执行器）
+  └─ Node
+       └─ CallbackGroup（回调组）
+            └─ timer / subscription / service / action 的回调
+```
+
+三种执行器：
+
+| 执行器 | 行为 | 什么时候用 |
+|---|---|---|
+| `SingleThreadedExecutor`（**默认**，`rclcpp::spin()` 用的就是它，见 [7.3](#73-main-函数介绍)） | 一个线程按顺序取回调执行，**任意两个回调永不并发** | 默认选它 |
+| `MultiThreadedExecutor` | 线程池，可并发执行**不同** `MutuallyExclusive` 组的回调，或同一个 `Reentrant` 组的多个回调 | 有下面那几个触发条件时 |
+| `StaticSingleThreadedExecutor` | 单线程，但实体集合固定后省掉每轮重扫的开销 | 性能敏感、结构不变的节点 |
+
+回调组两种：
+
+- **`MutuallyExclusive`**（默认）：组内回调**互斥**，同一时刻只跑一个。所有没显式指定组的回调都在节点的默认组里。
+- **`Reentrant`**：组内回调可并发，甚至同一个回调的多个实例可并发。
+
+**我们代码的线程安全就是这么来的**：默认执行器是单线程 + `onTimer`/`onReset` 都在默认的互斥组里 → 双重保险，reset 绝不会落在 `mj_step` 中间。任意一层被改掉，`mjData` 就是数据竞争。
+
+#### 10.8.2 实践中用得多吗
+
+按常见程度排（这是工程实践的大致分布，不是我测的）：
+
+| 场景 | 频率 | 要不要多线程 |
+|---|---|---|
+| 传感器驱动、状态发布、简单控制器 | 最常见 | 不要，单线程够 |
+| **在回调里调用另一个服务并等待响应** | 常见 | **必须**，否则死锁 |
+| 慢回调（视觉推理 100ms）拖慢快回调（1kHz 控制） | 常见 | 要，或者拆进程（[7.5](#75-单进程-embed-vs-分进程--ipc为什么实现上差在哪)） |
+| 一个节点里跑多个独立控制回路 | 中等 | 要 |
+| 高吞吐点云/图像要吃满多核 | 较少 | 要，但更常见是拆成多个进程/composable node |
+
+那个"必须"的场景是 ROS2 里最经典的坑，值得单独记：
+
+```cpp
+void onSomeCallback() {
+  auto future = client_->async_send_request(req);
+  rclcpp::spin_until_future_complete(node_, future);   // ☠️ 死锁
+}
+```
+
+单线程执行器下，这个回调**占着唯一的那个线程**，而响应到达时需要这个线程去处理——你在等一个只有你放手才会发生的事件。现象是**永久挂起，无报错**（又是这个形状，见 [10.2.2](#1022-一个服务名只对应一个类型类型写错的表现是永远等下去)）。解法：把这个回调放进 `Reentrant` 组 + `MultiThreadedExecutor`，或改成异步回调链（`async_send_request(req, callback)`）不等待。
+
+**Stage E 之后很可能撞上它**：如果测试脚本或某个协调节点要"先调 reset，等成功了再发指令"，写在回调里就是这个形状。
+
+Python 侧简单得多：GIL 意味着 `rclpy` 的 `MultiThreadedExecutor` **不能给你 CPU 并行**，只能解决"阻塞等待"这类问题（就是上面那个死锁场景）。CPU 密集的活在 Python 里要用多进程，或把热点下沉到 C++。
+
+#### 10.8.3 不要提前加锁，但要把串行前提写下来
+
+**为并发做准备的代价不是零。** 加 `std::mutex` 保护 `mjData` 意味着每次 `mj_step` 都要加锁（500Hz × 一个大结构体），意味着要想清楚锁的粒度、锁的顺序（多个锁就有死锁风险）、要不要 `shared_mutex`。**这些复杂度在单线程下是纯亏损**——代码更难读，还多了一类原本不可能发生的 bug。而且"防御性加锁"给人虚假的安全感：真要并发了，需要的往往不是"每个成员加把锁"，而是重新设计数据流（双缓冲、消息传递），那时原来那些锁全要推倒。
+
+**但有一件事必须做：把你依赖的串行前提写下来。** `onReset` 上面那段注释就是这个：
+
+```cpp
+// Thread safety comes for free from the default single-threaded executor: this
+// callback and onTimer() are both in the node's default (mutually exclusive)
+// callback group, so a reset can never land halfway through an mj_step. Moving
+// either one to a separate callback group, or switching to a MultiThreadedExecutor,
+// would make this a data race on mjData with no compiler or runtime complaint.
+```
+
+区别在于：加锁是**为一个可能不会发生的未来付现在的成本**；写注释是**让未来那个改动的人（很可能是自己）在做改动时看见代价**。后者成本几乎为零，收益是把一个静默的数据竞争变成一个有人读过的决定。
+
+这条可以推广——它其实是 [13.0](#130-为什么要单开这一节) 那个 C 类问法的一个特例：
+
+> **不要问"以后会不会并行"（需要预测未来），改问"如果有人明天把它改成并行，他会不会发现自己破坏了什么"。**
+
+答案是"不会发现"的地方，就该留一行注释。这比加锁便宜几个数量级。
+
+### 10.9 失败模式与验证手段
+
+| 失败模式 | 现象 | 怎么发现 / 防住 | 这个 stage 验过？ |
+|---|---|---|---|
+| keyframe id 硬编码成 `0` | 上游加第二个 keyframe 后静默复位到错的姿态 | `mj_name2id(m, mjOBJ_KEY, "home")` 按名查 | ✅ 结构上避开 |
+| 模型里没有 `home` keyframe | 若不检查，`mj_resetDataKeyframe(-1)` 是 UB | 构造期查 id + `RCLCPP_WARN`，回调里返回 `success=false` | ⚠️ 代码有分支，没构造反例测过 |
+| 只复位 `qpos` 不复位 `ctrl` | 伺服立刻把机械臂拽回旧目标位姿，**无报错** | MuJoCo 替我们做了；实测 `effort[joint6]` 脱离饱和 + 3 秒后仍在 home | ✅ 验过 |
+| `mjData::time` 被清零 | `/clock` 时间倒流，tf2 buffer 清空、stamp 变成"未来" | 显式存旧值回写；实测 `/clock` 5.504→7.664 单调 | ✅ 验过 |
+| 派生量不刷新（不调 `mj_forward`） | 发布旧位姿配新时间戳，**无报错** | 调 `mj_forward`；但当前被 `mj_step` 顺带遮住了（[10.6](#106-mj_forward为什么需要它以及它当前其实是冗余的)） | ⚠️ 写对但暂时无从验证 |
+| reset 与 `mj_step` 并发 | `mjData` 数据竞争 → 偶发 NaN/段错误，**编译器和运行时都不报** | 靠默认单线程执行器 + 互斥回调组；前提写进了注释 | ⚠️ 靠默认值，没有强制手段 |
+| `response->success` 名不副实 | 它报告的是"我调用了 API"，不是"状态确实变成 home 了" | 可在回调里比对 `qpos` 与 `key_qpos` | ❌ 未做 |
+| reset 的不连续跳变污染下游 | 做数值微分的节点（算加速度/jerk）读到巨大假值 | 无任何机制。真机上不存在"瞬移"，下游没理由防 | ❌ 未防 |
+| `home` ≠ SRDF 的 `ready` | 第6周 MoveIt 和我们对"初始位姿"的理解不一致，**无报错** | 人工核对 + 写进 `architecture.md`（[10.3.2](#1032-三处初始位姿互不一致第6周会咬人)） | ⚠️ 只有文档 |
+| 服务类型写错 | **永久挂起**，和"服务不存在"现象完全一样 | `ros2 service list -t` 对类型 | ✅ 实测复现过 |
+
+**反查一遍**（按 [STUDY_NOTES_GUIDE.md](../../STUDY_NOTES_GUIDE.md) 5.1 的要求）：4 条 ⚠️ 和 2 条 ❌。最该补的是**第 2 条（没有 `home` 的模型）和第 7 条（`success` 名不副实）**——这两条都能靠一个不依赖 `rclcpp` 的单元测试覆盖，而这正好是 [13.2](#132-反向清单现在就该做的属于缺一次推演) 里"写单测"那条的最小切入点。第 6 条（并发）值得注意的是它**不可能靠测试发现**，只能靠设计约束。
+
+### 10.10 排查记录：第四次遗留进程（换了个更隐蔽的马甲）
+
+**现象**：做 [10.7](#107-怎么快速做一次独立的-fk-验证) 那个 TF 链条演示时，`/clock` 显示 **497 秒**，但节点才起了 3 秒。
+
+**线索**：按 [3.2](../../STUDY_NOTES_GUIDE.md) 的规则（荒谬的数字先怀疑尺子），查进程：
+
+```
+PID 81986  10:47:23  /usr/bin/python3 /opt/ros/humble/bin/ros2 run mujoco_bridge mujoco_bridge_node
+PID 82002  10:47:23  .../install/mujoco_bridge/lib/mujoco_bridge/mujoco_bridge_node   ← 孤儿子进程
+```
+
+一个 10:47 通过 `ros2 run` 起的节点在跑（不是这轮验证起的，本轮全程直跑可执行文件）。**正是 [3.1](../../STUDY_NOTES_GUIDE.md) 记的那个形状**：Python wrapper + C++ 子进程，两个 PID。
+
+**根因**：同 [8.7](#87-排查记录环境不干净导致的两次误判)/[9.13](#913-排查记录第三次遗留进程同一个坑的第三次)，第四次了。
+
+**这次的新信息，也是为什么它比前三次更隐蔽**：`ros2 node list` **只显示一个** `/mujoco_bridge`——因为两个节点**重名被去重了**。所以标准的开场检查 `ros2 node list` 这次**给出了干净的假象**。必须看 `ros2 topic info /clock` 的 Publisher count（或直接 `ps`）才能发现。
+
+**修复**：按数字 PID 杀掉两个，确认 `Publisher count: 1` 后重跑，数据即正常（sim time 20 秒，`world → link4` 回到 pitch 4.06°）。
+
+**受影响的数据范围**（对了时间戳）：[10.1](#101-改动清单与验证结果) 表格里的 reset 前后数据跑在 10:29–10:30，**早于这个遗留节点出现（10:47）**，所以 Stage D 的验证结论不受影响；重跑的干净数据也和它一致。受污染的只有第一次的 TF 链条演示，已重跑替换。
+
+**留下的经验（第 5 条，前四条见 [8.7](#87-排查记录环境不干净导致的两次误判) 和 [9.13](#913-排查记录第三次遗留进程同一个坑的第三次)）**：
+
+**`ros2 node list` 不能用来检查环境干净——同名节点会被去重成一个。** 这是它的设计（按节点名列举），不是 bug。[3.1](../../STUDY_NOTES_GUIDE.md) 的检查清单里 `ros2 node list` 那条要降级为辅助手段，**权威判据是 `ros2 topic info <topic>` 的 Publisher count 和 `ps -eo pid,comm`**。已同步进 STUDY_NOTES_GUIDE。
+
+---
+
+## 11. Stage E：命令订阅 + sine 测试脚本 + demo launch/rviz
+
+### 11.0 一句话总结
+
+给桥接节点加了第一个"从外部指挥仿真"的通道：订阅 `~/joint_command`（`trajectory_msgs/JointTrajectory`），把第一个 trajectory point 的 `positions` 按关节名查表写进 `mjData::ctrl`。构造期新增 `buildActuatorIndex()`，把关节名翻译成 actuator id（[4.3.4](#434-每个关节的状态变量应该是什么样以及一个-stage-e-地雷) 的"地雷 a"），并识别出夹爪那颗 tendon 驱动的 actuator、从模型现算它的 ctrl 换算比例（"地雷 b"）。另建了 `demo.launch.py`/`demo.rviz`（起桥接节点 + RViz）和 `scripts/sine_joint_test.py`（发缓慢正弦目标做人工验证）。过程中还排查出一个和代码逻辑完全无关、但会挡住所有可视化验证的环境坑：这个 devcontainer 里 RViz 的硬件加速 GL 初始化会永久卡住，需要 `LIBGL_ALWAYS_SOFTWARE=1` 强制走软件渲染才能绕开——已经写进 `demo.launch.py`。
+
+### 11.1 改动清单与验证结果
+
+| 文件 | 改动 |
+|---|---|
+| [mujoco_bridge_node.cpp](../../src/mujoco_bridge/src/mujoco_bridge_node.cpp) | 新增 `buildActuatorIndex()`、`onJointCommand()`、`~/joint_command` 订阅 |
+| [CMakeLists.txt](../../src/mujoco_bridge/CMakeLists.txt) | 新增 `install(DIRECTORY launch rviz DESTINATION share/${PROJECT_NAME})` |
+| [package.xml](../../src/mujoco_bridge/package.xml) | 新增 `rviz2`、`rviz_default_plugins` 的 `exec_depend` |
+| [launch/demo.launch.py](../../src/mujoco_bridge/launch/demo.launch.py) | 新建：起 `mujoco_bridge_node` + `rviz2` |
+| [rviz/demo.rviz](../../src/mujoco_bridge/rviz/demo.rviz) | 新建：只放 Grid + TF，不接 RobotModel（理由见 [9.10](#910-权衡为什么不用-robot_state_publisher)） |
+| [scripts/sine_joint_test.py](../../scripts/sine_joint_test.py) | 新建：给 `joint4` 发缓慢正弦目标 |
+
+没有新增 `MujocoApi` 字段——`buildActuatorIndex` 全靠直接读 `mjModel` 的数组成员（`actuator_trntype`/`actuator_trnid`/`tendon_adr`/`tendon_num`/`wrap_type`/`wrap_objid`），这些是普通结构体字段，不是 `mj_*` 函数，不受 [第12节](#12-后续计划与-session-交接) 那条"新用到的函数先 `dlsym`"约束。
+
+**启动日志**：
+
+```
+9 actuated joints: joint1, joint2, joint3, joint4, joint5, joint6, joint7, finger_joint1, finger_joint2
+TF: 3 static, 9 dynamic frames
+actuators: 7 arm joint(s) mapped, gripper actuator found
+```
+
+**功能实测**（干净环境，直跑可执行文件）：
+
+| 命令 | 结果 |
+|---|---|
+| `joint_names: [joint4], positions: [-2.5]` | `/joint_states` 读到 `joint4 = -2.503816` ✅ |
+| `joint_names: [finger_joint1, finger_joint2], positions: [0.02, 0.02]` | 两指收敛到 `0.020000902...`/`0.019999097...` ✅（tendon 耦合 + ctrl 换算都对） |
+| `positions: [0.01, 0.03]` 分别给两指 + 一个 `not_a_joint` | `WARN`：`finger joints commanded to different positions (0.0100 vs 0.0300) ... using 0.0300`；`WARN`：`unknown joint \`not_a_joint\`, ignoring` ✅ 两条都触发 |
+| 一条消息塞 2 个 point | `WARN_ONCE`：`message has 2 points; only points[0] is applied` ✅ |
+
+**launch + rviz 实测**（这一段的完整排查过程见 [11.11](#1111-排查记录rviz2-硬件加速-gl-卡死)）：`ros2 launch mujoco_bridge demo.launch.py` 后 RViz 窗口约 2 秒内出现（`xwininfo` 确认了真实窗口，不是空进程）；`ros2 node list` 能看到 RViz 自己创建的隐藏节点 `transform_listener_impl_*`（见 [11.8](#118-rviz-怎么拿到-tf-数据tf-显示项没有-topic-属性)）；Ctrl+C 后两个节点在 1 秒内干净退出，`ps` 确认无残留。
+
+**三节点联调实测**（完整步骤见 [11.9](#119-三节点联调)）：launch 起后 3 秒启第 `sine_joint_test.py`，再过 3 秒读到 `joint4 = -1.344`，又过 5 秒读到 `-1.663`——两个数都落在脚本设定的振荡范围（`-1.571 ± 0.3`）内且持续变化，证明命令确实在通过 `~/joint_command` 实时驱动仿真，不只是"跑起来没报错"。
+
+### 11.2 `buildActuatorIndex`：关节驱动与 tendon 驱动的两种索引
+
+> Q: 我不理解 TENDON 腱控制执行器的相关过程，为什么看起来比关节控制要繁琐得多，当前 panda 里唯一的腱控制就只有夹爪吗？`gripper_ctrl_scale` 是为什么要这样计算的？
+
+**当前模型里确实只有一个 tendon actuator**（查过 `panda.xml`：只有一个 `<tendon><fixed name="split">`，只有一个 `tendon="split"` 的 actuator）。但 `buildActuatorIndex` 没有硬编码"这是夹爪"，是靠 `actuator_trntype == mjTRN_TENDON` 这个结构判据识别出来的，延续 [8.4](#84-关节列表为什么从模型推导而不是写死)/[9.4](#94-static--dynamic-怎么划分用结构而不是名字) 的"读模型不猜名字"路子。
+
+**为什么 tendon 分支明显更长**——不是我写复杂了，是这两类 actuator 的 `actuator_trnid` 语义本来就不同：
+
+| | 直接关节 actuator（`mjTRN_JOINT`） | Tendon actuator（`mjTRN_TENDON`） |
+|---|---|---|
+| `actuator_trnid[2*i]` 是什么 | **直接是关节 id** | **是 tendon id，不是关节 id** |
+| 找到几个关节 | 1 个，查完 | tendon 是"多个关节的线性组合"，必须再查一层它自己的 wrap 列表才知道耦合了哪些关节 |
+| 查询步骤 | 一次数组下标 | id→tendon 对象→`tendon_adr[tid]`/`tendon_num[tid]` 定位它在全局 `wrap_type`/`wrap_objid` 数组里的那一段→过滤出 `mjWRAP_JOINT` 类型的条目→拿到关节 id |
+
+这次场景的 `split` tendon 是最简单的 `<fixed>` 类型（纯线性组合，无空间路由），所以只需处理 `mjWRAP_JOINT` 一种 wrap 类型；如果是 `<spatial>` tendon（真的绕滑轮走），wrap 列表里还会出现 `mjWRAP_SITE`/`mjWRAP_SPHERE`,那时代码分支会更多——当前场景不需要，没写。
+
+**`gripper_ctrl_scale_` 的算法，用真实数字交叉验证过一遍**：MJCF 注释自己写了换算关系：
+
+```
+gainprm="0.01568627451 0 0" biasprm="0 -100 -10"
+force = 0.01568627451*ctrl - 100*length - 10*velocity
+```
+
+稳态（`force=0`，`velocity=0`）时：`length = 0.01568627451/100 * ctrl = 0.0001568627451 * ctrl`。代入 `ctrl=255` 得 `length=0.04`——正好是手指关节自己的量程上限（`<default class="finger"><joint axis="0 1 0" type="slide" range="0 0.04"/>`，已用 `grep` 确认）。
+
+代码里反过来算：`gripper_ctrl_scale_ = actuator_ctrlrange[max] / jnt_range[max] = 255 / 0.04 = 6375`，正好是 `1/0.0001568627451`——和 MJCF 注释里 `0.04*100/255=0.01568627451` 是同一个比例关系的倒数。区别是我从模型的两个 range 数组现算，不是把 `255/0.04` 这个魔数直接抄进代码——这样如果上游改了任一边的 range，比例会自动跟着对。
+
+**一个隐藏假设，没写进代码**：`tendon_length = 0.5*finger_joint1 + 0.5*finger_joint2`（tendon 定义里的系数），用"任一根手指自己的 `jnt_range`"当分母，这只有在**两个系数都是 0.5、且两指始终相等**（靠 `<equality>` 约束强制）时才等价于"tendon 长度 = 单指开度"。如果哪天系数变成 0.7/0.3，这段换算会**悄悄算错**，没有任何报错——又一个"写对但暂时无从验证"的实例（[6.2](#62-广义坐标qpos--qvel-的表示方法以及为什么维度不相等) 记过第一个）。进 [13.2](#132-反向清单现在就该做的属于缺一次推演)。
+
+**另一个没暴露的限制**：如果模型多了第二个 tendon actuator，`gripper_actuator_id_ = i` 会被循环里后出现的那个**静默覆盖**，没有任何警告。触发条件：加第二个 tendon 驱动的机构时。
+
+### 11.3 命令回调怎么工作：`ctrl` 是持续生效的寄存器，不是一次性动作
+
+> Q: 所以这是 bridge 节点的订阅功能对吗？表示它一旦接到对应的 message 就会触发 joint command 的回调，然后更新 data，最后在 onTimer 的回调里更新机械臂状态对吗？而在 Stage E 里，执行发送功能的是 SineJointTest 节点对吗？
+
+流程基本对，但"收到消息"和"更新机械臂状态"之间有两处需要拆开的地方：
+
+1. **"接到"和"触发"之间有一层调度**：消息先落进 DDS 接收队列,`onJointCommand` 什么时候真正执行取决于 `spin()` 里的单线程执行器什么时候轮到它——不是消息一到就同步跑，是排进这个节点唯一执行线程的队列,和 `onTimer`/`onReset` 抢同一个线程（[10.8](#108-并发ros2-的执行器模型以及要不要提前为并行做准备) 讲过的执行器模型）。
+2. **`onJointCommand` 只写 `mjData::ctrl`**——这只是改了 PD 控制器的"目标寄存器",机械臂一根杆都没动,`qpos`/`xpos` 分毫不变。真正让手臂动起来的,是**之后每一次** `onTimer` 里的 `mj_step`：它读**当前**的 `ctrl`,代入 [11.4](#114-position-servo-actuator-的本质一个-pd-控制器) 那个力公式算出力矩,再做一步刚体积分,`qpos` 才挪动一点点。这个收敛是逐步的——实测 sine 脚本发的目标从 t=0 开始变化,`joint4` 在 t=3s 读到 `-1.38`,t=7s 读到 `-1.79`,是跟着正弦缓慢逼近,不是瞬间跳到目标。
+
+而且 **`ctrl` 是持续生效的寄存器,不是一次性事件**：两条 `~/joint_command` 消息之间的所有 500Hz 物理步,伺服都在朝着**上一条命令**的目标使劲,直到下一条消息把它覆盖掉。这和 [10.5](#105-为什么保持-sim-time-单调) 的 reset（一次性瞬间改状态）性质完全不同。
+
+`SineJointTest` 确实是完全独立的进程、独立的 rclpy 节点（`sine_joint_test`），和 `mujoco_bridge` 之间**只通过 topic 通信，没有任何直接函数调用关系**——这正是 ROS 节点解耦的标准形态：谁发消息、谁收消息互不知道对方的实现，只认名字和消息类型。
+
+### 11.4 position-servo actuator 的本质：一个 PD 控制器
+
+> Q: 照你所说，Franka 真机有力矩、位置、速度三种控制模式，但仿真这里只用位置控制对吗？而且 MuJoCo 底层提供具体的控制，我们只需要在 MJCF 里给 PD 参数，代码里给目标位置就行对吗？
+
+基本对，但有一处该分清楚"谁做了什么"。MJCF 的 `<default class="panda">` 定了 `biastype="affine"`（`gaintype` 默认 `fixed`），配合 `actuator1` 的 `gainprm="4500" biasprm="0 -4500 -450"`。MuJoCo 通用 actuator 的力公式是：
+
+```
+force = gain(ctrl) + bias(length, velocity)
+gain  = gainprm[0]                                              (gaintype=fixed)
+bias  = biasprm[0] + biasprm[1]*length + biasprm[2]*velocity    (biastype=affine)
+```
+
+代入这组数（`length` = 关节转角 `qpos`，`velocity` = `qvel`）：
+
+```
+force = 4500*ctrl + (0 - 4500*qpos - 450*qvel)
+      = 4500*(ctrl - qpos) - 450*qvel
+```
+
+这就是一个标准 **PD 位置控制器**：`kp=4500`、`kv=450`、目标位置 = `ctrl`。`ctrl` 本身不是关节角，是**"喂给这个 PD 控制器的目标值"**——只是因为目标和输出单位一致（都是弧度），才容易被误当成直接赋值。actuator8（夹爪）用一样的结构但 `kp` 软得多（[11.2](#112-buildactuatorindex关节驱动与-tendon-驱动的两种索引) 那组数换算出来的等效增益），且 `length` 指的是 tendon 长度不是某一根手指的角度。
+
+**"谁做了什么"要分清**：MuJoCo 提供的是"通用 actuator 力公式"这台机器，每个物理步都会机械地算一遍，本身不区分位置/速度/力矩控制。**"这是个 PD 位置控制器"这个语义，是 `panda.xml`（mujoco_menagerie 上游）通过选定这组具体的 `gainprm`/`biasprm` 数字实现出来的**——是上游选择让这台通用机器表现成 PD，不是它天生就是 PD。我们的代码只做一件事：把目标值写进这台机器的一个输入端口（`ctrl`）。
+
+所以真机的"位置/速度/力矩三种控制模式"在这个仿真里**目前只有位置模式存在**，不是"代码没实现"，是**MJCF 里压根没有配那种 actuator**——想要力矩控制，需要在 vendor 的 MJCF 里新增一个 `biastype="none" gaintype="fixed" gainprm="1"` 的直通力矩 actuator（`force = ctrl`，无反馈），这是改模型文件的工作。进 [13.1](#131-清单) 悬挂清单：解锁条件是第5周真需要力控抓取时。
+
+### 11.5 权衡：为什么只取 `points[0]`，不做真正的轨迹跟随
+
+计划里写的是"取第一个 trajectory point"，照做了，但这是个需要说清楚的取舍：
+
+| | 现在的做法（topic + 只读第一个点） | 真正的轨迹跟随（如 `FollowJointTrajectory` action） |
+|---|---|---|
+| 通信形状 | fire-and-forget，无回执 | action：有 feedback、可 cancel、执行完有 result |
+| 时间语义 | 完全没有，`time_from_start` 被忽略 | 严格按各点的时间戳插值，匀速/匀加速过渡 |
+| 平滑性 | 无——`ctrl` 瞬间跳到新目标，PD 自己决定怎么追（可能欠阻尼震荡） | 有，中间点做插值 |
+| 适合 | "设个目标点，看伺服怎么追"——本 stage 的验证目的 | 真正执行一条规划出来的轨迹（第6周 MoveIt 场景） |
+
+选轻量 topic 的理由和 [10.2](#102-service-vs-topic什么时候用哪个) 讲 service vs topic 是同一个判据的另一面：这里既不需要"调用者知道执行完了没"（不是一次性动作），也不需要"严格时间执行"（不是回放一条规划轨迹），只需要"持续告诉伺服当前目标是什么"——这正是 topic 的形状。真正的轨迹执行应该长在**这个节点之上**（比如一个把 `FollowJointTrajectory` action 拆成一串高频 `~/joint_command` 消息的适配层），不应该塞进桥接节点本身——这和 [7.5](#75-单进程-embed-vs-分进程--ipc为什么实现上差在哪)"桥接节点该不该拥有物理循环"是同一层"职责边界"问题的兄弟问题，进 [13.1](#131-清单) 第1条的关联范围。
+
+**一个补的观测性缺口**：一条消息塞多个 point 之前会**完全静默**只用第一个,现在改成了 `RCLCPP_WARN_ONCE`。这是讲解前主动补的一条,理由和 [8.5.1](#851-为什么是-5-倍decimation-到底管什么) 那条"宁可难看也不要静默"是同一个设计取向。
+
+### 11.6 私有命名（`~`）语法：只存在于源码里，解析后不可见
+
+> Q: topic 和 service 的命名，为什么都要用波浪号这种相对路径格式？代码中的波浪号，在实际调试的时候并不会出现。
+
+ROS 的 topic/service/param/node 名字统一采用**类似文件系统路径的层级命名法**（继承自 ROS1），目的是支持**命名空间隔离**（两个机器人实例不撞名）和**重映射**（launch 文件/命令行 `-r old:=new`）。三种写法解析规则不同：
+
+| 写法 | 解析方式 | 例子 |
+|---|---|---|
+| `/foo`（绝对） | 原样，不受节点命名空间影响 | `/clock`、`/joint_states` |
+| `foo`（相对） | 拼到节点**命名空间**后面 | 节点在 `/panda` 下，`foo` → `/panda/foo` |
+| `~foo` / `~/foo`（私有） | 拼到节点**全限定名**（命名空间+节点名）后面 | `~/reset` → `/mujoco_bridge/reset`（`ros2 topic list` 实测确认） |
+
+**波浪号只是源码里的一个占位符号，在 `create_service`/`create_subscription` 被调用的那一刻就被 rclcpp 解析替换掉了**——之后不管是 DDS 发现、`ros2 topic list`，还是 wire 上的数据，都只看得到解析后的结果（`/mujoco_bridge/joint_command`）。这就是为什么调试时从没见过波浪号：它在"变得可见"之前就已经不存在了。
+
+选私有名（`~/reset`、`~/joint_command`）而不是相对名的理由，[10.4](#104-真机上误用-reset-会发生什么) 讲过一半：私有名连节点名一起折进去，即使两个同类型节点共享同一个命名空间，各自的 `~/joint_command` 依然是两个不同的名字——这正是"第二个仿真实例要能独立收命令"这个需求要的隔离粒度，相对名做不到（两个实例的相对名会撞成同一个）。
+
+### 11.7 launch 文件机制：两阶段执行、`DeclareLaunchArgument` 与 `LaunchConfiguration`
+
+`ros2 launch <pkg> <file>.py` 分两阶段：
+
+1. **构建阶段（纯 Python，不启动任何进程）**：`ros2 launch` 把这个文件当模块导入，调用 `generate_launch_description()`，拿到一个 `LaunchDescription` 对象——只是一棵"待执行动作"的描述树，`Node(...)` 这行代码此刻只是在造一个"描述"对象，不是在跑 `ros2 run`。
+2. **执行阶段**：`LaunchService` 遍历这棵树，对每个 `Node` action 直接 `Popen` 目标可执行文件——实测确认了 `mujoco_bridge_node-1`/`rviz2-2` 是 launch 进程的**直接**子进程（`ps -eo pid,ppid` 查过，PPID 就是 launch 自己），不再套一层 `ros2run` 的 wrapper（[11.12](#1112-排查记录ros2-run-对-sigintsigterm-的反应不对称) 讨论的双层转发问题在这条路径上不存在）。日志里 `[mujoco_bridge_node-1]`/`[rviz2-2]` 这种前缀是 launch 的日志聚合器给每个子进程输出打的标记。
+
+`DeclareLaunchArgument('rviz_config', default_value=...)`：给这个 launch 文件本身注册一个可从命令行覆盖的参数——和节点的 ROS 参数（比如 `joint_state_rate_hz`）是完全两套东西，永远不会出现在 `ros2 param list` 里。实测确认注册生效：
+
+```
+$ ros2 launch mujoco_bridge demo.launch.py --show-args
+Arguments (pass arguments as '<name>:=<value>'):
+    'rviz_config':
+        no description given
+        (default: PathJoinSubstitution(...))
+```
+
+`LaunchConfiguration('rviz_config')`：一个**延迟解析的占位符**——"到执行阶段时，去查 `rviz_config` 这个参数当前的值"。必须用这种对象而不是普通字符串，是因为写这个 Python 文件的那一刻还不知道用户会不会在命令行覆盖它，值只有真正执行时才能确定。
+
+**怎么跑起来看可视化**：
+
+```bash
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+ros2 launch mujoco_bridge demo.launch.py
+```
+
+**怎么改参数**：目前只暴露了一个 launch 级参数——RViz 配置文件路径：
+
+```bash
+ros2 launch mujoco_bridge demo.launch.py rviz_config:=/path/to/other.rviz
+```
+
+节点自己的 ROS 参数（`joint_state_rate_hz`/`tf_rate_hz`）目前没有在这个 launch 文件里暴露成可覆盖项，想要的话需要往 `bridge_node = Node(...)` 里加 `parameters=[{...}]` 关键字参数并配一条新的 `DeclareLaunchArgument`。进 [13.2](#132-反向清单现在就该做的属于缺一次推演)——现在不做，触发条件是需要"一条命令改仿真发布频率"时。
+
+### 11.8 RViz 怎么拿到 TF 数据：TF 显示项没有 Topic 属性
+
+> Q: rviz2 实际上是从哪里获取数据的，如何指定的，我没有看到 cpp 文件里有，所以只需要 demo.rviz 就足够吗？但我也没看到 demo.rviz 里有任何关于 bridge node 发出的 topic。
+
+**先纠正一个隐含假设**：不是"`demo.rviz` 应该有 topic 名字但没写"，是**TF 这一种显示插件本来就没有"Topic"这个配置项**——查了这个容器里装的 `rviz_default_plugins` 头文件（`/opt/ros/humble/include/rviz_default_plugins/.../tf/tf_display.hpp`），源码级证实：
+
+```cpp
+class TFDisplay : public rviz_common::Display     // 直接继承 Display，不是"话题型"基类
+```
+
+对比一个真正"话题驱动"的显示项（比如 `GridCellsDisplay`）：
+
+```cpp
+class GridCellsDisplay : public rviz_common::MessageFilterDisplay<nav_msgs::msg::GridCells>
+```
+
+`MessageFilterDisplay<T>` 这个基类才是"给你一个可配置的 Topic 属性 + 自己建订阅"的地方——这就是为什么在别的 `.rviz` 文件里会看到 `Image`/`LaserScan`/`PointCloud2`/`MarkerArray` 这些显示项底下有 `Topic: /xxx` 字段，而 `TF` 和 `Grid`（`GridDisplay` 同样直接继承 `Display`）两个都没有。
+
+**RViz 真正怎么拿到 `/tf`/`/tf_static`**：实测起 `mujoco_bridge` + `rviz2` 后查整个图：
+
+```
+$ ros2 node list
+/mujoco_bridge
+/rviz2
+/transform_listener_impl_55d37eb02de0     ← 这个
+
+$ ros2 node info /transform_listener_impl_55d37eb02de0
+  Subscribers:
+    /tf: tf2_msgs/msg/TFMessage
+    /tf_static: tf2_msgs/msg/TFMessage
+```
+
+**RViz 进程内部悄悄启动了第二个 ROS 节点**，名字是 `transform_listener_impl_<随机十六进制>`，跟 `/rviz2` 这个节点是两个独立的图节点。这个订阅是 `tf2_ros::TransformListener` 这个 C++ 类自己在构造时硬编码建立的——固定订阅**绝对路径**的 `/tf`（普通 QoS）和 `/tf_static`（transient_local，对应 [9.3](#93-为什么必须是两个-broadcaster) 的 latched 机制），名字写死在 `tf2_ros` 库里，不是任何 `.rviz` 配置项、也不是 RViz 自己的代码决定的。RViz 启动时创建**一个全局唯一**的 `TransformListener` 实例（挂在 `rviz_common::FrameManager` 上，被所有需要坐标变换的显示项共享）。
+
+`demo.rviz` 里 `TF` 的 `Show Names`/`Show Axes`/`Frame Timeout`/`Marker Scale` 等——只控制"已经在共享 buffer 里的数据要不要画、怎么画"，不控制数据从哪来。`Grid` 的 `Reference Frame: world`、`Global Options` 的 `Fixed Frame: world`——同理，都不订阅任何话题，只是问共享的 `FrameManager`，而 `FrameManager` 内部问的正是那个 `transform_listener_impl_*` 节点收集来的数据。
+
+**`demo.rviz` 是否就够了**：够，但前提是桥接节点发的话题名恰好命中了 `tf2_ros` 硬编码的那两个绝对名字。这不是巧合——[9.1](#91-改动清单与验证结果)/[8.1](#81-改动清单与验证结果) 已经确认过桥接节点两个 broadcaster 建的正是全局名 `/tf`/`/tf_static`（不是私有名）。如果改成私有名，RViz 会立刻看不到任何 TF，不是 `demo.rviz` 要改，是那样做本身就打破了整个生态约定（`robot_state_publisher`、`tf2_echo`、RViz，全都靠这两个绝对名字互相找到）。
+
+**这也印证了 [9.2](#92-动机tf-以后在哪些环节被用) 说的"TF 是全项目共享坐标词汇表"**：`demo.rviz` 完全不知道数据来自 `mujoco_bridge_node`,它甚至不知道数据来自 MuJoCo 还是 `robot_state_publisher`——TF 显示项和具体发布者之间没有任何绑定关系,只认话题名字。RViz 只是这个词汇表的一个消费者,和 `tf2_echo`、第3周的 FK gtest 享有完全对等的接入方式。
+
+`demo.rviz` 是我手写的纯文本 YAML,不是从真实 RViz 会话导出的——正常流程是开着 RViz、在 GUI 里勾好显示项、`File > Save Config As` 让 RViz 自己序列化。这个格式确实就是 RViz 会生成的格式,手写没有语法禁忌(实测过它能被 RViz 正常加载、解析、不崩溃),但少了"GUI 帮你保证字段名/结构对"这层保险。
+
+### 11.9 三节点联调
+
+```bash
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+ros2 launch mujoco_bridge demo.launch.py     # 终端1：起 bridge + rviz
+```
+
+等窗口出现后，另开终端：
+
+```bash
+/usr/bin/python3 scripts/sine_joint_test.py   # 终端2：必须用 /usr/bin/python3，见 CLAUDE.md pyenv 变体二
+```
+
+**实测验证过命令确实驱动了仿真**（不只是"跑起来没报错"）：起 launch 后 3 秒启动 sine 脚本，再过 3 秒读到 `joint4 = -1.344`，又过 5 秒读到 `-1.663`——两个数持续变化且落在脚本设定的振荡范围（`-1.571 ± 0.3`）内。整个过程窗口一直存在（`xwininfo` 复查过），结束时 Ctrl+C 两个节点都干净退出。
+
+**在 RViz 里应该看到什么**：`joint4` 驱动的是 `link4`（相对 `link3` 的关节，[9.9](#99-命名我们发-mjcf-的原生名) 讲过命名），所以 TF 显示里应该看到 `link4` 这根坐标轴绕着 `link3` 缓慢摆动，周期约 10 秒（`sine_joint_test.py` 里 `FREQUENCY_HZ = 0.1`）。想换个视觉上更明显的关节，改脚本顶部的 `JOINT_NAME` 即可（比如 `joint1`，摆动会带动更大范围的连杆运动）。
+
+### 11.10 失败模式与验证手段
+
+| 失败模式 | 现象 | 怎么发现/防住 | 这个 stage 验过？ |
+|---|---|---|---|
+| `ctrl` 按 joint id 而非 actuator id 写 | 臂关节碰巧对，夹爪错位/越界 | `actuator_by_joint_` 按 `actuator_trnid` 建表，结构上避开 | ✅ 验过（joint4 命令生效且不影响其他关节） |
+| 夹爪目标按 `0..0.04` 直接写进 `ctrl`（该是 `0..255`） | 几乎全闭 | `gripper_ctrl_scale_` 从模型读比例，不硬编码 | ✅ 验过（0.02m 目标 → 两指收敛到 0.02m） |
+| 两指各给不同目标 | 物理上不可能，之前是"后写的静默覆盖前一个" | 显式识别 + `RCLCPP_WARN` 报冲突 | ✅ 验过 |
+| 未知关节名 | `.find()` 返回 `end()` 却没检查，UB/崩溃 | 查表 miss 就 `WARN` + `continue`，不影响其余关节 | ✅ 验过 |
+| 消息带多个 point 却只用第一个 | 看起来"动了"，但没人告诉你其余点被丢了 | `RCLCPP_WARN_ONCE` | ✅ 验过 |
+| `positions.size() != joint_names.size()` | 越界读 | 显式检查后整条消息拒绝 | ⚠️ 有分支，没构造反例测过 |
+| 命令回调与 `onTimer` 并发写 `ctrl` | 数据竞争 | 同 [10.8.3](#1083-不要提前加锁但要把串行前提写下来)，默认单线程执行器 + 互斥回调组 | ⚠️ 靠默认值，没有强制手段 |
+| RViz 硬件加速 GL 初始化卡死 | 窗口不出现，Ctrl+C 无法正常退出 | `LIBGL_ALWAYS_SOFTWARE=1`，见 [11.11](#1111-排查记录rviz2-硬件加速-gl-卡死) | ✅ 验过修复有效 |
+| `gripper_ctrl_scale_` 假设手指 `jnt_range` 下限为 0 | 上游若改零点会静默算错 | 无——没写断言 | ❌ 未防（见 [11.2](#112-buildactuatorindex关节驱动与-tendon-驱动的两种索引)） |
+
+**反查一遍**（按 [STUDY_NOTES_GUIDE.md](../../STUDY_NOTES_GUIDE.md) 5.1 的要求）：1 条 ⚠️ 有分支未测，1 条 ⚠️ 靠默认值，1 条 ❌ 完全未防。**这次新出现了一类之前没有的失败模式——环境问题伪装成代码问题**（RViz GL 卡死那条），它不在这张表的"改代码就能防"范畴内，进 [11.11](#1111-排查记录rviz2-硬件加速-gl-卡死) 单独记录。
+
+### 11.11 排查记录：rviz2 硬件加速 GL 卡死
+
+**现象**：用户直接 `rviz2 -d demo.rviz` 跑，CLI 无响应（前台 GUI 程序本身会占住终端，这符合预期），但**没有任何窗口出现**；Ctrl+C 后只打印 `signal_handler(SIGINT/SIGTERM)` 一行，进程不退出；`ros2 launch` 场景下等一段时间会退出但报 `ERROR`。
+
+**排查过程**：
+
+1. 先确认了环境结构：`/.dockerenv` 存在，但 PID 命名空间和主机共享（`readlink /proc/1/ns/pid` 和 `/proc/self/ns/pid` 完全一样）——这个 devcontainer 和主机共享 PID/网络命名空间，`ps` 能看到 `gnome-shell`/`Xwayland`/VSCode 窗口（标题栏正是这份 week1.md 打开的窗口），证实我们操作的是同一个图形环境。环境变量里有 `REMOTE_CONTAINERS_DISPLAY_SOCK=/tmp/.X11-unix/X2`，坐实这是 VSCode Remote-Containers 转发 X11 到主机 Xwayland 的路径（week1.md [5.1](#51-include-rclcpprclcpphpp-标红怎么办) 提过的 attach 方式）。
+2. 实际起了一次 `rviz2 -d demo.rviz`：进程存活，**24 秒过去日志一个字都没打**，`xwininfo -root -tree` 查整个窗口树，只找到一个 3x3 像素的"Qt Selection Owner"内部剪贴板窗口，**RViz 主窗口从未被创建**。
+3. 查各线程 `wchan`（`/proc/<pid>/task/*/wchan`）：`futex_wait_queue`/`do_poll.constprop.0`/`__skb_wait_for_more_packets`——全部是"干净地在等"，没有任何线程在 `R`（运行）状态烧 CPU，排除了死循环/无限重试。没有 `strace` 可用，没法钉死具体卡在哪个系统调用上。
+4. 用 `LIBGL_ALWAYS_SOFTWARE=1`（强制 Mesa 走纯软件光栅化 llvmpipe，跳过硬件加速协商）重跑：**2 秒内窗口就出现了**：
+   ```
+   [INFO] [rviz2]: OpenGl version: 4.5 (GLSL 4.5)
+   0x1600013 "...demo.rviz - RViz": 1200x825+20+90
+   ```
+   Ctrl+C 之后也在正常时间内干净退出，不再需要 SIGTERM/SIGKILL 强杀。
+
+**根因**：这个 devcontainer 的 X11 转发路径上，Qt/Ogre 尝试走**硬件加速的间接 GLX 渲染**协商 GPU 上下文时卡在某个等待上——"容器转发的 X11 + 间接 GPU 渲染"是 Xwayland/Mesa/NVIDIA 驱动堆栈里已知的坏组合，常见解法就是绕开硬件加速。
+
+**为什么 `ros2 launch` 场景会"过一段时间自己退出"**：launch 自带升级机制，`launch.log` 完整记录了这个过程：
+
+```
+[WARNING] user interrupted with ctrl-c (SIGINT)
+...(反复忽略后续 Ctrl+C)...
+[ERROR] process[rviz2-2] failed to terminate '5' seconds after SIGINT, escalating to 'SIGTERM'
+[ERROR] process[rviz2-2] failed to terminate '10.0' seconds after SIGTERM, escalating to 'SIGKILL'
+[ERROR] process has died [pid ..., exit code -9, ...]
+```
+
+即 SIGINT 等 5 秒 → 升级 SIGTERM 再等 10 秒 → 升级 SIGKILL。所以 15 秒后看到的"退出+ERROR",其实是 launch 代替用户强杀了它,rviz2 自己从未真正响应过信号——和直接跑时"无法退出"是同一个根因,只是 launch 帮你兜了底,单独跑没人兜底。
+
+**修复**：给 `demo.launch.py` 的 `rviz2` Node action 加了 `additional_env={'LIBGL_ALWAYS_SOFTWARE': '1'}`。重新验证过完整一轮：窗口 2 秒内出现、Ctrl+C 后 1 秒内干净退出（`launch.log` 显示 `process has finished cleanly`，不再有任何 ERROR/escalation）、`ps` 确认无残留。
+
+**代价**：纯软件渲染比硬件加速慢，但对 RViz 显示几个坐标轴和一个网格这种负载完全够用，不会有可感知的卡顿。**触发重新评估的条件**：如果后续场景（比如渲染真实 mesh、点云）在软件渲染下明显卡顿，需要回头查是否有更精细的硬件加速方案（比如 `VirtualGL`/直接 GLX 而非间接），而不是默认继续加大 `LIBGL_ALWAYS_SOFTWARE`。
+
+### 11.12 排查记录：`ros2 run` 对 SIGINT/SIGTERM 的反应不对称
+
+> Q: 你所说的遗留进程问题，我自己使用 ros2 run + Ctrl+C 从来不会遇到，希望你检查一下。
+
+查了 `ros2run` 的源码（`/opt/ros/humble/lib/python3.10/site-packages/ros2run/api/__init__.py`）并实测复现了三种情况：
+
+```python
+process = subprocess.Popen(cmd)
+while process.returncode is None:
+    try:
+        process.communicate()
+    except KeyboardInterrupt:
+        # the subprocess will also receive the signal and should shut down
+        pass          # ← 什么都不做，只是回去继续等
+```
+
+这行注释里"the subprocess will also receive the signal"的假设，**只有信号发给整个进程组时才成立**：
+
+| 操作 | 打到谁 | wrapper 结果 | child 结果 |
+|---|---|---|---|
+| 终端里按 Ctrl+C | **整个前台进程组**（wrapper 和 child 的 PGID 相同，`ps -o pgid` 验证过） | 死 | 死——child 自己的 rclpy SIGINT handler 干净关闭，child 退出后 wrapper 的 `communicate()` 才返回 |
+| `kill -INT <wrapper_pid>`（只打一个 PID） | 只有 wrapper | **5 秒内毫无反应，两个都活着** | 活着 |
+| `kill <wrapper_pid>`（默认 SIGTERM，只打一个 PID） | 只有 wrapper | **立刻死**（Python 没捕获 SIGTERM，走系统默认动作） | **活着，变成孤儿**（PPID 从 wrapper 变成 5040/containerd-shim） |
+
+所以真相比之前笔记写的更细：**SIGTERM 打 wrapper 会杀死它、留下孤儿子进程**（[第12节](#12-后续计划与-session-交接) 之前的结论对）；但**SIGINT 打 wrapper 是"假死"——两个都不会退出**，这条之前没记录。`timeout N ros2 run ...`（[8.7](#87-排查记录环境不干净导致的两次误判) 的第一次坑）默认发的是 SIGTERM,只打给它直接 fork 出来的那一个进程(wrapper),走的正是第三条路径。
+
+**顺带发现一个真实的活教材**：排查过程中查到这个容器里躺着一对已经跑了 55 分钟的 `ros2`+`mujoco_bridge_node` 孤儿进程,不是本轮任何操作起的——另一次 session/操作用了危险的清理方式,孤儿进程从此静默跑着,直到这次用 `ps -eo pid,lstart,etime,comm` 撞见。已清理。
+
+**一个新发现，值得补进 [3.1](../../STUDY_NOTES_GUIDE.md) 的环境卫生检查方法论本身**：清理完孤儿进程后，`ros2 node list` 一度**仍然显示重复的节点名**（明明 `ps` 已经确认对应进程不存在了）。原因是 `ros2` CLI 走的是一个后台守护进程（`ros2-daemon`），它缓存图状态，不会立刻反映刚发生的进程退出；`ros2 daemon stop` 强制它重新发现之后才恢复干净。**结论：`ps -eo pid,comm` 才是即时权威判据；`ros2 node list`/`ros2 topic info` 这类走 CLI daemon 的命令,偶尔会滞后于真实进程状态,不能完全信任"立刻查到就是当下事实"**。这是对 [3.1](../../STUDY_NOTES_GUIDE.md)/[3.2](../../STUDY_NOTES_GUIDE.md) 那套"权威判据"方法论的一条重要补充,已同步进 STUDY_NOTES_GUIDE。
+
+### 11.13 排查记录：`&&` 链式后台化产生的孤儿进程（第六种变体）
+
+在准备三节点联调验证时,我自己踩到了第六种"遗留进程"变体,机制和之前四次（[8.7](#87-排查记录环境不干净导致的两次误判)/[9.13](#913-排查记录第三次遗留进程同一个坑的第三次)/[10.10](#1010-排查记录第四次遗留进程换了个更隐蔽的马甲)）以及 [11.12](#1112-排查记录ros2-run-对-sigintsigterm-的反应不对称) 都不同：
+
+```bash
+source /opt/ros/humble/setup.bash && source install/setup.bash && ./mujoco_bridge_node > log 2>&1 &
+```
+
+这种**用 `&&` 串联多条命令再整体丢进后台**的写法，`$!` 拿到的是执行这条串联列表的 **bash 子 shell** 的 PID，真正的最后一条命令是这个子 shell **的子进程**，不是被 exec 替换掉。`kill $!` 只杀了子 shell,真正的节点进程被 init 收养继续跑。
+
+**复现**（用无害命令验证机制，不用真实节点）：
+
+```
+$ true && true && sleep 20 & echo "wrapper PID (\$!) = $!"
+wrapper PID ($!) = 136678
+$ ps --ppid 136678 -o pid,ppid,comm
+    PID    PPID COMMAND
+ 136695  136678 sleep        ← 真正的 sleep 是子 shell 的子进程
+```
+
+这个模式我自己在测试脚本里写了两次,两次都留了孤儿进程,好在都用 `ps -eo pid,comm | awk '$2 ~ /^mujoco_bridge/'` 按可执行文件名清理掉了。这条建议补进 [CLAUDE.md](../../CLAUDE.md)/[STUDY_NOTES_GUIDE.md](../../STUDY_NOTES_GUIDE.md) 3.1 的"起后台节点"提醒——现有文档只警告了 `ros2 run` 和 `setsid`,没警告"`&&` 链式命令背景化"这个变体。
+
+**六种遗留进程/信号变体到目前为止的完整清单**（供以后新增变体时对照）：
+
+| # | 变体 | 根因 | 记录位置 |
+|---|---|---|---|
+| 1 | `ros2 run` wrapper + `timeout`/脚本 `kill` | SIGTERM 只打 wrapper,child 被 init 收养 | [8.7](#87-排查记录环境不干净导致的两次误判) |
+| 2 | `setsid ... &` + `kill -- -$!` | `setsid` 先 fork,`$!` 不是新进程组的 PGID | [8.7](#87-排查记录环境不干净导致的两次误判) |
+| 3 | 多实例参数/服务同名冲突 | `ros2 param get`/service 在同名节点下应答方不确定 | [9.13](#913-排查记录第三次遗留进程同一个坑的第三次) |
+| 4 | `ros2 node list` 去重假象 | 按节点名列举,同名实例被合并显示 | [10.10](#1010-排查记录第四次遗留进程换了个更隐蔽的马甲) |
+| 5 | `ros2 run` 的 SIGINT"假死" | 只打 wrapper 一个 PID 的 SIGINT 被吞掉,两边都不退出 | [11.12](#1112-排查记录ros2-run-对-sigintsigterm-的反应不对称) |
+| 6 | `&&` 链式命令背景化 | `$!` 是子 shell 的 PID,不是真正命令的 PID | 本节 |
+
+## 12. 后续计划与 Session 交接
+
+Stage A（[第7节](#7-stage-amujoco_bridge_node-最小实现模型加载--物理步进定时器)）、Stage B（[第8节](#8-stage-bclock--joint_states)）、Stage C（[第9节](#9-stage-ctfstatic--dynamic)）、Stage D（[第10节](#10-stage-dreset-service)）、Stage E（[第11节](#11-stage-e命令订阅--sine-测试脚本--demo-launchrviz)）均已完成、build+run 验证通过、讲解已记录。**`mujoco_bridge` 包在第1周计划范围内的开发到此结束。** 下一步按计划书 Roadmap 进入第2周（ground-truth pick-and-place + 夹爪动作），具体范围留给新 session 开周时定义 `week2.md`。以下是第1周留下的计划摘要，供接着回顾（原始完整计划见 `.claude/plans` 下已批准的计划文件，这里只摘录关键点方便快速回忆上下文）。
 
 **执行方式约定**（沿用 Stage A 的模式，不要跳过）：每个 stage 写完代码后先 `colcon build` + 实际跑一遍验证，验证通过再讲解涉及的概念，讲解完追问/确认理解后再写进本文件，最后才进入下一个 stage。每个 stage 建议除了"这段代码怎么工作"之外，再补至少一条**权衡/替代方案对比**和一条**失败模式/怎么验证**类问题（这是第 4 轮反思后定下的规矩，避免只深挖单段代码语法）。
 
-**验证环境卫生（Stage B 踩坑后补的）**：每次跑验证前先 `ros2 node list` 确认没有遗留节点；起后台节点用 `setsid ros2 run ... &` + `kill -- -$PGID`（或 `pkill -f mujoco_bridge_node`），**不要** `kill` `ros2 run` 的 PID——那只杀 Python wrapper，C++ 子进程会变成孤儿继续发话题，导致 `ros2 topic hz` 读到成倍的频率。完整排查记录见 [8.7](#87-排查记录环境不干净导致的两次误判)。
+**验证环境卫生（踩了四次坑之后的定稿，权威版本见 [STUDY_NOTES_GUIDE.md](../../STUDY_NOTES_GUIDE.md) 3.1）**：
+
+```bash
+ps -eo pid,comm | awk '$2 ~ /^mujoco_bridge/ {print $1}'   # 应为空
+ros2 topic info /clock                                      # 应为 Publisher count: 1
+```
+
+三条修正过的结论，每条都对应一次真实误判：
+
+1. **`ros2 node list` 不是可靠的干净判据**——同名节点会被**去重成一个**，两个实例在跑时它照样只显示一个 `/mujoco_bridge`（第四次踩坑的新发现，见 [10.10](#1010-排查记录第四次遗留进程换了个更隐蔽的马甲)）。它只能当辅助手段。
+2. **起后台节点直接跑可执行文件，不要经过 `ros2 run`**——`ros2 run` 是 Python wrapper，`kill` 它的 PID 只杀 Python 那层，C++ 子进程被 init 收养后继续发话题。`setsid ... &` + `kill -- -$!` 也不可靠（`setsid` 先 fork，`$!` 不是新进程组的 PGID），这曾是本文件里写着的"正确做法"，第二次就栽在它上面。
+3. **`pkill -f` 和 `ps ... | grep -f` 会自匹配**（前者会杀掉自己所在的 shell，后者会报假警报）。用 `ps -eo pid,comm` 按可执行文件名匹配。
+
+完整排查记录：[8.7](#87-排查记录环境不干净导致的两次误判)（前两次）、[9.13](#913-排查记录第三次遗留进程同一个坑的第三次)（第三次）、[10.10](#1010-排查记录第四次遗留进程换了个更隐蔽的马甲)（第四次）。
 
 **硬约束（Stage A 踩坑后定下，后续都要遵守）**：不能再 `target_link_libraries(mujoco::mujoco)` 直接链接 MuJoCo（会和 ROS2 的 fastrtps 因为 tinyxml2 符号冲突段错误，见 [7.2](#72-调试时踩到的段错误符号冲突与-dlopen-隔离)）。任何新用到的 `mj_*` 函数，都要先加进 `mujoco_bridge/include/mujoco_bridge/mujoco_dl.hpp` 里的 `MujocoApi` 结构体字段，再到 `mujoco_dl.cpp` 的 `loadMujocoApi()` 里加一行 `resolve(handle, "mj_xxx", api.xxx)`，业务代码统一通过 `api_.xxx(...)` 调用。
 
@@ -1935,28 +2751,29 @@ Stage A（[第7节](#7-stage-amujoco_bridge_node-最小实现模型加载--物�
 2. **static/dynamic 的划分是 `body_jntnum[i] == 0`，不是按名字列举**（[9.4](#94-static--dynamic-怎么划分用结构而不是名字)）。第4周加 free joint 物体会自动变成 `world -> object`，零代码改动。**已知反例：mocap body**（判据该加 `body_mocapid[i] < 0`）。
 3. **新增参数 `tf_rate_hz`**（默认 100.0，故意和 `joint_state_rate_hz` 相同，见 [9.11](#911-权衡tf_rate_hz-独立于-joint_state_rate_hz)）。`MujocoApi` 新增了 `mju_negQuat`/`mju_mulQuat`/`mju_rotVecQuat` 三个字段（现在共 11 个，[7.2.6](#726-当前方案的扩展性代价以及怎么改善) 说的"涨到十几二十个就该上 `decltype`"的触发点在接近）。
 
-### Stage D — reset service
+### Stage D — reset service ✅ 已完成
 
-- 新增依赖：无（`std_srvs` 已在）。
-- `std_srvs::srv::Trigger` 类型的 `~/reset` service，回调里调 `mj_resetDataKeyframe(model_, data_, keyframe_id)`。`keyframe_id` 要在构造函数里用 `mj_name2id(model_, mjOBJ_KEY, "home")` 按名字查一次并缓存，不要硬编码成 `0`。
-- 需要讲解的概念：service（请求/响应）vs topic（发布/订阅）的适用场景区别、MJCF 里 keyframe 是什么（预定义的一组 `qpos` 值）、reset 之后要不要额外调 `mj_forward`（把 `xpos`/`xquat` 等派生量刷新，不然发出去的第一帧 TF/JointState 可能还是旧值——这是个值得验证的失败模式）。
-- **Stage C 补充的一条**：`mj_forward` 这个问题现在更值得验证了，因为 TF 直接读 `xpos`/`xquat`。[9.4](#94-static--dynamic-怎么划分用结构而不是名字) 已经踩到它的另一面（构造期 `xpos` 全 0）。注意 `keyframe` 里除了 `qpos` 还有 `ctrl="0 0 0 -1.57079 0 1.57079 -0.7853 255"`（8 个数，对应 `nu=8`）——reset 时**要不要一起恢复 `ctrl`** 是个必须定的问题：只 reset `qpos` 而 `ctrl` 留着旧目标，机器人会立刻被伺服拉回旧位姿。
+详见[第10节](#10-stage-dreset-service)。相对原计划的三处偏离，后续 stage 需要知道：
 
-### Stage E — 命令订阅 + sine 测试脚本 + demo launch/rviz
+1. **`mjData::time` 必须显式保护**（原计划没提到这一点）。`mj_resetDataKeyframe` 会把它一起清零，代码里存旧值再写回。理由见 [10.5](#105-为什么保持-sim-time-单调)：`/clock` 回退等于对全图做一次时间倒流，而且是静默的。
+2. **"reset 要不要一起恢复 `ctrl`"这个必须定的问题，答案是 MuJoCo 替我们定了**——`mj_resetDataKeyframe` 本来就恢复 `ctrl`，而 `home` keyframe 自带自洽的 `ctrl`（[10.3.1](#1031-keyframe-是一组完整的状态快照不只是-qpos)）。实测 `effort[joint6]` 脱离饱和、3 秒后仍保持 home 位姿。
+3. **`MujocoApi` 新增 `mj_forward`（现在共 12 个）**，但它在当前代码里其实是**冗余的纵深防御**——`onTimer` 的「先 step 再发布」顺序让 `mj_step` 顺带完成了前向计算。三个让它变成必需的触发条件写在 [10.6](#106-mj_forward为什么需要它以及它当前其实是冗余的)，其中第一条（reset 后补发一帧）很可能在 Stage E 就发生。12 个字段离 [7.2.6](#726-当前方案的扩展性代价以及怎么改善) 说的 `decltype` 重构触发点更近了一步。
 
-- 新增依赖：`control_msgs`/`trajectory_msgs` 已在 CMakeLists 里。
-- 订阅 `~/joint_command`（`trajectory_msgs::msg::JointTrajectory`），收到后把第一个 trajectory point 的 `positions` 按 joint name 写进 `mjData::ctrl`（MJCF 里的 position-servo actuator 会自己把 `ctrl` 值当目标位置去伺服，不是直接改 `qpos`）。
-- **⚠️ Stage C 读 `<actuator>` 段时挖出三颗地雷，动手前必读 [4.3.4](#434-每个关节的状态变量应该是什么样以及一个-stage-e-地雷)**：(a) `ctrl` 长度是 `nu`=8 不是 `nq`=9，索引是 **actuator id 不是 joint id**，臂关节碰巧对齐、夹爪会错位；(b) `actuator8`（夹爪）的 `ctrlrange` 被上游重映射成 **`0..255`**，不是 `0..0.04`，直接写关节角进去会几乎全闭；(c) 两指由一个 tendon + 一个 equality 约束耦合，**物理上不能独立指令**。
-- **RViz 的 `RobotModel` 显示需要 `/robot_description`**，不只是 TF（[9.10](#910-权衡为什么不用-robot_state_publisher) 更正过一次的论断）。`demo.rviz` 先只放 TF + Grid 的计划不变，但原因不是"做不到"，而是这个 stage 不想引入 URDF。
-- 新建 `src/mujoco_bridge/launch/demo.launch.py`（起 `mujoco_bridge_node` + `rviz2`）和 `src/mujoco_bridge/rviz/demo.rviz`（先只放 TF + Grid，不接 RobotModel），`CMakeLists.txt` 加 `install(DIRECTORY launch rviz DESTINATION share/${PROJECT_NAME})`。
-- 新建 `scripts/sine_joint_test.py`（rclpy 脚本），发一个缓慢正弦振荡的 `JointTrajectory` 给 `~/joint_command`，人工在 RViz 里确认对应关节的 TF 帧在动。
-- 需要讲解的概念：position-servo actuator 的本质是什么（是一种简化的 PD 控制器，MJCF 里怎么定义增益）、`ctrl` 写入和真实机器人控制器接口的对应关系、launch 文件基础语法。
+**给 Stage E 的一条**：`home` keyframe 的 `qpos` 和 SRDF 的 `ready` **不是同一个姿态**（[10.3.2](#1032-三处初始位姿互不一致第6周会咬人)），写 sine 测试脚本挑基准位姿时别混用。
+
+### Stage E — 命令订阅 + sine 测试脚本 + demo launch/rviz ✅ 已完成
+
+详见[第11节](#11-stage-e命令订阅--sine-测试脚本--demo-launchrviz)。相对原计划的两处偏离，后续 stage 需要知道：
+
+1. **[4.3.4](#434-每个关节的状态变量应该是什么样以及一个-stage-e-地雷) 那三颗地雷全部按计划避开了**：`buildActuatorIndex()` 按 `actuator_trntype` 建 joint→actuator 映射（不假设 index 对齐）、夹爪的 `0..255` ctrl 换算从模型的两个 range 数组现算（不硬编码 `255/0.04`）、两指命令冲突时显式 `WARN` 而不是静默覆盖。三条都实测验证过（见 [11.1](#111-改动清单与验证结果)）。
+2. **`RobotModel` 显示需要 `/robot_description` 这条论断被验证成立，但没有走到需要它的那一步**：`demo.rviz` 最终确实只放了 TF + Grid,原因和原计划一致(不想在这个 stage 引入 URDF)。
+3. **新增的意外收获**:这个 devcontainer 环境本身有一个和代码逻辑无关的坑——RViz 硬件加速 GL 初始化会永久卡死,必须 `LIBGL_ALWAYS_SOFTWARE=1` 才能看到窗口。已写进 `demo.launch.py` 的 `additional_env`,完整排查记录见 [11.11](#1111-排查记录rviz2-硬件加速-gl-卡死)。这条不在原计划范围内,但挡住了所有可视化验证,必须先解决。
 
 ### 验收标准（沿用已批准计划里的定义）
 
-1. `ros2 launch mujoco_bridge demo.launch.py` 后确认 `/clock`、`/joint_states`、`/tf`、`/tf_static` 都在发布（`ros2 topic list` / `ros2 topic hz /joint_states`），RViz 里 TF 树非爆炸、根节点是 `world`。← 话题部分 Stage C 已单独验过（[9.1](#91-改动清单与验证结果)），剩 launch 文件本身。
-2. `ros2 service call /mujoco_bridge/reset std_srvs/srv/Trigger {}` 后 `/joint_states` 数值应该跳回 home pose。
-3. 跑 `scripts/sine_joint_test.py`，RViz 里对应关节的 frame 应该能看到周期性摆动。
+1. ~~`ros2 launch mujoco_bridge demo.launch.py` 后确认 `/clock`、`/joint_states`、`/tf`、`/tf_static` 都在发布，RViz 里 TF 树非爆炸、根节点是 `world`。~~ ✅ 已验（[11.1](#111-改动清单与验证结果)）：话题部分 Stage C 已验过（[9.1](#91-改动清单与验证结果)）；launch 文件本身实测窗口 2 秒内出现、`ros2 node list` 能看到 RViz 内部的 `transform_listener_impl_*` 节点在订阅 `/tf`/`/tf_static`（[11.8](#118-rviz-怎么拿到-tf-数据tf-显示项没有-topic-属性)）。**注**：验证到"数据管线正确、窗口真实存在"这一层，TF 树在窗口里渲染出来的具体样子（是否好看、是否爆炸）需要用户自己肉眼确认一次，工具没有截图能力。
+2. ~~`ros2 service call /mujoco_bridge/reset std_srvs/srv/Trigger {}` 后 `/joint_states` 数值应该跳回 home pose。~~ ✅ Stage D 已验过（[10.1](#101-改动清单与验证结果)），另外补验了 `ctrl` 恢复、sim time 单调、动态 TF 跟随。
+3. ~~跑 `scripts/sine_joint_test.py`，RViz 里对应关节的 frame 应该能看到周期性摆动。~~ ✅ 已验（[11.9](#119-三节点联调)）：`/joint_states` 读数随时间持续变化且落在振荡范围内，证明命令确实在驱动仿真；RViz 侧的视觉摆动同上一条，留给用户肉眼确认。
 
 ### 第6周接 MoveIt 时的待决项（Stage C 识别出来的）
 
@@ -1967,11 +2784,11 @@ MoveIt 无论如何都需要 `/robot_description`（URDF），而 `robot_state_p
 这个决定值得在第6周补一份 `docs/adr/`。
 ---
 
-## 11. 悬挂问题（等有了参照系再回来）
+## 13. 悬挂问题（等有了参照系再回来）
 
 这一节专门存放**现在还答不了、或者答了也存不住的问题**。
 
-### 11.0 为什么要单开这一节
+### 13.0 为什么要单开这一节
 
 > Q: 作为初学者，在缺少横向对比和真机经验的情况下，很难问出设计决策的问题。如果认为"还无法提问，说明还不是现在这个阶段应该解决的"，这个思路对吗？
 
@@ -1998,9 +2815,24 @@ MoveIt 无论如何都需要 `/robot_description`（URDF），而 `robot_state_p
 
 **Stage C 的补充观察**：这一轮最有产出的追问是另一个形状——**"我不知道怎么检查这个东西"**（[4.3](#43-怎么检查和分析-mjcf--urdf以及怎么据此判断代码正误) 那问）。它既不是 A 类（不是"这是什么"）也不是 C 类，而是在问**工具和方法**。产出：一条 URDF↔MJCF 交叉验证流程、`architecture.md` 的两处错误、以及 Stage E 的三颗地雷（[4.3.4](#434-每个关节的状态变量应该是什么样以及一个-stage-e-地雷)）。值得记下来的是——**这三颗地雷全部是在"学怎么读文件"的过程中顺手捡到的，不是在找 bug 时找到的**。另外 [9.6](#96-四元数分量顺序一次讲错的更正) 和 [9.10](#910-权衡为什么不用-robot_state_publisher) 各纠正了讲解里的一处错误论断，都是质疑论断（[4.4 提问方式](../../STUDY_NOTES_GUIDE.md)）问出来的。
 
-### 11.1 清单
+**Stage D 的补充观察**：这一轮四个追问全部命中了**"一个正确的技术论断被误读或误用"**这个形状，而不是"我不知道 X 是什么"：
 
-格式：问题 / 为什么现在答不了 / 什么时候回来。第 1~4 条是 Stage B 识别的，第 5~6 条是 Stage C 新增的。
+| 追问 | 实际在纠的东西 |
+|---|---|
+| `<inertial pos>` 为什么不等于 TF 里的位姿 | 把"质心在本体系里的位置"读成了"本体系相对父的位姿"——两个都叫 `pos` |
+| `mj_forward` 不是不会推进时间吗 | 我上一轮的表述让人以为"需要刷新派生量"= "需要推进一步" |
+| 一个 service 会有不同类型的子服务吗 | 从"CLI 要求写类型"倒推出了一个不存在的机制 |
+| `/tf` 不是只有父子关系吗 | 完全正确的观察，而我引用的是 `tf2_echo` **合成**出来的数据，没说清来源 |
+
+产出：一次 `body pos` vs `inertial pos` 的澄清、一条"类型写错 = 永久挂起"的实测、一条独立 FK 交叉验证流程（[10.7](#107-怎么快速做一次独立的-fk-验证)），以及四元数 double cover 这个写断言时的具体陷阱。
+
+**值得记的是第 4 个**：它是一次对**我的证据链**的质疑（"你是怎么测出来的"），不是对结论的质疑。[4.4](../../STUDY_NOTES_GUIDE.md) 列的提问方式里没有这一条，但它比"质疑论断"更有效——因为讲解者引用数据时省略来源是常态，而**省略的那一步往往正是结论成立的关键条件**（这里是"tf2 会沿树做矩阵连乘"）。这个形状该补进提问约定。
+
+另外这一轮也**暴露了我一次表述不清**（`mj_forward` 那条）和**一次证据引用不完整**（TF 数据没说是合成的）。按 2.3 的约定留档而不是静默改掉：两处的原始表述都不算错，但都省掉了读者复现所需的信息。
+
+### 13.1 清单
+
+格式：问题 / 为什么现在答不了 / 什么时候回来。第 1~4 条是 Stage B 识别的，第 5~6 条是 Stage C 新增的，第 7~8 条是 Stage D 新增的，第 9 条是 Stage E 新增的。
 
 | # | 问题 | 现在答不了的原因 | 解锁条件 |
 |---|---|---|---|
@@ -2008,26 +2840,36 @@ MoveIt 无论如何都需要 `/robot_description`（URDF），而 `robot_state_p
 | 2 | **timestep = 0.002 凭什么？** 谁定的、和控制频率的关系、什么时候必须调小 | 现在场景里只有机器人本体、没有接触，改 timestep 看不出任何差别，无从验证任何结论 | 第4周加入待抓物体和桌面接触之后。那时可以实验：调大 timestep 直到出现穿透/抖动 |
 | 3 | **`effort` 填 `qfrc_actuator` 对吗？** 它和真机关节力矩传感器的读数可比吗？ | 需要真机 `franka_ros2` 的 `effort` 字段实际数值做对照。仿真里无法自证 | 上真机之后；或找到 `franka_ros2` 里 effort 来源的文档/源码 |
 | 4 | **100Hz 的 `/joint_states` 够吗？** 下游 MoveIt / 控制器的真实需求是多少 | [8.5.1](#851-为什么是-5-倍decimation-到底管什么) 里列的 50~100Hz 是我查来的经验值，不是自己测出来的 | 第6周 MoveIt 实际跑起来，可以实验：降到 20Hz 看规划执行是否退化 |
-| 5 | **TF 由仿真直接发、而不用 `robot_state_publisher`，在真实项目里是常规做法还是异类？** | [9.10](#910-权衡为什么不用-robot_state_publisher) 的四条理由都立得住，但"别人怎么做"需要参照系。Gazebo 的 `gazebo_ros2_control`、Isaac Sim 的 ROS bridge 各自怎么处理这个职责划分，我没读过 | 第6周接 MoveIt 时必须面对（见[第10节](#10-后续计划与-session-交接)待决项）；或任何一次读别人的 sim bridge 源码。和本清单第 1 条是同一类问题 |
+| 5 | **TF 由仿真直接发、而不用 `robot_state_publisher`，在真实项目里是常规做法还是异类？** | [9.10](#910-权衡为什么不用-robot_state_publisher) 的四条理由都立得住，但"别人怎么做"需要参照系。Gazebo 的 `gazebo_ros2_control`、Isaac Sim 的 ROS bridge 各自怎么处理这个职责划分，我没读过 | 第6周接 MoveIt 时必须面对（见[第12节](#12-后续计划与-session-交接)待决项）；或任何一次读别人的 sim bridge 源码。和本清单第 1 条是同一类问题 |
 | 6 | **`body_jntnum == 0 → static` 这个判据的完整例外集合有多大？** | 已知 mocap body 是一个反例（[9.4](#94-static--dynamic-怎么划分用结构而不是名字)）。但"MuJoCo 里还有哪些让 body 动起来的机制不经过 joint"需要对 MuJoCo 更全面的了解，现在只能逐个撞上 | 第4~5周真用到 mocap（遥操作/给定末端目标）时；届时至少要把判据改成 `body_jntnum == 0 && body_mocapid < 0`。这条也是 F 类（知识边界）的典型 |
+| 7 | **`home`（MJCF）和 `ready`（SRDF）该以哪个为权威？** 要不要改 vendor 的 MJCF 去对齐 SRDF？ | 三处"初始位姿"互不一致是事实（[10.3.2](#1032-三处初始位姿互不一致第6周会咬人)），但"该听谁的"取决于下游怎么用——MoveIt 的 `setNamedTarget("ready")`、真机 Franka 的默认位姿、抓取场景的工作空间各有诉求，现在三个下游一个都没接上 | 第6周接 MoveIt 时必须定（已进[第12节](#12-后续计划与-session-交接)待决项）。倾向对齐 SRDF，因为它是真机生态的约定俗成，但这是个需要 ADR 的决定 |
+| 8 | **仿真专有的接口（reset、瞬移、设重力）应该怎么和真机接口隔离？** | [10.4](#104-真机上误用-reset-会发生什么) 推演出"私有名 + 真机上失败于服务不存在"是个好性质，但那是事后归纳一个已做的决定。系统性的答案（命名空间约定？专门的 `sim_*` 前缀？编译期开关？）需要见过真机和仿真共用同一套上层代码的项目 | 上真机之后；或第6周读 `franka_ros2` 和某个 sim bridge 怎么处理这条边界 |
+| 9 | **力矩/速度控制模式该怎么加？** 目前 MJCF 只配了位置伺服 actuator，`~/joint_command` 只能设位置目标 | [11.4](#114-position-servo-actuator-的本质一个-pd-控制器) 讲清楚了"为什么现在只有位置模式"（MJCF 没配别的 actuator），但"该配成什么样"需要知道下游（第5周力控抓取？MoveIt 的 `ros2_control` 硬件接口？）到底要哪种模式,现在两个下游都没接上,不知道该为谁设计 | 第5周做力控抓取时；或第6周接 `ros2_control` 时，看它期望的硬件接口形状 |
 
-### 11.2 反向清单：现在就该做的（属于"缺一次推演"）
+### 13.2 反向清单：现在就该做的（属于"缺一次推演"）
 
-这些不进悬挂清单，是待办。前四条 Stage B 留下，后五条 Stage C 新增：
+这些不进悬挂清单，是待办。前四条 Stage B 留下，中间五条 Stage C 新增，接着三条 Stage D 新增，末尾四条 Stage E 新增：
 
 - [ ] **`jnt_qposadr` / `jnt_dofadr` 写混了没有任何东西会告警**——Panda 上两者数值相同，测不出来；等第4周加 free joint 物体才炸。该写一个用**带 free joint 的最小 MJCF** 做的单元测试，现在就能写，不需要任何新知识（对应 [6.2](#62-广义坐标qpos--qvel-的表示方法以及为什么维度不相等) 第1条影响）。
 - [ ] **`MujocoApi` 的签名手抄错了编译器不会报错**——解药是 `decltype(&mj_xxx)`，约 20 行改动，触发条件已写在 [7.2.6](#726-当前方案的扩展性代价以及怎么改善)。
 - [ ] **没有常驻 RTF 监控**——约 6 行，见 [8.6](#86-失败模式与验证手段) 末尾。
 - [ ] **Stage B 的验证全是人眼看 `echo`/`hz`，没有一条自动化断言**。第3周要写 FK/Jacobian 的 gtest，届时"这段桥接代码怎么单元测试"会变成主要矛盾（难点：`mjModel` 加载依赖文件路径、`rclcpp::Node` 构造依赖 DDS）。
 - [ ] **`publishTransforms` 的相对变换数学没有任何自动化断言**（E 类，Stage C）。[9.1](#91-改动清单与验证结果) 全是人眼看 `tf2_echo`，而且恰好挑在 `q≈0` 附近；`mulQuat` 参数顺序只靠 `joint6=0.192` **偶然**覆盖到（[9.12](#912-失败模式与验证手段)）。这段其实是整个节点里**最容易写成纯函数单测**的一块——给一组 `xpos`/`xquat` 和父子关系，断言输出的相对变换。难点和上一条（第3周 FK gtest）**完全重叠**，一起写更划算。注意断言四元数要比 $|q_1 \cdot q_2| \approx 1$，不能逐字段比（[6.3.1](#631-一个单位四元数就是一个旋转) 的 double cover）。
-- [ ] **`mj_forward` 在构造期/reset 后的必要性**（Stage C 识别，Stage D 就会撞上）。[9.4](#94-static--dynamic-怎么划分用结构而不是名字) 靠改用 `body_pos` 绕开了构造期的 `xpos` 全 0，但 Stage D 的 reset 之后没有东西绕得开。属于"跑一次实验就能答"。
+- [x] ~~**`mj_forward` 在构造期/reset 后的必要性**（Stage C 识别，Stage D 就会撞上）。~~ **已答**（[10.6](#106-mj_forward为什么需要它以及它当前其实是冗余的)）：reset 后加了 `mj_forward`，但结论比预想的微妙——**当前它是冗余的**，因为 `onTimer` 的「先 step 再发布」顺序让 `mj_step` 顺带做了前向计算。留着是纵深防御，三个让它变成必需的触发条件已写明。这条的教训是："跑一次实验就能答"的问题，答案可能是"它现在不必要，但别删"。
 - [ ] **`tf_rate_hz` 和 `joint_state_rate_hz` 设成不同值没有任何告警**（C 类，[9.11](#911-权衡tf_rate_hz-独立于-joint_state_rate_hz)）。这是 Stage C 自己引进来的不一致源。约 3 行：构造期比一下，不等就 `RCLCPP_WARN`。
 - [ ] **`ros2 param set` 报成功但无效果**（C 类，[2.5](#25-declare_parameterros-参数到底是什么为什么不用-const-double)）。触发条件写明：等真的需要在跑动中调频率时，用 `add_on_set_parameters_callback` 重算 decimation。现在不做的理由是"当前够用"，不是"不该做"。
 - [ ] **把 `0.1034` 搬进 vendor 的 MJCF**（`<site name="hand_tcp" pos="0 0 0.1034"/>`），代码改成从模型读（[4.4.2](#442-为什么这个数没有自动共享)）。顺手能消掉 `kHandBodyName` 那个硬编码字符串。这是个改 vendor 文件的独立决定，值得配一份 `docs/adr/`。
+- [ ] **`onReset` 是整个节点里第一个天然可单元测试的单元**（E 类，Stage D）。给定 `mjModel`/`mjData`，调一次，断言 `qpos[i] == m->key_qpos[key*nq+i]`、`ctrl` 同理、`d->time` 不变。[10.9](#109-失败模式与验证手段) 那张表里最该补的两条（模型里没有 `home` keyframe、`response->success` 名不副实）都能被它覆盖。**难点是 `MujocoBridgeNode` 把 mujoco 状态和 `rclcpp::Node` 焊在一起了**——要测就得先把"reset 这件事"剥成一个不依赖 `rclcpp` 的自由函数。这个剥离动作和上面两条（FK gtest、`publishTransforms` 单测）面对的是同一个结构问题，**三条应该一起做**，而且这是三条里最小的切入点。
+- [ ] **reset 的不连续跳变对下游不可见**（C 类，Stage D）。`/joint_states` 上看不出"这里发生过一次瞬移"，任何做数值微分的节点（算加速度/jerk）会在那一帧读到巨大的假值。真机上不存在瞬移，所以下游没理由防这个。备选解：reset 时发一个事件话题，或在 `/joint_states` 上带 sequence 断点标记。**要不要做取决于第4周之后有没有下游真去做数值微分**，触发条件写在这里。
+- [ ] **`ros2 param get/set` 在多实例下不可信这条，同样适用于 service**（Stage D 验证时的顺带结论）。[9.13](#913-排查记录第三次遗留进程同一个坑的第三次) 已记了参数服务的版本；Stage D 加了 `~/reset` 之后，**同名节点的 `~/reset` 也会冲突，谁应答不确定**。现在靠"每次验证前检查 Publisher count"人工保证，没有任何机制性防护。最便宜的改善是给节点名加实例后缀（但那会破坏 `/joint_states` 的全局单例假设），所以这条更像是**记下来别忘**，不是马上要改。
+- [ ] **`gripper_ctrl_scale_` 假设手指关节 `jnt_range` 下限为 0**（E 类，Stage E）。[11.2](#112-buildactuatorindex关节驱动与-tendon-驱动的两种索引) 记过：换算用的是 `actuator_ctrlrange[max] / jnt_range[max]`，隐含"下限为0"和"tendon 两个系数都是0.5"两条假设，现在都成立但都没有断言。**触发条件**：上游改手指关节零点定义,或改 tendon 系数时。现在就能做的动作：加一条 `assert(model_->jnt_range[2*joint_id] == 0.0)`，让假设失效时启动即报错而不是静默算错。
+- [ ] **`gripper_actuator_id_` 会被第二个 tendon actuator 静默覆盖**（C 类，Stage E）。`buildActuatorIndex` 循环里没有检测"已经找到一个了"，[11.2](#112-buildactuatorindex关节驱动与-tendon-驱动的两种索引) 记过。现在就能做：发现第二个 tendon actuator 时 `RCLCPP_WARN`。**触发条件**：模型加第二个 tendon 驱动的机构时才会真正错，现在没有测试对象。
+- [ ] **`~/joint_command` 一条消息里的多个关节命令没有原子性**（C 类，Stage E）。`[joint1(合法), not_a_joint(非法), joint3(合法)]` 会导致 `joint1`/`joint3` 生效、只有非法项被跳过——这是有意的设计（一个打字错误不该拖累其余关节），但意味着这条消息没有"全成功或全失败"的语义,如果未来有代码依赖原子性会被这个隐藏假设咬。topic 没有回执（[10.2](#102-service-vs-topic什么时候用哪个) 讲过 topic vs service 的区别），现在没有办法暴露"部分失败"这件事。**要不要做取决于**下游是否真的需要知道"这条命令有没有被完整应用"。
+- [ ] **launch 文件目前没有暴露节点自己的 ROS 参数**（Stage E）。`joint_state_rate_hz`/`tf_rate_hz` 想在 launch 层被覆盖，需要给 `bridge_node = Node(...)` 加 `parameters=[{...}]` 并配一条新的 `DeclareLaunchArgument`（[11.7](#117-launch-文件机制两阶段执行declarelaunchargument-与-launchconfiguration)）。**触发条件**：需要"一条命令改仿真发布频率"时,现在命令行只能覆盖 `rviz_config`。
 
-### 11.3 维护约定
+### 13.3 维护约定
 
-- 每个 stage 结束时过一遍：新攒的问题按 11.0 的判据分流——进 11.1（等参照系）还是 11.2（现在就做）。
+- 每个 stage 结束时过一遍：新攒的问题按 13.0 的判据分流——进 13.1（等参照系）还是 13.2（现在就做）。
 - **解锁条件满足时要回头看**。第4周加物体、第6周接 MoveIt、上真机，这三个节点各自对应上表里几行，到时候主动回来答，别等它自然遗忘。
 - 答掉的问题从清单里删掉，答案写进对应的 stage 小节（不要堆在这一节里，这节只放"未答"）。
 

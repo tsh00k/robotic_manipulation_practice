@@ -83,8 +83,41 @@ xacro $(ros2 pkg prefix franka_description)/share/franka_description/robots/fer/
 | `finger_joint2` | prismatic (slide) | 0 | 0.04 | - | - | 夹爪右指，与 finger_joint1 通常做镜像/等值驱动 |
 
 - **关节顺序**：URDF `JointState.name` 顺序与 MuJoCo `qpos`/`ctrl` 顺序均为 `joint1, joint2, ..., joint7`（再加 `finger_joint1, finger_joint2`），两边一致，不需要额外映射表。若后续 `arm_prefix` 参数被设为非空（多臂场景），需要重新核对。
-- **零位 / home position**：MJCF `keyframe` 中定义为 `qpos = [0, 0, 0, -1.57079, 0, 1.57079, -0.7853]`（对应 `joint1..joint7`），即 Franka 官方标准 "home" 姿态。`mujoco_bridge` 复位服务应复位到这组值。
+- **零位 / 初始位姿**：**手边存在三处互不一致的"初始位姿"定义，见下面第 2.1 节。** `mujoco_bridge` 的 `~/reset` 复位到 MJCF `keyframe` 的 `home`。
+  > 更正记录（Stage D）：本条原先写的是"即 Franka 官方标准 home 姿态"，**这句是错的**。Franka 生态里的标准起始位姿是 SRDF 的 `ready`，和 MJCF 的 `home` 是两个不同构型（joint7 连符号都相反）。发现方式是 Stage D 讲解时去核对 SRDF，详见 [week1.md 10.3.2](../Job_guides/my_study/week1.md#1032-三处初始位姿互不一致第6周会咬人)。
 - **轴方向**：所有主关节在 MuJoCo 里默认 `axis="0 0 1"`（各 link 自身局部 Z 轴），与 URDF xacro 里的 joint `axis` 定义在同一约定下应一致；后续第3周做 FK 对照测试时需要用有限差分/解析 Jacobian 交叉验证，不能只凭文档假设。
+
+### 2.1 三处"初始位姿"定义互不一致（权威对照表）
+
+| 来源 | 文件 | joint1 | joint2 | joint3 | joint4 | joint5 | joint6 | joint7 | 手指 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| **MJCF** `<key name="home">` | `robot_description/mujoco/franka_emika_panda/panda.xml:281` | 0 | **0** | 0 | **−1.5708** | 0 | 1.5708 | **−0.7853** | 0.04 |
+| **SRDF** `group_state name="ready"` | `/opt/ros/humble/share/moveit_resources_panda_moveit_config/config/panda.srdf:20` | 0 | **−0.785** | 0 | **−2.356** | 0 | 1.571 | **+0.785** | 0.035（`open`） |
+| **`ros2_control` fake system** | 同目录 `initial_positions.yaml` | 0 | −0.785 | 0 | −2.356 | 0 | 1.571 | 0.785 | —— |
+| **URDF** | `fer.urdf.xacro` | 没有这个概念（URDF 不含状态；隐含约定是全零位） | | | | | | | |
+
+**当前权威**：`mujoco_bridge` 的 `~/reset` 用 **MJCF 的 `home`**（`mj_resetDataKeyframe` 按名查 `kResetKeyframeName = "home"`）。
+
+**已知后果**：第6周接 MoveIt 后，MoveIt 的 `setNamedTarget("ready")` 和我们的 `~/reset` 指向两个不同构型，**不会有任何报错**，只表现为"点了 reset，MoveIt 说当前不在 ready 位姿"。第6周必须显式定权威（倾向对齐 SRDF 的 `ready`，因为它是真机生态的约定俗成），并补一份 ADR。已进第4节待办。
+
+**另外两条关于 keyframe 的事实**（Stage D 实测，详见 [week1.md 10.3.1](../Job_guides/my_study/week1.md#1031-keyframe-是一组完整的状态快照不只是-qpos)）：
+
+- `<key>` 除 `qpos`（9 个，= `nq`）外还带 `ctrl="0 0 0 -1.57079 0 1.57079 -0.7853 255"`（8 个，= `nu`）。`mj_resetDataKeyframe` **会一并恢复 `ctrl`**，所以复位后伺服目标与新 `qpos` 自洽，不会把机械臂拽回旧目标。
+- `ctrl` 末位 `255` 是夹爪 actuator 被上游重映射后的 `ctrlrange`（`0..255`，不是 `0..0.04`），对应 `qpos` 里的 `0.04 0.04`。**写 `ctrl` 必须按 actuator id 索引，不能用 joint id。**
+
+### 2.2 reset 的语义边界
+
+`mujoco_bridge` 的 `~/reset`（`std_srvs/srv/Trigger`）定义为：
+
+| | 行为 |
+| --- | --- |
+| **复位** | `qpos`、`qvel`、`act`、`ctrl`、mocap（即 `mj_resetDataKeyframe` 的全部作用域） |
+| **不复位** | `mjData::time`。代码显式存旧值再写回，**sim time 保持单调** |
+| **附带** | 复位后调 `mj_forward` 刷新派生量（`xpos`/`xquat`/`qfrc_*`） |
+
+**为什么不复位时间**：本节点是全系统 `/clock` 的唯一来源，回退 `/clock` 等于对全图做一次时间倒流（tf2 buffer 清空、stamp 变成"未来"），而且是静默的。对照 Gazebo 的 `/reset_world`（只复位状态）vs `/reset_simulation`（连时间一起清零）——我们实现的是前者。若将来需要后者，应是**另一个 service**，不是给这个加字段。
+
+**这是仿真专有接口**：真机上没有语义对应物（关节不能瞬移）。`~/reset` 用私有名（解析成 `/mujoco_bridge/reset`）而非全局 `/reset`，目的就是让换到真机时**立刻失败于"服务不存在"**。真机上"回到初始位姿"的正确形态是 action（规划一条轨迹、可取消、有 feedback），不是 service。详见 [week1.md 10.4](../Job_guides/my_study/week1.md#104-真机上误用-reset-会发生什么)。
 
 ## 3. MuJoCo 与 MoveIt 模型一致性
 
@@ -92,6 +125,8 @@ xacro $(ros2 pkg prefix franka_description)/share/franka_description/robots/fer/
 
 - 阈值：TBD（建议初始位置误差 < 5mm，姿态误差 < 1°，后续按实测调整）
 - 测试位置：`test/`（第一个自动测试，对应第15节任务5）
+- **已有的一次手工交叉验证（Stage D）**：用 `robot_state_publisher` + `franka_description` URDF（KDL FK，独立于 MuJoCo 的实现和描述）对 `home` 位姿做了对照，`link4` 差 2mm / 0.3°，`hand_tcp` 差 7mm。**差值来源是 position servo 的稳态误差，不是模型不一致**——伺服靠位置误差产生力矩对抗重力，误差为零就没有力矩。方法和完整数据见 [week1.md 10.7](../Job_guides/my_study/week1.md#107-怎么快速做一次独立的-fk-验证)。
+  - 对自动测试的两条约束：**(1) 断言输入必须用实际读到的 `qpos`，不能用 keyframe 标称值**，否则容差得放宽到厘米级；**(2) 四元数不能逐分量比**——`q` 和 `−q` 是同一个旋转，必须比 `|q1·q2| ≈ 1` 或转成角度差。
 - 碰撞几何简化记录：TBD——`franka_description` 的 collision geometry 与 MJCF 的 `*_c` collision mesh 都是简化过的凸包/近似几何，两者是否用同一份简化尚待确认，第3周对照测试时一并核对。
 
 ## 4. 待办
@@ -102,6 +137,8 @@ xacro $(ros2 pkg prefix franka_description)/share/franka_description/robots/fer/
 - [x] 定下 TF frame 命名权威规则（MJCF 原生名 + 合成 `hand_tcp`），并与 `mujoco_bridge` 实现核对一致（Stage C）
 - [ ] 把 `hand_tcp` 的 `0.1034` 搬进 vendor 的 MJCF（`<site>`），消除手抄副本（见第1节）
 - [ ] 第6周接 MoveIt 时决定 `robot_state_publisher` 的 TF remap 方案，并补一份 `docs/adr/`
+- [ ] **第6周决定"初始位姿"以 MJCF `home` 还是 SRDF `ready` 为权威**（见第 2.1 节），同样需要 ADR
+- [x] 定下 `~/reset` 的语义边界（复位状态不复位时间、仿真专有接口用私有名）——见第 2.2 节（Stage D）
 - [ ] 记录相机外参数值来源与标定方式（相机型号/安装位置尚未选定）
 - [ ] 确认 URDF 与 MJCF 碰撞几何是否为同一份简化（第3节）
 - [ ] 编写第一个自动测试：5组固定 `q`，对比 MuJoCo 与 MoveIt FK（对应第15节任务5，需等 `motion_planner`/MoveIt 配置接入后才能跑）

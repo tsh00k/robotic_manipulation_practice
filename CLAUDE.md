@@ -42,7 +42,20 @@ distrobox enter robotics-dev
 - **ROS2 机器人描述/MoveIt 资源已装为系统包**（apt，Humble）：`ros-humble-franka-description`（官方 Panda/`fer` URDF+mesh）、`ros-humble-moveit-resources-panda-moveit-config`（现成 MoveIt SRDF/kinematics/planning 配置）、`ros-humble-control-msgs`（`mujoco_bridge` 编译依赖）、`ros-humble-xacro`、`ros-humble-joint-state-publisher(-gui)`（这两个是上面包的依赖，自动装的）。模型来源和具体路径见 [docs/architecture.md](docs/architecture.md) 第0节。
 - MuJoCo MJCF（Panda + 平行夹爪）已从 [google-deepmind/mujoco_menagerie](https://github.com/google-deepmind/mujoco_menagerie) vendor 进 `robot_description/mujoco/franka_emika_panda/`（约33MB，含 mesh），不走 apt（没有对应包）。
 
-**重要坑：pyenv 会劫持 colcon 用的 python3，导致 `ModuleNotFoundError: No module named 'catkin_pkg'`。** 本仓库根目录已放置 `.python-version`（内容为 `system`），只要在仓库目录内（或其子目录）执行命令，pyenv 会自动切到系统 Python（3.10，带 `catkin_pkg`），不要删除这个文件。如果不确定是否生效，可用 `python3 -c "import catkin_pkg"` 快速验证。
+**重要坑：pyenv 会劫持 python3，有两个不同的变体。**
+
+**变体一（colcon）**：劫持 colcon 用的 python3，导致 `ModuleNotFoundError: No module named 'catkin_pkg'`。本仓库根目录已放置 `.python-version`（内容为 `system`），只要在仓库目录内（或其子目录）执行命令，pyenv 会自动切到系统 Python（3.10，带 `catkin_pkg`），不要删除这个文件。可用 `python3 -c "import catkin_pkg"` 快速验证。
+
+**变体二（rclpy 脚本，Stage D 踩到）**：`.python-version` 对它**无效**。现象是跑任何 `import rclpy` 的脚本报：
+
+```
+ModuleNotFoundError: No module named 'rclpy._rclpy_pybind11'
+The C extension '/opt/ros/humble/lib/python3.10/site-packages/_rclpy_pybind11.cpython-311-...so' isn't present
+```
+
+注意错误信息里的 `python3.10` 和 `cpython-311` 打架——这是版本不匹配的特征。此时 `pyenv version` 会**正确地显示 `system`**，但 `python3` 仍然解析到 3.11.11，因为 `PATH` 最前面直接放着 `/home/anby/.pyenv/versions/3.11.11/bin`——**这个路径绕过了 pyenv 的 shim 机制，`.python-version` 管不着它**。
+
+**对策：跑 rclpy 脚本一律显式用 `/usr/bin/python3`**，不要写 `python3`。诊断一句话：`python3 -c "import sys; print(sys.version)"` 如果不是 3.10 就是踩到了。
 
 容器内已确认**不可用/待装**：
 - **MuJoCo 的 Python 绑定**（`pip show mujoco` 未找到，`import mujoco` 失败）。如果后续需要 Python 侧原型验证（比如快速验证 MJCF、可视化调试），需要 `pip install mujoco`。核心项目走 C++ API，这个不是阻塞项。
