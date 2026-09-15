@@ -40,6 +40,16 @@
   - [7.6 RTF 是什么，为什么要常驻监控，为什么 `tf_rate_hz` 要和 `joint_state_rate_hz` 一致](#76-rtf-是什么为什么要常驻监控为什么-tf_rate_hz-要和-joint_state_rate_hz-一致)
   - [7.7 失败模式与验证手段](#77-失败模式与验证手段)
   - [7.8 排查记录：`free_body.xml` 注释里的 `--` 为什么没被 gtest 挡住](#78-排查记录free_bodyxml-注释里的----为什么没被-gtest-挡住)
+- [8. Stage G：pick-and-place 场景与 oracle 接口](#8-stage-gpick-and-place-场景与-oracle-接口)
+  - [8.0 一句话总结](#80-一句话总结)
+  - [8.1 改动清单与验证结果](#81-改动清单与验证结果)
+  - [8.2 MJCF `<include>` 路径解析规则：为什么新场景文件要和 panda.xml 同目录](#82-mjcf-include-路径解析规则为什么新场景文件要和-pandaxml-同目录)
+  - [8.3 qpos 顺序怎么确定：深度优先遍历 + 文档顺序](#83-qpos-顺序怎么确定深度优先遍历--文档顺序)
+  - [8.4 `qpos` 与 `xpos`/`xquat`：为什么 oracle 发布读后者](#84-qpos-与-xposxquat为什么-oracle-发布读后者)
+  - [8.5 `condim`/`friction`/`solref`：接触参数详解，为什么其中两个当前是死代码](#85-condimfrictionsolref接触参数详解为什么其中两个当前是死代码)
+  - [8.6 三条可视化路径的定位：RViz / `simulate` / 工业界与学术界的两种范式](#86-三条可视化路径的定位rviz--simulate--工业界与学术界的两种范式)
+  - [8.7 失败模式与验证手段](#87-失败模式与验证手段)
+  - [8.8 排查记录：keyframe 名字冲突与长度不匹配是两件独立的事（结论被推翻）](#88-排查记录keyframe-名字冲突与长度不匹配是两件独立的事结论被推翻)
 
 ---
 
@@ -182,7 +192,7 @@
 
 按 [STUDY_NOTES_GUIDE.md 第5节](../../STUDY_NOTES_GUIDE.md)，这几条是"你还没问但值得注意的"。**点出来，不自问自答**，等到对应 stage 再展开或决定忽略。
 
-1. **加了 box 之后 vendor 的 `home` keyframe 会失配**（E/C 类）— `<key qpos>` 的长度必须等于 `nq`；加一个 freejoint 就把 `nq` 从 9 推到 16。值得问的是：**长度写错时 MuJoCo 是加载失败、静默截断，还是读越界？** 三种行为对应三种完全不同的防护手段，现在不知道是哪种。
+1. ~~**加了 box 之后 vendor 的 `home` keyframe 会失配**（E/C 类）— `<key qpos>` 的长度必须等于 `nq`；加一个 freejoint 就把 `nq` 从 9 推到 16。值得问的是：**长度写错时 MuJoCo 是加载失败、静默截断，还是读越界？** 三种行为对应三种完全不同的防护手段，现在不知道是哪种。~~ **已在 Stage G 解答**：静默补零（不是加载失败，也不是读越界），且第一次实测被一次不相关的名字冲突报错掩盖过一轮——完整过程见 [8.8](#88-排查记录keyframe-名字冲突与长度不匹配是两件独立的事结论被推翻)。
 2. **"到位"阈值 ε 目前没有任何依据**（C 类）— 用零误差判据会永远卡住（position servo 的稳态误差是[实测过的](week1.md#107-怎么快速做一次独立的-fk-验证) mm 级）；但阈值取太松会让 FSM 在没真到位时就推进到下一阶段，**表现为偶发失败而不是报错**。Stage I 之前该先问"这个数该怎么测出来而不是猜出来"。
 3. **"20 次连续成功"在确定性仿真里可能是假的**（F 类，知识边界）— 固定物体位姿 + 固定 waypoint + 确定性物理 = 20 次跑的其实**几乎是同一条轨迹**。那这个 20 次到底验证了什么？值得在 Stage J 之前想清楚，否则会拿一个没有信息量的数字当验收通过。
 4. **`max_effort` 字段可能无法实现**（C 类）— MJCF 现在只有位置伺服 actuator（[11.4](week1.md#114-position-servo-actuator-的本质一个-pd-控制器)）。如果 `GripperCommand.max_effort` 被静默忽略，下游会以为自己在控制夹持力。**该显式拒绝、该 WARN、还是该改模型**，是 Stage H 要定的。
@@ -193,6 +203,10 @@
 
 > 待各 stage 结束后按 [4.3 的判据](../../STUDY_NOTES_GUIDE.md) 分流填入（缺参照系 → 这里）。
 
+- **`gripper_actuator_id_`/`gripper_ctrl_scale_`（`buildActuatorIndex`）和 `kHandBodyName="hand"`（`buildFrameIndex`）都是隐式单机械臂假设**（[8.7](#87-失败模式与验证手段)）——前者是两个标量，模型里若有第二条 tendon 驱动的夹爪会被循环无条件覆盖，只留最后一个，且没有任何警告；后者硬编码查找名字恰好叫 `hand` 的 body，第二条臂必须重命名（否则和第一条臂一样撞上 keyframe 那种编译期重名错误），重命名之后这行代码就再也找不到它。**缺参照系**：现在没有第二条臂，无法验证"改成怎样的 per-arm 索引才对"，而且计划书 2.2 节明确把双臂列进"暂不进入 MVP"。解锁条件：真正引入第二条机械臂时。
+- **多个可操作物体的通用化设计**（`kObjectBodyName="box"` 单一常量、单一 oracle 话题）——**缺参照系**：不知道 bin picking 阶段（Chap 5）实际需要"每个物体一条话题"还是"一条话题发数组"，现在设计只是猜。解锁条件：进入 bin picking / 杂乱清空阶段（计划书第7节，明确排在单物体 pick-and-place 稳定之后）。
+- **是否要给 `mujoco_bridge_node` 嵌入原生渲染器**（GLFW + `mjr_render`，画同一份 `data_`，不经 TF/RViz 这一层）——**缺参照系**：现在 RViz 已经能实时看，加原生渲染器的唯一动机是"更像 `simulate` 那种可交互调试"，但值不值得为这个多接一层 GLFW 事件循环和 `onTimer`/`onReset` 的互斥访问，需要先有具体的"RViz 不够用"的场景才能判断。
+
 ### 6.2 反向清单：现在就该做的
 
 > 待填（缺一次推演 → 这里）。第1周遗留、本周不打算做的条目**不要**复制过来，仍以 [week1.md 13.2](week1.md#132-反向清单现在就该做的属于缺一次推演) 为权威，本节只放本周新产生的。
@@ -200,6 +214,10 @@
 - **`ament_lint_auto` 从未通过过，涉及 `mujoco_bridge` 全部源文件**——Stage F 第一次跑 `colcon test`（本仓库此前一次都没跑过），暴露出 `cpplint`（版权头缺失、include 顺序）、`uncrustify`（`mujoco_bridge_node.cpp` 9 行、`mujoco_dl.cpp` 44 行格式差异）全部不过。gtest 部分（`test_frame_math`、`test_state_ops`）已全绿，这批是独立的风格债务，不是逻辑 bug，本周决定不修（`uncrustify --fix` 会改动 week1 笔记里逐行引用过的代码，需要专门一次处理并核对笔记引用是否还对得上行号）。
 - **RTF 监控目前只打日志，没有阈值告警**（[7.6](#76-rtf-是什么为什么要常驻监控为什么-tf_rate_hz-要和-joint_state_rate_hz-一致)、[7.7](#77-失败模式与验证手段)）——FSM/episode runner 要知道"RTF 掉到多少算异常"必须人眼盯日志。解锁条件：Stage I 给 FSM 超时判据接入 RTF 时，评估要不要把这个做成可查询的话题或参数化阈值。
 - **`tf_rate_hz != joint_state_rate_hz` 的告警本周加了代码但从没被真实触发过**（[7.6](#76-rtf-是什么为什么要常驻监控为什么-tf_rate_hz-要和-joint_state_rate_hz-一致)、[7.7](#77-失败模式与验证手段)）——两者目前都还是默认的 100Hz。解锁条件：以后真的把 `tf_rate_hz` 调开（比如给 FSM 提供更高频姿态反馈）时，第一次触发也是第一次验证这段代码本身是对的。
+- **keyframe 长度不匹配会被 MuJoCo 静默补零，没有任何测试防住**（[8.8](#88-排查记录keyframe-名字冲突与长度不匹配是两件独立的事结论被推翻)）——现在完全靠人记得"改了 nq 就要检查所有 keyframe 长度"。缺一次推演：写一个 gtest fixture，加载一个长度不匹配的 keyframe，断言补零后的 qpos 确实是 `(0,0,0,1,0,0,0)` 而不是别的值，把这条隐藏行为钉死成一个会报警的断言。
+- **`~/ground_truth/object_pose` 的发布逻辑（`resolveObjectOracle`/`publishObjectPose`）完全没有单元测试**——不像 Stage F 把 `frame_math`/`state_ops` 剥成纯函数配了 gtest，这段"直接抄 `xpos`/`xquat`"还焊在节点里。现在简单到不太会错，但和"多个物体的通用化"（[6.1](#61-清单)）是同一批要重构的代码，值得等那时候一起剥离和测试，而不是现在单独做一次半成品抽象。
+- **`~/ground_truth/object_pose` 与 `/tf` 共享 `tf_decimation_`，没有独立的发布频率开关**——两者数值上刻意设计成可以互相印证同一物理步，但如果以后 FSM 需要比 `/tf` 更高频的物体反馈，现在的代码结构没有单独调节 oracle 频率的参数。解锁条件：Stage I 给 FSM 接反馈时评估是否需要。
+- **`condim=3` 下 `friction` 的扭转/滚动两个分量（`0.03`、`0.003`）是抄来的死代码**——`condim` 不到 4/6 这两个数字完全不参与计算，从未验证过数值本身是否合理。解锁条件：Stage H 调抓取判据发现打滑/旋转问题，或以后主动把 `condim` 升级时。
 
 ## 7. Stage F：测试地基与胶水层收口
 
@@ -403,3 +421,161 @@ exit code: 1
 1. **"能被某个解析器接受"不等于"合规"**——宽松的解析器不会替你验证规范，它只是恰好没在检查这条规则。这类问题两边跑出的结果会互相矛盾，矛盾本身就是排查的起点。
 2. **批量失败列表不能整批归为同一类问题**。上一轮把 41 条失败一次性打包成"风格债务、本周不修"，其中夹带了一条真语法错误没被单独看到。以后遇到成批失败，至少要扫一遍每条失败信息的第一行，不能只看"哪个 checker 报的"就归类。
 3. 这条 bug 是**用户直接读代码发现的**，不是靠工具或者我主动检查出来的——再一次印证 [4.2](../../STUDY_NOTES_GUIDE.md) 里"C类问题（如果这里写错了我怎么知道）"的价值：这次的答案是"要看你信的是哪个解析器"。
+
+## 8. Stage G：pick-and-place 场景与 oracle 接口
+
+### 8.0 一句话总结
+
+新增 [pick_place_scene.xml](../../robot_description/mujoco/franka_emika_panda/pick_place_scene.xml)：`<include>` 上 vendor 的 `scene.xml`（连带 `panda.xml`），追加桌面 geom、`box` body（`freejoint`）、放置区标记，自带 `pick_place_home` keyframe；`mujoco_bridge_node.cpp` 的 `model_path`/`reset_keyframe_name` 变成 ROS 参数（默认指向新场景），新增 `~/ground_truth/object_pose`（`PoseStamped`，frame `world`）作为下游唯一合法的 oracle 源，启动日志同时打印 `nq`/`nv`。过程中撞上一次 MuJoCo `<include>` 路径解析的真实限制（被迫改变文件布局），以及一次先被误判、后被推翻的 keyframe 结论（名字冲突和长度不匹配是两件独立的事，实测才分清）。
+
+### 8.1 改动清单与验证结果
+
+**改动**：
+
+- [pick_place_scene.xml](../../robot_description/mujoco/franka_emika_panda/pick_place_scene.xml)（新）：桌面 geom、`box`（`freejoint`）、放置区 marker、`pick_place_home` keyframe（详见 [docs/architecture.md 第5节](../../docs/architecture.md)）
+- [mujoco_bridge_node.cpp](../../src/mujoco_bridge/src/mujoco_bridge_node.cpp)：`model_path`/`reset_keyframe_name` 声明为 ROS 参数；新增 `resolveObjectOracle()`/`publishObjectPose()`；启动日志加 `nv`
+
+**编译**：
+
+```
+Starting >>> robot_description
+Finished <<< robot_description [0.08s]
+Starting >>> mujoco_bridge
+Finished <<< mujoco_bridge [5.06s]
+
+Summary: 2 packages finished [5.26s]
+```
+
+**运行**（环境卫生按 [STUDY_NOTES_GUIDE 3.1](../../STUDY_NOTES_GUIDE.md) 确认后，直接跑可执行文件，不经 `ros2 run`）：
+
+```
+Loaded .../pick_place_scene.xml (nq=16, nv=15, timestep=0.0020s)
+9 actuated joints: joint1, ..., finger_joint1, finger_joint2
+TF: 3 static, 10 dynamic frames        # 9 -> 10，box 零代码改动自动出现
+ground-truth object `box` found; publishing ~/ground_truth/object_pose
+```
+
+**四条验收标准逐一核对**：
+
+| 验收项 | 实测 |
+| --- | --- |
+| ① `world -> box` 动态 TF 零代码改动出现 | `TF: 3 static, 10 dynamic frames`（panda.xml 单独跑是 9 dynamic），`tf2_echo world box` 能正常输出 |
+| ② `nq != nv` 首次成立 | `nq=16, nv=15`（freejoint 的四元数比角速度多一维） |
+| ③ `~/reset` 后 box 回到标称位姿且 sim time 不回退 | `success=True, message='reset to keyframe \`pick_place_home\`'`；多次 reset 间 sim time 持续单调前进 |
+| ④ oracle 话题与 `tf2_echo world box` 一致 | oracle: `(0.4999999999975637, -1.77e-13, 0.23987759634993702)`；`tf2_echo`: `(0.500, -0.000, 0.240)`——同一物理步内一致，差异仅浮点噪声 |
+
+**切回旧模型的验证**（确认参数确实"可切回"，不是只有默认值能跑）：
+
+```
+--ros-args -p model_path:=.../panda.xml -p reset_keyframe_name:=home
+→ Loaded .../panda.xml (nq=9, nv=9, timestep=0.0020s)
+→ TF: 3 static, 9 dynamic frames
+→ no `box` body in model; ~/ground_truth/object_pose disabled
+```
+
+### 8.2 MJCF `<include>` 路径解析规则：为什么新场景文件要和 panda.xml 同目录
+
+> Q: pick_place_scene.xml 包括了桌面和物体 + scene.xml 的场景 + panda.xml 的机械臂，之后只需要读这个总体的 xml 就可以了对吗？
+
+不完全是——`pick_place_scene.xml` 本身不含机械臂的任何定义，只是一份"拼装清单"，真正内容分散在三层文件里（本文件 / `scene.xml` / `panda.xml`）。想要"一个文件看到全部"，正确工具是 MuJoCo 自带的 `compile`，它能把整条 `<include>` 链展开、拍平成一个不含 `<include>` 的单文件：
+
+```bash
+compile pick_place_scene.xml /tmp/flat.xml
+```
+
+最初设计时想把新场景放进独立目录 `mujoco_models/`，用 `<include file="../franka_emika_panda/scene.xml"/>` 引用，编译失败：
+
+```
+Error: Error opening file 'robot_description/mujoco/mujoco_models/assets/robot_description/mujoco/franka_emika_panda/link0.stl': No such file or directory
+```
+
+路径被拼接成三层重复，不是简单的"找不到文件"。查证后确认：**MuJoCo 无论 `<include>` 嵌套多深，`file` 属性和每个被包含文件自己的 `meshdir` 都相对"顶层主文件"的目录解析，不是相对"直接包含它的文件"**（[mujoco#974](https://github.com/google-deepmind/mujoco/issues/974)）。这就是为什么 vendor 自己的 `mjx_single_cube.xml` 也和 `panda.xml` 同目录——不是随意的组织方式，是被这条限制逼出来的唯一可行结构。改成把 `pick_place_scene.xml` 放进 `franka_emika_panda/` 目录本身后编译成功。这是**新增文件**，没有修改任何已有 vendor 文件，但确实把"vendor 目录"和"我们自己的组合文件"混在了一起——以后跟上游 diff 时要记得把新增文件排除在外。
+
+### 8.3 qpos 顺序怎么确定：深度优先遍历 + 文档顺序
+
+`qpos` 里没有"关节构型在前、物体自由度在后"这样的专门规则，纯粹是**合并后的 worldbody 树里谁先出现，深度优先遍历时谁先分配 qpos 槽位**。用 `compile` 展开后可以直接看到证据：
+
+```
+<geom name="floor" .../>              <- scene.xml，裸 geom，不占 qpos
+<geom name="table" .../>              <- 我们的，裸 geom，不占 qpos
+<geom name="place_marker" .../>       <- 我们的，裸 geom，不占 qpos
+<body name="link0" ...>               <- panda.xml，链式嵌套到 link1..7, hand, fingers（9 个关节）
+<body name="box" pos="0.5 0 0.241">   <- 我们的，freejoint（7 个 qpos）
+```
+
+`link0` 链排在前面是因为 `<include file="scene.xml"/>` 写在文件最前面；`box` 排在后面是因为它属于 `pick_place_scene.xml` 自己的 `<worldbody>` 块，这个块写在 `<include>` **之后**。这不是巧合，是纯粹的书写顺序决定的——如果把 `<body name="box">` 挪到 `<include>` 之前，box 就会变成 `qpos[0..6]`，机械臂关节整体后移。keyframe 里 `qpos` 前9后7的排列，是靠实际 reset 后读 oracle 话题数值吻合验证过的，不是凭猜测写的。
+
+### 8.4 `qpos` 与 `xpos`/`xquat`：为什么 oracle 发布读后者
+
+> Q: box 也在 qpos 里面，但是为什么代码里读的是 xpos/xquat？
+
+两者是 `mjData` 里不同用途、不同索引方式的数组，`mj_forward`/`mj_step` 保证它们随时同步：
+
+| 数组 | 含义 | 索引方式 | 谁算出来 |
+| --- | --- | --- | --- |
+| `qpos`/`qvel`/`qfrc_*` | 广义坐标，积分器实际推进的状态向量 | 按关节（`jnt_qposadr`/`jnt_dofadr`） | 物理积分本身 |
+| `xpos`/`xquat` | 每个 body 在世界系下的绝对位姿 | 按 body id（每个 body 一份） | 由 `qpos` 经正运动学推导，`mj_forward` 算 |
+
+对 `joint1..7` 这类 hinge 关节，`qpos` 只是标量转角，本身不是坐标——要知道某个 link 在世界系下的实际位置，必须把从 `link0` 开始这条链上每一级的旋转/平移全部复合，这正是正运动学，MuJoCo 已经算进 `xpos`/`xquat`。`box` 的 `freejoint` 是特例：它的 7 个 `qpos`（3 平移 + 4 四元数）**因为父级直接是 world**，定义本身就等于世界位姿——这也是为什么这次 `qpos[9..15]` 和 `xpos`/`xquat[box_id]` 数值一致。
+
+但 `publishObjectPose()` 故意读 `xpos`/`xquat` 而不是直接切 `qpos[9..15]`：**"`qpos` 就是世界坐标"只在"父级是 world"这一个具体条件下成立**。以后如果 box 不再直接挂在 world 下（比如放进一个可移动托盘），`qpos` 就只是相对托盘的局部坐标，直接当世界坐标发布会是一个数值上完全能跑、但语义错误的 bug，而且不会报错（形状没变）。用 `xpos`/`xquat` 不依赖这个假设，因为不管父级是谁，MuJoCo 都已经把链式复合算完。这和 `buildFrameIndex()` 用 `body_jntnum==0` 判断 static/dynamic 而不是硬编码名字是同一种习惯：把"是不是绝对坐标"这类判断交给模型自己算出来的量，不要在业务代码里凭当前配置抄近路。
+
+反过来 `publishJointState()` 必须用 `qpos` 而不是 `xpos`：`JointState` 要的是每个关节自己的标量转角，`xpos`（绝对坐标）装不下这个语义，这也是 `buildJointIndex()` 跳过 free/ball 关节的原因——box 不出现在 `/joint_states` 的 9 个名字里，它的 7 个 `qpos` 分量占着位置，只是走 TF/oracle 对外可见。
+
+### 8.5 `condim`/`friction`/`solref`：接触参数详解，为什么其中两个当前是死代码
+
+`friction="1 0.03 0.003"` 三个数分别是（**滑动**摩擦系数, **扭转**摩擦系数, **滚动**摩擦系数）：滑动抵抗切向滑移（抓取里最关心，"打滑 vs 咬住"直接取决于它）；扭转抵抗绕接触法线的原地旋转；滚动抵抗物体沿接触面滚动。
+
+`condim` 决定接触点在求解器里有几个约束维度：1=只有法向（无摩擦）；3=法向+2个切向滑动（各向同性，最常用）；4=再加扭转；6=再加滚动（完整6维）。**关键点：只有 `condim` 用到的维度对应的摩擦系数才真正参与计算**——当前 `condim="3"` 只用滑动系数，扭转（0.03）和滚动（0.003）两个数字是纯粹的死代码，写了但不生效。
+
+`solref="0.01 1"` 不是刚度系数，是接触点虚拟弹簧-阻尼器的（时间常数, 阻尼比）：0.01 = 10ms 内响应完成，1 = 临界阻尼（不震荡）。太小（接近或小于 `timestep=0.002s`）会数值不稳定；太大会看起来"软"（明显下陷后才弹回）。
+
+这些数值照抄自 vendor 的 `mjx_single_cube.xml`，从没针对本场景的桌子+box+夹爪组合重新验证过。会不会改：几乎肯定会——Stage H 如果发现"命令夹紧了却测不到稳定接触"或"抓住了但一使力就滑出"，第一个要查的就是滑动摩擦系数；如果以后想让扭转/滚动摩擦真正生效（比如夹爪角度不完全对齐时需要抗旋转能力），需要把 `condim` 提到 4 或 6，到那时这两个"配置了但没用"的数字会突然从摆设变成真正影响任务难度的参数，且切换瞬间不会有任何日志提示。
+
+### 8.6 三条可视化路径的定位：RViz / `simulate` / 工业界与学术界的两种范式
+
+> Q: 之前只在 RViz 里看过 bridge 发布的 TF，如何用 MuJoCo 自己观察已构建的场景？
+
+**RViz 不是离线数据，是对正在运行的 `mujoco_bridge_node` 的实时视图**：`demo.launch.py` 起 bridge_node + rviz2，bridge_node 每个物理步（2ms）发布一次 `/tf`/`/joint_states`，RViz 订阅重画；发给 `~/joint_command`/`~/reset` 的命令直接写进 bridge_node 那份 `mjData`（同进程同内存），下一步就体现在新发布的 `/tf` 里。这套流程本来就是实时看仿真结果。
+
+`simulate <model.xml>` 是**完全独立的第二份物理世界**：自己加载模型、自己跑物理，和 `mujoco_bridge_node` 内部那份 `mjData` 毫无关系，不受任何 ROS 命令驱动，只用来肉眼核对 MJCF 本身（桌子高度对不对、box 会不会穿模）。实测在这个沙盒环境里加 `LIBGL_ALWAYS_SOFTWARE=1`（和 rviz2 需要的环境变量一样，同一个 GL 转发限制）后 `simulate` 能正常弹出窗口渲染 `pick_place_scene.xml`：机械臂立在桌子旁，红色 box 在桌上，绿色圆盘是放置区标记，比例符合预期。
+
+> Q: 工业界/学术界的炫酷 demo 通常怎么做？RL policy 那种边 step 边 render 的循环是主流吗？
+
+这对应两种不同范式：
+
+- **单进程 step+render**（多数 RL/研究 demo）：控制器和物理仿真同进程同内存，`viewer.sync()` 直接画同一份 `data`，没有序列化/网络开销，想多快渲染多快。大规模并行训练（Isaac Lab / MJX / Brax）训练阶段直接关渲染，只在评估时录几条 rollout 做视频——很多论文/社交媒体上的"丝滑"视频其实是离线跑一次、录制帧序列剪辑出来的，不是持续运行的交互式 viewer。
+- **client-server 拆分**（Gazebo 的 `gzserver`/`gzclient`、Isaac Sim 的 PhysX/Omniverse 分离、以及我们自己的 `mujoco_bridge`+RViz）：物理进程只发布状态，一个或多个可视化客户端订阅，两者独立进程不共享内存指针。代价是多一层序列化/传输延迟，换来的是**多消费者**（RViz、rosbag、未来的面板互不干扰）和**控制器与仿真解耦**——这正是本项目选这条路的原因：第6周把 `mujoco_bridge` 换成真实 `ros2_control` 驱动时，下游 FSM/感知代码不用改一行。纯粹为了录像而重写整个控制循环去接单进程渲染，在需要真机迁移的项目里是不划算的。
+
+### 8.7 失败模式与验证手段
+
+| 失败模式 | 现象 | 怎么发现 / 怎么防住 |
+| --- | --- | --- |
+| 跨目录 `<include>` | 编译报错，mesh 路径被拼接成三层重复，报错信息不会提示"应该同目录" | 用 `compile` 工具最小复现（`test_single_include.xml`），查证 MuJoCo 的路径解析规则（[8.2](#82-mjcf-include-路径解析规则为什么新场景文件要和-pandaxml-同目录)），改用同目录布局 |
+| keyframe 名字冲突 | 编译期硬错误 `repeated name 'home' in key` | 显式重命名为 `pick_place_home`；`reset_keyframe_name` 做成参数，换模型必须显式配对，不给默认值兜底成"猜一个" |
+| keyframe 长度不匹配 | **不报错**，MuJoCo 静默把缺的部分补零（对 freejoint 四元数是 `(0,0,0,1,0,0,0)`），box 被传送到接近世界原点 | 目前只能靠人眼盯 reset 后的位置——本周唯一一次靠手动切换参数复现，见 [8.8](#88-排查记录keyframe-名字冲突与长度不匹配是两件独立的事结论被推翻)；反向清单已记录要补 gtest |
+| `friction` 扭转/滚动分量在 `condim=3` 下不生效 | 调了参数没有任何效果，且不会报错或警告 | 目前无自动检测，只能靠理解 `condim`/`friction` 的对应关系（[8.5](#85-condimfrictionsolref接触参数详解为什么其中两个当前是死代码)） |
+| oracle 与 TF 数值不一致 | 若真的出现，说明两者不再共享同一物理步或 `xpos`/`xquat` 读取有误 | 本周实测两者一致（差异仅浮点噪声），是设计上刻意的交叉验证；以后改动 decimation 逻辑要重新核对这一点 |
+
+### 8.8 排查记录：keyframe 名字冲突与长度不匹配是两件独立的事（结论被推翻）
+
+**现象**：第一次给 `pick_place_scene.xml` 写 `<key name="home">`（复用 vendor 的名字，长度16）时，`compile` 报错 `Error: repeated name 'home' in key`。当时把这个报错直接当成"week2.md 5.1 第1条悬挂问题（keyframe 长度写错时 MuJoCo 是加载失败、静默截断，还是读越界？）"的答案，写成"长度不匹配是编译期硬错误"。
+
+**推翻过程**：用户追问 qpos 顺序时，为了验证顺序，用 `compile` 把整条 `<include>` 链展开成单文件重新看,才发现展开后的文件里其实**同时保留了两个 keyframe**——vendor 的 9 长度 `home` 和我们的 16 长度 `pick_place_home`，而 `home` 那一行被 MuJoCo **自动补齐**成了 `qpos="... 0.04 0.04 0 0 0 1 0 0 0"`（后7个是补的）。这说明之前那次报错的根因根本不是"长度不匹配"，是两个 keyframe **恰好都叫 `home`**——纯粹的名字唯一性冲突，和长度无关。
+
+**验证**：把 `reset_keyframe_name` 参数手动改成 `home`（这个模型里合法存在，只是长度不对），实际调用 `~/reset`：
+
+```
+response: success=True, message='reset to keyframe `home`'   # 不报错
+position: x: 0.0027813291615433416, y: 0.0008049163369827898, z: 0.014382851520445689
+```
+
+box 被静默传送到接近世界原点（`(0,0,0,1,0,0,0)` 补零的结果），砸向机械臂底座附近再弹开，全程没有一条警告或错误。
+
+**根因**：keyframe 名字冲突和 keyframe 长度不匹配是**两个独立的检查**——前者是 MuJoCo 编译器的名字唯一性校验（硬错误），后者根本没有校验（静默补零）。只有当两个 keyframe 恰好重名时，前一种检查才会先拦住问题；只要改成不同名字（就像我们后来做的 `pick_place_home`），长度不匹配这条路径就完全不会被拦，会在运行时安静发生。
+
+**留下的经验**：
+
+1. **"编译报错了"不代表"报的是我以为的那个错误"**。第一次看到 `repeated name` 报错时没有细究"这到底是名字问题还是长度问题"，直接套用到了悬挂清单里现成的那个问题上——两者表面看起来很像（"keyframe 写坏了会怎样"），实际是完全不同的检查路径。
+2. **之前写下的结论已被推翻，教训记在这里，不做静默修改**：week2.md 5.1 第1条问题的真实答案不是"编译期硬错误"，是"**看具体是哪种坏法**：名字冲突→硬错误；长度不匹配→静默补零"。这个更细的答案已经同步进 [docs/architecture.md 第0.1节](../../docs/architecture.md)。
+3. 这次推翻是**因为多问了一步"给我看实际展开后的文件"**才发现的——再一次印证"质疑证据链优于质疑结论"（[STUDY_NOTES_GUIDE 4.4](../../STUDY_NOTES_GUIDE.md)）：第一次的结论表面自洽（有报错、看起来像回答了问题），只有去看原始展开文件才暴露出报错原因被张冠李戴。

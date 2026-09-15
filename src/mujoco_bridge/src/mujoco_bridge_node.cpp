@@ -1,4 +1,5 @@
 #include <ament_index_cpp/get_package_share_directory.hpp>
+#include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <mujoco/mujoco.h>
 #include <rclcpp/rclcpp.hpp>
@@ -39,13 +40,37 @@ namespace mujoco_bridge
 // and see docs/architecture.md section 1. Note the -45 deg wrist rotation is NOT part
 // of this transform -- it lives in hand_joint (link8 -> hand), which the MJCF folds
 // into the `hand` body's own quat.
-// The MJCF's only keyframe. Looked up by name at startup rather than hardcoded as
-// index 0, so adding a second keyframe upstream cannot silently repoint the reset.
-constexpr const char * kResetKeyframeName = "home";
+// Default model + its reset keyframe name, as a pair: the keyframe to reset to is a
+// property of *which model is loaded*, not a global constant, because different
+// models can't share a keyframe name across an <include> chain. Concretely,
+// panda.xml's own "home" keyframe (qpos length 9) is pulled into pick_place_scene.xml
+// unchanged by its <include>, so pick_place_scene.xml cannot also define a "home" --
+// MuJoCo rejects that at compile time as a duplicate name (see that file's comment
+// and week2.md Stage G). Both are therefore declared ROS parameters with defaults
+// that match each other.
+//
+// The two ways to misconfigure this pair fail very differently, and only one of them
+// is safe:
+//   - model_path -> panda.xml, reset_keyframe_name left at "pick_place_home": that
+//     name does not exist in panda.xml at all, so name2id returns -1 and ~/reset
+//     fails loudly (see the WARN below and onReset()'s error response).
+//   - model_path -> pick_place_scene.xml, reset_keyframe_name left/set to "home":
+//     that name DOES exist (panda.xml's own keyframe, pulled in unchanged), just with
+//     the wrong (shorter) qpos length. mj_resetDataKeyframe does not validate length
+//     against the current model; it silently zero-pads the missing tail and reports
+//     success -- verified by actually doing this (week2.md 8.8). There is no
+//     "fail loudly" here at all.
+// The lesson is not "always fails safe" but "know which direction you're switching in".
+constexpr const char * kDefaultModelRelativePath = "/mujoco/franka_emika_panda/pick_place_scene.xml";
+constexpr const char * kDefaultResetKeyframeName = "pick_place_home";
 
 constexpr const char * kHandBodyName = "hand";
 constexpr const char * kTcpFrameName = "hand_tcp";
 constexpr double kHandToTcpZ = 0.1034;
+// Ground-truth object body. Not every model has one (panda.xml alone does not);
+// missing it only disables the oracle topic, it is never an error (see
+// buildFrameIndex-style guarded lookup below).
+constexpr const char * kObjectBodyName = "box";
 
 class MujocoBridgeNode : public rclcpp::Node
 {
@@ -53,9 +78,12 @@ public:
   MujocoBridgeNode()
   : Node("mujoco_bridge"), api_(loadMujocoApi())
   {
-    const std::string model_path =
+    const std::string default_model_path =
       ament_index_cpp::get_package_share_directory("robot_description") +
-      "/mujoco/franka_emika_panda/panda.xml";
+      kDefaultModelRelativePath;
+    const std::string model_path = declare_parameter("model_path", default_model_path);
+    const std::string reset_keyframe_name =
+      declare_parameter("reset_keyframe_name", std::string(kDefaultResetKeyframeName));
 
     char error[1024] = {0};
     model_ = api_.loadXML(model_path.c_str(), nullptr, error, sizeof(error));
@@ -68,13 +96,19 @@ public:
     }
 
     const double timestep_s = model_->opt.timestep;
+    // nq != nv the moment any body has a free/ball joint (a free joint alone is 7
+    // qpos vs 6 qvel -- 3 translation are 1:1 but the 4-component quaternion has one
+    // more entry than its 3-component angular velocity). Printing both, not just nq,
+    // is what actually caught the qpos/qvel length mismatch class of bug in Stage F's
+    // free_body.xml fixture; panda.xml alone never exercises it (nq==nv==9 there).
     RCLCPP_INFO(
-      get_logger(), "Loaded %s (nq=%d, timestep=%.4fs)",
-      model_path.c_str(), model_->nq, timestep_s);
+      get_logger(), "Loaded %s (nq=%d, nv=%d, timestep=%.4fs)",
+      model_path.c_str(), model_->nq, model_->nv, timestep_s);
 
     buildJointIndex();
     buildFrameIndex();
     buildActuatorIndex();
+    resolveObjectOracle();
 
     // Physics runs at 1/timestep; the state publishers run slower. Decimating by an
     // integer number of steps keeps every published sample aligned with an exact
@@ -116,10 +150,12 @@ public:
     // of the model, so it should be visible at startup rather than on the first
     // reset call. The service is still created (and reports the failure) so callers
     // get an explicit "no such keyframe" rather than a missing service.
-    reset_keyframe_id_ = api_.name2id(model_, mjOBJ_KEY, kResetKeyframeName);
+    reset_keyframe_name_ = reset_keyframe_name;
+    reset_keyframe_id_ = api_.name2id(model_, mjOBJ_KEY, reset_keyframe_name_.c_str());
     if (reset_keyframe_id_ < 0) {
       RCLCPP_WARN(
-        get_logger(), "model has no keyframe `%s`; ~/reset will fail", kResetKeyframeName);
+        get_logger(), "model has no keyframe `%s`; ~/reset will fail",
+        reset_keyframe_name_.c_str());
     }
     // Private name (~/reset -> /mujoco_bridge/reset): unlike /joint_states and /clock
     // this is not a system-wide singleton -- a second sim instance in the same graph
@@ -335,6 +371,36 @@ private:
       actuator_by_joint_.size(), gripper_actuator_id_ >= 0 ? "found" : "NOT found");
   }
 
+  // Looks up the ground-truth object body once at startup, same discipline as
+  // reset_keyframe_id_: a missing object is a property of the model, so it should be
+  // visible in the startup log rather than discovered the first time something reads
+  // an empty ~/ground_truth/object_pose topic. The topic itself is only created when
+  // the body exists -- there is nothing meaningful to publish for panda.xml alone.
+  //
+  // This is deliberately the *only* place downstream code may get the object's true
+  // pose (see docs/architecture.md "oracle 必须走独立接口" requirement): the object's
+  // world->box TF frame already exists for free via buildFrameIndex's structural
+  // body_jntnum test, but that is incidental (every free body gets a TF frame,
+  // ground-truth object or not) and TF is not gated behind "this is the oracle" the
+  // way a dedicated topic is. Perception nodes are meant to publish an *estimated*
+  // object pose on a different topic later (Week 4); nothing should quietly start
+  // reading TF instead of this topic to get the real answer early.
+  void resolveObjectOracle()
+  {
+    object_body_id_ = api_.name2id(model_, mjOBJ_BODY, kObjectBodyName);
+    if (object_body_id_ < 0) {
+      RCLCPP_INFO(
+        get_logger(), "no `%s` body in model; ~/ground_truth/object_pose disabled",
+        kObjectBodyName);
+      return;
+    }
+    object_pose_pub_ =
+      create_publisher<geometry_msgs::msg::PoseStamped>("~/ground_truth/object_pose", rclcpp::QoS(10));
+    RCLCPP_INFO(
+      get_logger(), "ground-truth object `%s` found; publishing ~/ground_truth/object_pose",
+      kObjectBodyName);
+  }
+
   // The order hazard is on the *input* side: MuJoCo packs quaternions into a raw
   // mjtNum[4] as (w, x, y, z), so quat[0] is w, not x. geometry_msgs has named
   // fields, so assigning them by name (rather than memcpy'ing four doubles into the
@@ -405,14 +471,13 @@ private:
     // why both matter.
     if (!resetToKeyframe(api_, model_, data_, reset_keyframe_id_)) {
       response->success = false;
-      response->message =
-        std::string("model has no keyframe `") + kResetKeyframeName + "`";
+      response->message = "model has no keyframe `" + reset_keyframe_name_ + "`";
       RCLCPP_ERROR(get_logger(), "%s", response->message.c_str());
       return;
     }
 
     response->success = true;
-    response->message = std::string("reset to keyframe `") + kResetKeyframeName + "`";
+    response->message = "reset to keyframe `" + reset_keyframe_name_ + "`";
     RCLCPP_INFO(get_logger(), "%s (sim time preserved at %.3fs)", response->message.c_str(),
       data_->time);
   }
@@ -531,7 +596,33 @@ private:
     }
     if (step_count_ % tf_decimation_ == 0) {
       publishTransforms();
+      publishObjectPose();
     }
+  }
+
+  // Absolute (world-frame) pose, unlike publishTransforms() which composes
+  // parent-relative transforms -- the object's parent *is* world (it has a free
+  // joint directly under worldbody), so xpos/xquat are already what
+  // ~/ground_truth/object_pose promises. Sharing tf_decimation_ (rather than a
+  // separate rate) is deliberate: this topic and the world->box TF frame are meant to
+  // be cross-checked against each other (docs/architecture.md), which only means
+  // something if they describe the same physics step.
+  void publishObjectPose()
+  {
+    if (object_body_id_ < 0) {
+      return;
+    }
+    geometry_msgs::msg::PoseStamped msg;
+    msg.header.stamp = simTime();
+    msg.header.frame_id = "world";
+    msg.pose.position.x = data_->xpos[3 * object_body_id_ + 0];
+    msg.pose.position.y = data_->xpos[3 * object_body_id_ + 1];
+    msg.pose.position.z = data_->xpos[3 * object_body_id_ + 2];
+    msg.pose.orientation.w = data_->xquat[4 * object_body_id_ + 0];
+    msg.pose.orientation.x = data_->xquat[4 * object_body_id_ + 1];
+    msg.pose.orientation.y = data_->xquat[4 * object_body_id_ + 2];
+    msg.pose.orientation.z = data_->xquat[4 * object_body_id_ + 3];
+    object_pose_pub_->publish(msg);
   }
 
   // mjData::xpos/xquat are absolute (relative to world). TF needs each transform
@@ -595,6 +686,7 @@ private:
   std::unique_ptr<tf2_ros::StaticTransformBroadcaster> static_tf_broadcaster_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr reset_service_;
   int reset_keyframe_id_ = -1;
+  std::string reset_keyframe_name_;
   rclcpp::Subscription<trajectory_msgs::msg::JointTrajectory>::SharedPtr joint_command_sub_;
   std::unordered_map<std::string, int> actuator_by_joint_;  // joint name -> actuator id
   std::unordered_set<std::string> gripper_joint_names_;     // finger_joint1, finger_joint2
@@ -607,6 +699,8 @@ private:
   std::vector<geometry_msgs::msg::TransformStamped> tf_batch_;
   int joint_state_decimation_ = 1;
   int tf_decimation_ = 1;
+  int object_body_id_ = -1;
+  rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr object_pose_pub_;
   uint64_t step_count_ = 0;
   std::chrono::steady_clock::time_point rtf_window_wall_start_ = std::chrono::steady_clock::now();
   double rtf_window_sim_start_ = 0.0;

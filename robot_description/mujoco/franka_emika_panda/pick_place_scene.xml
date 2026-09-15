@@ -1,0 +1,66 @@
+<mujoco model="pick_place_scene">
+  <!-- New file, not a modification of any vendor file - see docs/architecture.md
+       section 0 ("不改 vendor 文件"). It lives next to panda.xml/scene.xml, not in a
+       separate directory, because MuJoCo resolves every relative path in an <include>
+       chain (both the `file` attribute and each included file's own compiler
+       meshdir="assets") against the TOP-LEVEL model file's directory, no matter how
+       deep the nesting - not against the directory of the file doing the including.
+       A sibling directory ("../franka_emika_panda/scene.xml") was tried first and
+       failed to resolve panda.xml's meshdir; see week2.md Stage G notes for the
+       compile-tool error output. mjx_single_cube.xml (vendor) already uses this same
+       same-directory composition pattern, so this follows existing precedent rather
+       than inventing a new one. -->
+  <include file="scene.xml"/>
+
+  <asset>
+    <material name="table_material" rgba="0.55 0.4 0.25 1"/>
+    <material name="cube_material" rgba="0.85 0.1 0.1 1"/>
+    <material name="place_marker_material" rgba="0.1 0.8 0.1 0.5"/>
+  </asset>
+
+  <worldbody>
+    <!-- Static: no joints, so buildFrameIndex (mujoco_bridge_node.cpp) never sees a
+         "table" body at all - it is a geom directly on worldbody, same as "floor" in
+         scene.xml. Top surface at z=0.22 (pos.z=0.2 + half-height 0.02). -->
+    <geom name="table" type="box" size="0.3 0.4 0.02" pos="0.5 0 0.2" material="table_material"/>
+
+    <!-- Manipulable object. freejoint (not a fixed geom) so it gets a dynamic
+         world->box TF frame with zero code changes: buildFrameIndex keys off
+         body_jntnum, not the body's name. Resting on the table with a 1mm gap
+         (0.221 top + 0.02 half-size = 0.241) to avoid starting in penetration. -->
+    <body name="box" pos="0.5 0 0.241">
+      <freejoint/>
+      <geom name="box" type="box" size="0.02 0.02 0.02" mass="0.05" material="cube_material"
+        condim="3" friction="1 0.03 0.003" solref="0.01 1"/>
+    </body>
+
+    <!-- Placement-area marker: visual reference only, no collision (contype/conaffinity
+         0), for where the box should end up after a successful place. -->
+    <geom name="place_marker" type="cylinder" size="0.05 0.001" pos="0.5 0.3 0.221"
+      material="place_marker_material" contype="0" conaffinity="0"/>
+  </worldbody>
+
+  <!-- panda.xml's own "home" keyframe (qpos length 9 = nq for the arm alone) is pulled
+       in unchanged by the <include> chain above. Adding the box's freejoint (3
+       translation + 4 quaternion) makes nq=16 here, so that keyframe is no longer
+       length-compatible with this model.
+       This key is named `pick_place_home`, NOT `home` -- not because a mismatched
+       length would be rejected (it would not be), but because reusing the name "home"
+       for a second, differently-sized <key> triggers a SEPARATE, unrelated check:
+       MuJoCo's compiler rejects duplicate names within a model ("repeated name 'home'
+       in key"), regardless of what the qpos lengths are.
+       The actual answer to the length-mismatch question (week2.md 5.1) had to be
+       found by testing it directly, decoupled from the name collision: give the
+       vendor's short "home" keyframe (still present, unchanged, via the <include>
+       above) a *different* name so it compiles, then reset to it on this nq=16 model.
+       Result: no error at all. MuJoCo silently zero-pads the missing tail (for a
+       freejoint's quaternion, that is `1 0 0 0`, i.e. world origin + identity
+       rotation) and reports success. That is a much more dangerous failure mode than
+       a compile error -- it only gets caught here because the two keyframes also
+       happen to collide on the name "home". See week2.md 8.8 for the full
+       first-conclusion-was-wrong writeup, including the actual reset output. -->
+  <keyframe>
+    <key name="pick_place_home" qpos="0 0 0 -1.57079 0 1.57079 -0.7853 0.04 0.04 0.5 0 0.241 1 0 0 0"
+      ctrl="0 0 0 -1.57079 0 1.57079 -0.7853 255"/>
+  </keyframe>
+</mujoco>

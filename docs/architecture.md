@@ -13,6 +13,13 @@
 | MoveIt 2 现成配置（SRDF、kinematics、joint_limits、OMPL/Pilz/CHOMP planning yaml） | `moveit_resources_panda_moveit_config` (2.0.7, Humble) | `sudo apt install ros-humble-moveit-resources-panda-moveit-config` | `share/moveit_resources_panda_moveit_config/config/` |
 | MuJoCo MJCF + mesh | 无 apt 包，从 [google-deepmind/mujoco_menagerie](https://github.com/google-deepmind/mujoco_menagerie) `franka_emika_panda/` 子目录复制 | vendor 进本仓库 | `robot_description/mujoco/franka_emika_panda/panda.xml`（含夹爪）、`panda_nohand.xml`（仅7轴臂） |
 
+### 0.1 MJCF 组合规则（Stage G 新增）
+
+- **`<include>` 与每个被包含文件自己的 `meshdir`，无论嵌套多深，都相对"顶层主文件"的目录解析，不是相对"直接包含它的文件"**。这不是本仓库的假设，是 MuJoCo 编译器本身的行为（[mujoco#974](https://github.com/google-deepmind/mujoco/issues/974)）。实测：把新场景文件放进独立目录 `mujoco_models/` 并用 `<include file="../franka_emika_panda/scene.xml"/>` 引用，`compile` 报错找不到 mesh（路径被拼接成三层重复）。**结论：任何要 `<include>` `panda.xml`/`scene.xml` 的新文件，必须和它们放在同一目录**，这也是为什么 vendor 自己的 `mjx_single_cube.xml` 采取同目录布局——不是随意的组织方式，是被这条限制逼出来的唯一可行结构。`pick_place_scene.xml` 因此放在 `franka_emika_panda/` 目录内，是新增文件、不是修改 vendor 文件。
+- **keyframe 名字冲突 和 keyframe 长度不匹配，是两件独立的失效模式，不要混为一谈**：
+  - 名字冲突（两个 `<key>` 同名，即使不同文件里定义、通过 `<include>` 合并到同一模型）→ **编译期硬错误**：`Error: repeated name 'home' in key`。
+  - 长度不匹配（同一模型里，`<key>` 的 `qpos` 长度 ≠ 当前 `nq`）→ **不报错，MuJoCo 静默把缺的部分补 0**（对 freejoint 的四元数分量，补出来的是 `(0,0,0,1,0,0,0)`，即世界原点+单位旋转,不是"沿用旧值"或"截断报错"）。实测：把 `pick_place_scene.xml`（nq=16）的 reset 目标改回 vendor 的 9 长度 `home` keyframe，`~/reset` 返回 `success=True`（不报错），box 被静默传送到世界原点附近并砸向机械臂底座。**这比编译期报错危险得多**——它只在两个 keyframe 恰好重名时才会被前一种错误挡住；只要改成不同名字，长度不匹配就会在运行时安静发生。详见 [week2.md 8.8](../Job_guides/my_study/week2.md#88-排查记录keyframe-名字冲突与长度不匹配是两件独立的事结论被推翻)。
+
 选型理由：
 - Franka 官方仓库已把经典 "Panda" 型号重命名为 `fer`（Franka Emika Robot），物理几何/DH 参数与原 Panda 完全一致，`joint_limits.yaml` 数值可交叉验证。
 - MJCF 没有对应 apt 包，且体积不大（~33MB mesh），vendor 进仓库比运行时依赖一个未打包的第三方仓库更可复现；已在 `.gitignore` 外单独保留（不受 build/install/log 忽略规则影响）。
@@ -142,3 +149,31 @@ xacro $(ros2 pkg prefix franka_description)/share/franka_description/robots/fer/
 - [ ] 记录相机外参数值来源与标定方式（相机型号/安装位置尚未选定）
 - [ ] 确认 URDF 与 MJCF 碰撞几何是否为同一份简化（第3节）
 - [ ] 编写第一个自动测试：5组固定 `q`，对比 MuJoCo 与 MoveIt FK（对应第15节任务5，需等 `motion_planner`/MoveIt 配置接入后才能跑）
+- [ ] keyframe 长度不匹配会被静默补零（不报错，见第 0.1 节）——需要至少一个 gtest 防止手滑改错 `qpos` 长度却没人发现（Stage G 实测，见 [week2.md 8.8](../Job_guides/my_study/week2.md#88-排查记录keyframe-名字冲突与长度不匹配是两件独立的事结论被推翻)）
+- [ ] `gripper_actuator_id_`/`kHandBodyName="hand"`（`mujoco_bridge_node.cpp`）目前是隐式单机械臂假设：模型里有第二个夹爪/第二个 `hand` body 会静默覆盖或找不到，不报错。解锁条件：真正引入第二条机械臂（第 2.2 节"暂不进入 MVP"包含双臂，当前不修）
+
+## 5. Pick-and-place 场景（Stage G）
+
+新增 [pick_place_scene.xml](../robot_description/mujoco/franka_emika_panda/pick_place_scene.xml)（新文件，不修改任何 vendor 文件，见第 0.1 节的同目录约束），`<include>` 上 vendor 的 `scene.xml`（连带 `panda.xml`）。
+
+| 项 | 数值 | 说明 |
+| --- | --- | --- |
+| 桌面 | `box` geom，`size="0.3 0.4 0.02"`，`pos="0.5 0 0.2"` | 无 body 包裹（结构上等价于 `floor`），顶面 z=0.22，不产生 TF 帧 |
+| box（可操作物体） | `size="0.02 0.02 0.02"`（4cm 边长立方体），`mass="0.05"`（50g），`pos="0.5 0 0.241"` | 带 `freejoint`，父级为 world；`body_jntnum!=0` 使其自动获得 `world -> box` 动态 TF（零代码改动，Stage C 结构判据的首次真实检验） |
+| 接触参数 | `condim="3"`，`friction="1 0.03 0.003"`，`solref="0.01 1"` | 抄自 vendor `mjx_single_cube.xml`，未针对本场景重新验证；三个摩擦系数含义是（滑动、扭转、滚动），`condim=3` 下只有滑动系数生效，扭转/滚动当前是死代码（升级 `condim` 到 4/6 才会激活，届时需要重新调参） |
+| 放置区标记 | `place_marker` geom，`type="cylinder"`，`pos="0.5 0.3 0.221"`，`contype="0" conaffinity="0"` | 纯视觉参考，无碰撞，不是判据的一部分（判据在 Stage H 定义） |
+| reset keyframe | `pick_place_home`（不是 `home`，见第 0.1 节的名字冲突） | `qpos` 长度 16（=nq），顺序为 [7 臂关节, 2 手指关节, 3 box 平移, 4 box 四元数]——这个顺序由 body 在合并后 worldbody 里的**文档顺序**决定（深度优先遍历），不是硬性规则；`pick_place_scene.xml` 自己的 `<worldbody>` 块写在 `<include>` 之后，所以 box 排在臂的关节之后 |
+| 模型加载路径 | `model_path` 参数（默认指向本文件） | `mujoco_bridge_node` 的 ROS 参数，可覆盖回 `panda.xml` |
+| reset keyframe 名 | `reset_keyframe_name` 参数（默认 `pick_place_home`） | 换模型必须同时覆盖这个参数，但两个方向的错法后果完全不同：把 `model_path` 换回 `panda.xml` 却忘记把这个也改回 `home` → `~/reset` 找不到 `pick_place_home` 这个名字，**显式失败**（`~/reset` 返回 `success=false`）；反过来，`model_path` 留在 `pick_place_scene.xml` 却把这个改回（或忘了从）`home` → `home` 这个名字**确实存在**（vendor 的 keyframe 被 `<include>` 原样带入），只是长度不对，`~/reset` 返回 `success=true`，box 被静默传送到补零位置（见第 0.1 节）。**只有第一个方向会显式报错**，第二个方向完全没有报错 |
+
+**ground-truth oracle 接口**（对应计划书"ground truth 必须走独立接口"的硬要求）：
+
+| 项 | 值 |
+| --- | --- |
+| topic | `~/ground_truth/object_pose`（解析为 `/mujoco_bridge/ground_truth/object_pose`） |
+| 类型 | `geometry_msgs/msg/PoseStamped` |
+| frame_id | `world`（绝对位姿，不是父相对——因为 box 的父级本来就是 world，见 [week2.md 8.4](../Job_guides/my_study/week2.md#84-qpos-与-xposxquat为什么-oracle-发布读后者)） |
+| 数据来源 | `mjData::xpos`/`xquat`（不是 `qpos`——理由见 week2.md 8.4：`qpos` 只在"父级恰好是 world"时才等于世界坐标，这个假设一旦物体被放进可移动容器就会静默失效） |
+| 发布频率 | 与 `/tf` 共享 `tf_decimation_`（不是独立频率），目的是让这条话题和 `world -> box` 的 TF 帧互相印证同一物理步；已实测两者数值一致（差异仅浮点噪声量级） |
+| 存在性 | 仅当模型里有名为 `box` 的 body 时才创建；`panda.xml` 单独加载时该话题不存在（日志显式说明，不是空话题） |
+| 这是唯一合法的 oracle 源 | 第4周接视觉估计后，感知节点的输出必须发布到不同的话题，禁止复用这个名字或把估计值伪装成 ground truth |
