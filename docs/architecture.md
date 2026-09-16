@@ -177,3 +177,30 @@ xacro $(ros2 pkg prefix franka_description)/share/franka_description/robots/fer/
 | 发布频率 | 与 `/tf` 共享 `tf_decimation_`（不是独立频率），目的是让这条话题和 `world -> box` 的 TF 帧互相印证同一物理步；已实测两者数值一致（差异仅浮点噪声量级） |
 | 存在性 | 仅当模型里有名为 `box` 的 body 时才创建；`panda.xml` 单独加载时该话题不存在（日志显式说明，不是空话题） |
 | 这是唯一合法的 oracle 源 | 第4周接视觉估计后，感知节点的输出必须发布到不同的话题，禁止复用这个名字或把估计值伪装成 ground truth |
+
+## 6. 技术选型与项目定位：MuJoCo vs Gazebo，复用 vs 自建
+
+### 6.1 为什么选 MuJoCo 而不是 Gazebo
+
+- 对照过的 JD（`/media/anby/Data2/Docs/obsidian/robotics_work/JDs/md/_doc/`）中，涉及仿真平台的岗位点名的都是 **MuJoCo / Isaac Sim / Isaac Gym / Genesis / Pinocchio**，没有一份点名 Gazebo。Gazebo 在 ROS 生态里的定位更偏"导航/感知集成"的默认仿真器；MuJoCo 是 RL / sim2real / 具身智能这条线的事实标准，接触力学求解器的精度和速度都明显更好。
+- 反证见 6.3：公开的 Gazebo 版 pick-and-place 项目普遍靠 `gazebo_ros_link_attacher` 之类的插件"运动学焊接"物体到夹爪上（离得够近就 attach 成一个刚体），绕过真实接触力学判定抓取是否成功。这不是 Gazebo 不能用，而是它的接触精度不足以支撑"基于真实接触力判定抓取成功"这件事——而这正是本项目 `grasp_criteria`/`grasp_state` 要做的。
+- ROS2 + MuJoCo 确实比 ROS2 + Gazebo 多一层桥接工作（Gazebo 有现成 `ros_control`/`gazebo_plugins`，MuJoCo 没有），但这层工作本身就是目标能力（可复现仿真、仿真与真机校准闭环），不是可以省略的额外开销。
+
+### 6.2 复用 vs 自建的判断标准
+
+| 判断 | 举例 | 处理方式 |
+| --- | --- | --- |
+| 成熟库已把正确性和性能做到位，JD 不要求手推 | 标准 FK、常规运动规划 | 直接用 MuJoCo API / MoveIt / Pinocchio，不重写进 `mujoco_bridge` |
+| JD 明确要求理解底层数学（如 TAKS 岗位要求 FK/IK/雅可比/DLS/零空间/奇异处理） | FK/IK 推导 | 用独立的小练习验证理解，不嵌入主系统 |
+| 涉及物理仿真保真度、可测试性、C++/ROS2 系统集成，且没有现成库覆盖"这个桥接层" | `grasp_criteria`/`grasp_state`、接触力探针、FSM | 自己写，并配单元测试——这是本项目相对"调库拼图"类项目的差异化部分 |
+| 成熟的算法/生成器已经解决且没有验证需求 | 抓取姿态生成（GraspIt 类）、点云物体识别 | 调库，把精力放在"能否正确、可验证地接入系统"而不是重新实现算法本身 |
+
+### 6.3 对照：三个公开 pick-and-place 项目的取舍
+
+| 项目 | 架构 | 抓取判定 | 备注 |
+| --- | --- | --- | --- |
+| [Salman-H/pick-place-robot](https://github.com/Salman-H/pick-place-robot) | Gazebo + RViz + MoveIt，核心自写代码只有一个 IK_server（Sympy 解析解 KUKA KR210） | 依赖仿真器固定流程，无自定义抓取验证 | 唯一"自建"的部分是 IK，而这恰好是 JD 通常不要求在生产系统里手写的部分 |
+| [pietrolechthaler/UR5-Pick-and-Place-Simulation](https://github.com/pietrolechthaler/UR5-Pick-and-Place-Simulation) | vision（YOLOv5）+ motion_planning + `gazebo_ros_link_attacher` | 靠 link-attacher 插件运动学"焊接"，非真实接触力学判定 | "结构简单"的代价是抓取成功与否完全没有物理验证 |
+| [gstavrinos/ez_pick_and_place](https://github.com/gstavrinos/ez_pick_and_place) | MoveIt + GraspIt 的胶水代码（`ez_tools.py`） | 无自定义判定，README 让用户自己看源码 | 作者本人在 moveit 仓库报过 `/compute_ik` 一直失败且未修的 issue——生产代码里留着未解决的集成 bug，缺测试覆盖 |
+
+三者的共同点：都合理地复用了 MoveIt/GraspIt 做规划和抓取姿态生成，但都把"抓取成功"这个最难验证、最容易出 bug 的环节跳过或简化掉了。本项目在 `mujoco_bridge` 上投入的时间，对应的正是这个被普遍跳过的验证层，而不是重新实现 MoveIt/GraspIt 已经做好的规划或抓取姿态生成能力。
