@@ -1,10 +1,12 @@
 #include <ament_index_cpp/get_package_share_directory.hpp>
+#include <control_msgs/msg/gripper_command.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <mujoco/mujoco.h>
 #include <rclcpp/rclcpp.hpp>
 #include <rosgraph_msgs/msg/clock.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
+#include <std_msgs/msg/bool.hpp>
 #include <std_srvs/srv/trigger.hpp>
 #include <tf2_ros/static_transform_broadcaster.h>
 #include <tf2_ros/transform_broadcaster.h>
@@ -13,8 +15,8 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
-#include <limits>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -22,6 +24,8 @@
 #include <vector>
 
 #include "mujoco_bridge/frame_math.hpp"
+#include "mujoco_bridge/grasp_criteria.hpp"
+#include "mujoco_bridge/grasp_state.hpp"
 #include "mujoco_bridge/mujoco_dl.hpp"
 #include "mujoco_bridge/state_ops.hpp"
 
@@ -71,6 +75,11 @@ constexpr double kHandToTcpZ = 0.1034;
 // missing it only disables the oracle topic, it is never an error (see
 // buildFrameIndex-style guarded lookup below).
 constexpr const char * kObjectBodyName = "box";
+// Same "hardcode the MJCF's own name" discipline as kHandBodyName/kObjectBodyName --
+// this is the single-gripper assumption already flagged in docs/architecture.md
+// section 4 (kHandBodyName's entry), not a new one.
+constexpr const char * kLeftFingerBodyName = "left_finger";
+constexpr const char * kRightFingerBodyName = "right_finger";
 
 class MujocoBridgeNode : public rclcpp::Node
 {
@@ -109,6 +118,17 @@ public:
     buildFrameIndex();
     buildActuatorIndex();
     resolveObjectOracle();
+    resolveGripperFingers();
+
+    // Node parameters, not code constants: the numbers below are placeholders until
+    // the week2.md Stage H three-scenario measurement (empty grasp / normal grasp /
+    // induced slip) fills them in, and even afterwards they are scene-specific
+    // (box_width_m in particular), not physical constants.
+    grasp_criteria_.box_width_m = declare_parameter("grasp.box_width_m", 0.04);
+    grasp_criteria_.width_epsilon_m = declare_parameter("grasp.width_epsilon_m", 0.01);
+    grasp_criteria_.lift_height_threshold_m =
+      declare_parameter("grasp.lift_height_threshold_m", 0.26);
+    grasp_criteria_.region_radius_m = declare_parameter("grasp.region_radius_m", 0.05);
 
     // Physics runs at 1/timestep; the state publishers run slower. Decimating by an
     // integer number of steps keeps every published sample aligned with an exact
@@ -171,6 +191,15 @@ public:
     joint_command_sub_ = create_subscription<trajectory_msgs::msg::JointTrajectory>(
       "~/joint_command", rclcpp::QoS(10),
       std::bind(&MujocoBridgeNode::onJointCommand, this, std::placeholders::_1));
+
+    // Split from ~/joint_command (Stage H): control_msgs/GripperCommand is the
+    // shape a real ros2_control gripper action server expects (position +
+    // max_effort), so downstream code that talks to this topic today needs no
+    // change when this bridge is swapped for a real driver. Still a plain topic,
+    // not the actual GripperCommand *action* -- see onGripperCommand() for why.
+    gripper_command_sub_ = create_subscription<control_msgs::msg::GripperCommand>(
+      "~/gripper_command", rclcpp::QoS(10),
+      std::bind(&MujocoBridgeNode::onGripperCommand, this, std::placeholders::_1));
 
     timer_ = create_wall_timer(
       std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -289,7 +318,8 @@ private:
 
     // Synthesize the TCP frame (see kHandToTcpZ above), but only if the model really
     // has a `hand` -- panda_nohand.xml does not.
-    if (api_.name2id(model_, mjOBJ_BODY, kHandBodyName) >= 0) {
+    hand_body_id_ = api_.name2id(model_, mjOBJ_BODY, kHandBodyName);
+    if (hand_body_id_ >= 0) {
       const mjtNum tcp_pos[3] = {0.0, 0.0, kHandToTcpZ};
       const mjtNum tcp_quat[4] = {1.0, 0.0, 0.0, 0.0};  // identity, (w, x, y, z)
       static_transforms_.push_back(
@@ -399,6 +429,38 @@ private:
     RCLCPP_INFO(
       get_logger(), "ground-truth object `%s` found; publishing ~/ground_truth/object_pose",
       kObjectBodyName);
+  }
+
+  // Finger-to-box contact has no real-robot analogue this clean (no real gripper
+  // reports "which finger is touching the object" directly) -- it belongs in the
+  // same ground-truth-only category as resolveObjectOracle() above, for the same
+  // "must not silently become a substitute for perception" reason. Guarded the same
+  // way: missing fingers only disables these two topics, never an error.
+  void resolveGripperFingers()
+  {
+    left_finger_body_id_ = api_.name2id(model_, mjOBJ_BODY, kLeftFingerBodyName);
+    right_finger_body_id_ = api_.name2id(model_, mjOBJ_BODY, kRightFingerBodyName);
+    if (left_finger_body_id_ < 0 || right_finger_body_id_ < 0) {
+      RCLCPP_INFO(
+        get_logger(), "no `%s`/`%s` body pair in model; grasp contact signals disabled",
+        kLeftFingerBodyName, kRightFingerBodyName);
+      return;
+    }
+    // Each finger body has exactly one slide joint (panda.xml's <default class=
+    // "finger">). Reading its qpos_adr off the body -- rather than hardcoding the
+    // joint names "finger_joint1"/"finger_joint2" -- keeps this in the same
+    // "read it from the model" discipline as buildFrameIndex's body_jntnum test,
+    // even though the body names themselves are still hardcoded above.
+    left_finger_qpos_adr_ = model_->jnt_qposadr[model_->body_jntadr[left_finger_body_id_]];
+    right_finger_qpos_adr_ = model_->jnt_qposadr[model_->body_jntadr[right_finger_body_id_]];
+
+    left_finger_contact_pub_ = create_publisher<std_msgs::msg::Bool>(
+      "~/ground_truth/left_finger_contact", rclcpp::QoS(10));
+    right_finger_contact_pub_ = create_publisher<std_msgs::msg::Bool>(
+      "~/ground_truth/right_finger_contact", rclcpp::QoS(10));
+    RCLCPP_INFO(
+      get_logger(), "gripper fingers `%s`/`%s` found; publishing ~/ground_truth/*_finger_contact",
+      kLeftFingerBodyName, kRightFingerBodyName);
   }
 
   // The order hazard is on the *input* side: MuJoCo packs quaternions into a raw
@@ -517,24 +579,22 @@ private:
       return;
     }
 
-    // The two fingers share one control DOF (the "split" tendon), so a command that
-    // names finger_joint1 and/or finger_joint2 is buffered here and applied once,
-    // instead of writing ctrl[gripper_actuator_id_] twice from two different targets.
-    double gripper_target = std::numeric_limits<double>::quiet_NaN();
-
     for (size_t i = 0; i < msg->joint_names.size(); ++i) {
       const std::string & name = msg->joint_names[i];
       const double target = point.positions[i];
 
+      // Stage H split the gripper out to its own topic (see onGripperCommand()) so
+      // this bridge's command shape matches a real ros2_control setup, where the
+      // arm's JointTrajectoryController and the gripper's GripperActionController
+      // are two separate interfaces. Warn once rather than silently ignoring, since
+      // this used to work here and a caller that has not migrated yet would
+      // otherwise see "nothing happened" with no explanation.
       if (gripper_joint_names_.count(name) > 0) {
-        if (!std::isnan(gripper_target) && gripper_target != target) {
-          RCLCPP_WARN(
-            get_logger(),
-            "~/joint_command: finger joints commanded to different positions "
-            "(%.4f vs %.4f) but they share one actuator; using %.4f",
-            gripper_target, target, target);
-        }
-        gripper_target = target;
+        RCLCPP_WARN_ONCE(
+          get_logger(),
+          "~/joint_command: `%s` is a gripper joint; finger joints must be commanded "
+          "via ~/gripper_command now (control_msgs/GripperCommand), ignoring here",
+          name.c_str());
         continue;
       }
 
@@ -549,18 +609,42 @@ private:
       // actuatorN drives jointN, and would silently misfire for anything else.
       data_->ctrl[it->second] = target;
     }
+  }
 
-    if (!std::isnan(gripper_target)) {
-      if (gripper_actuator_id_ < 0) {
-        RCLCPP_WARN(get_logger(), "~/joint_command: no gripper actuator in this model, ignoring");
-      } else {
-        // Convert from the finger joint's own units (meters of opening) to the
-        // actuator's remapped ctrl range, using the ratio derived in
-        // buildActuatorIndex() instead of the hardcoded 255/0.04 from the MJCF
-        // comment.
-        data_->ctrl[gripper_actuator_id_] = gripper_target * gripper_ctrl_scale_;
-      }
+  // control_msgs/GripperCommand rather than the action of the same name: this is
+  // still a topic-based interface (see the plan doc week2.md Stage H), matching
+  // ~/joint_command's own "set today's target, no execution semantics" shape rather
+  // than promising the goal/feedback/cancel lifecycle a real action implies. Moving
+  // to the actual action later is a bigger change than swapping message types --
+  // it needs an action server loop here, not just a different subscription.
+  //
+  // `position` is the *total* finger-to-finger opening in meters (0 = closed, up to
+  // 2x each finger joint's own 0.04m range = 0.08m open), matching the real Franka
+  // gripper's convention -- not the per-finger displacement ~/joint_command used to
+  // accept. Halving it here, rather than changing gripper_ctrl_scale_'s definition,
+  // keeps that scale factor meaning exactly one thing: ctrl units per meter of a
+  // single finger's own travel, which is also what buildActuatorIndex() derives it
+  // as and what gripperWidth() (grasp_state.hpp) sums back out of qpos.
+  void onGripperCommand(const control_msgs::msg::GripperCommand::SharedPtr msg)
+  {
+    if (gripper_actuator_id_ < 0) {
+      RCLCPP_WARN(get_logger(), "~/gripper_command: no gripper actuator in this model, ignoring");
+      return;
     }
+    if (msg->max_effort != 0.0) {
+      // Not rejected outright: max_effort=0 is also control_msgs' own "no limit"
+      // sentinel in some conventions, so treating *every* nonzero value as user
+      // intent and warning (rather than silently accepting all values) is the
+      // closest thing to "explicit" a plain topic (no response, unlike a service or
+      // action goal) allows. See week2.md Stage H for why this can't be honored:
+      // the MJCF gripper actuator is a position servo (gainprm/biasprm PD gains),
+      // with no separate force/torque control channel this bridge exposes.
+      RCLCPP_WARN_ONCE(
+        get_logger(),
+        "~/gripper_command: max_effort is ignored -- the gripper actuator is a "
+        "position servo with no exposed force limit, commanding one here does nothing");
+    }
+    data_->ctrl[gripper_actuator_id_] = (msg->position / 2.0) * gripper_ctrl_scale_;
   }
 
   // Logs realtime factor (sim seconds advanced / wall seconds elapsed) once a second.
@@ -597,6 +681,7 @@ private:
     if (step_count_ % tf_decimation_ == 0) {
       publishTransforms();
       publishObjectPose();
+      publishGripperContact();
     }
   }
 
@@ -623,6 +708,74 @@ private:
     msg.pose.orientation.y = data_->xquat[4 * object_body_id_ + 2];
     msg.pose.orientation.z = data_->xquat[4 * object_body_id_ + 3];
     object_pose_pub_->publish(msg);
+  }
+
+  // Publishes the two per-finger contact booleans and, as a side effect, logs a
+  // full grasp-outcome line whenever classifyGrasp()'s answer changes (Stage H).
+  // The log is deliberately not itself a topic yet: task_executor (Stage I) is the
+  // first real consumer, and until that node exists we do not actually know whether
+  // it wants classifyGrasp's answer as a whole, just the raw signals, or something
+  // else entirely -- publishing a stable topic contract now would be guessing.
+  void publishGripperContact()
+  {
+    if (left_finger_body_id_ < 0 || object_body_id_ < 0) {
+      return;
+    }
+    const bool left_contact = bodiesInContact(model_, data_, left_finger_body_id_, object_body_id_);
+    const bool right_contact =
+      bodiesInContact(model_, data_, right_finger_body_id_, object_body_id_);
+
+    std_msgs::msg::Bool left_msg;
+    left_msg.data = left_contact;
+    left_finger_contact_pub_->publish(left_msg);
+    std_msgs::msg::Bool right_msg;
+    right_msg.data = right_contact;
+    right_finger_contact_pub_->publish(right_msg);
+
+    if (hand_body_id_ < 0) {
+      return;
+    }
+    // hand_tcp's world position = hand's world pose composed with the fixed local
+    // offset (kHandToTcpZ) -- the inverse of what relativePose() (frame_math.hpp)
+    // computes, so done inline here rather than as a third frame_math function for
+    // a single 3-vector rotate-and-add.
+    mjtNum tcp_offset_world[3];
+    const mjtNum tcp_local[3] = {0.0, 0.0, kHandToTcpZ};
+    api_.rotVecQuat(tcp_offset_world, tcp_local, data_->xquat + 4 * hand_body_id_);
+    const double tcp_x = data_->xpos[3 * hand_body_id_ + 0] + tcp_offset_world[0];
+    const double tcp_y = data_->xpos[3 * hand_body_id_ + 1] + tcp_offset_world[1];
+
+    const GraspSignals signals{
+      gripperWidth(data_, left_finger_qpos_adr_, right_finger_qpos_adr_),
+      data_->xpos[3 * object_body_id_ + 2],
+      std::hypot(
+        data_->xpos[3 * object_body_id_ + 0] - tcp_x, data_->xpos[3 * object_body_id_ + 1] - tcp_y),
+      left_contact,
+      right_contact,
+    };
+    const GraspOutcome outcome = classifyGrasp(signals, grasp_criteria_);
+    if (!last_logged_grasp_outcome_ || *last_logged_grasp_outcome_ != outcome) {
+      RCLCPP_INFO(
+        get_logger(),
+        "grasp outcome -> %s (width=%.4fm box_z=%.4fm box_to_tcp=%.4fm L=%d R=%d)",
+        graspOutcomeName(outcome), signals.gripper_width_m, signals.box_height_m,
+        signals.box_to_tcp_horizontal_m, left_contact, right_contact);
+      last_logged_grasp_outcome_ = outcome;
+    }
+  }
+
+  static const char * graspOutcomeName(GraspOutcome outcome)
+  {
+    switch (outcome) {
+      case GraspOutcome::kSuccess: return "SUCCESS";
+      case GraspOutcome::kNoObject: return "NO_OBJECT";
+      case GraspOutcome::kGraspEmpty: return "GRASP_EMPTY";
+      case GraspOutcome::kSlip: return "SLIP";
+      case GraspOutcome::kTimeout: return "TIMEOUT";
+      case GraspOutcome::kPlaceMissed: return "PLACE_MISSED";
+      case GraspOutcome::kUnexpectedContact: return "UNEXPECTED_CONTACT";
+    }
+    return "UNKNOWN";
   }
 
   // mjData::xpos/xquat are absolute (relative to world). TF needs each transform
@@ -688,6 +841,7 @@ private:
   int reset_keyframe_id_ = -1;
   std::string reset_keyframe_name_;
   rclcpp::Subscription<trajectory_msgs::msg::JointTrajectory>::SharedPtr joint_command_sub_;
+  rclcpp::Subscription<control_msgs::msg::GripperCommand>::SharedPtr gripper_command_sub_;
   std::unordered_map<std::string, int> actuator_by_joint_;  // joint name -> actuator id
   std::unordered_set<std::string> gripper_joint_names_;     // finger_joint1, finger_joint2
   int gripper_actuator_id_ = -1;
@@ -701,6 +855,15 @@ private:
   int tf_decimation_ = 1;
   int object_body_id_ = -1;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr object_pose_pub_;
+  int hand_body_id_ = -1;
+  int left_finger_body_id_ = -1;
+  int right_finger_body_id_ = -1;
+  int left_finger_qpos_adr_ = -1;
+  int right_finger_qpos_adr_ = -1;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr left_finger_contact_pub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr right_finger_contact_pub_;
+  GraspCriteria grasp_criteria_{};
+  std::optional<GraspOutcome> last_logged_grasp_outcome_;
   uint64_t step_count_ = 0;
   std::chrono::steady_clock::time_point rtf_window_wall_start_ = std::chrono::steady_clock::now();
   double rtf_window_sim_start_ = 0.0;

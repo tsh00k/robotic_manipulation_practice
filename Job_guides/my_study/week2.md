@@ -50,6 +50,16 @@
   - [8.6 三条可视化路径的定位：RViz / `simulate` / 工业界与学术界的两种范式](#86-三条可视化路径的定位rviz--simulate--工业界与学术界的两种范式)
   - [8.7 失败模式与验证手段](#87-失败模式与验证手段)
   - [8.8 排查记录：keyframe 名字冲突与长度不匹配是两件独立的事（结论被推翻）](#88-排查记录keyframe-名字冲突与长度不匹配是两件独立的事结论被推翻)
+- [9. Stage H：夹爪命令接口与抓取成功判据](#9-stage-h夹爪命令接口与抓取成功判据)
+  - [9.0 一句话总结](#90-一句话总结)
+  - [9.1 改动清单与验证结果](#91-改动清单与验证结果)
+  - [9.2 position servo 下"夹住"为什么是稳态位置误差，不是力](#92-position-servo-下夹住为什么是稳态位置误差不是力)
+  - [9.3 为什么不直接用 `GripperCommand` action](#93-为什么不直接用-grippercommand-action)
+  - [9.4 `mjContact` 与 `bodiesInContact`：接触检测怎么工作](#94-mjcontact-与-bodiesincontact接触检测怎么工作)
+  - [9.5 `hand_tcp` 为什么要合成、为什么只有 z 轴有偏移](#95-hand_tcp-为什么要合成为什么只有-z-轴有偏移)
+  - [9.6 夹爪构型：为什么同时解析 `hand` 和 `finger` 两套 body id](#96-夹爪构型为什么同时解析-hand-和-finger-两套-body-id)
+  - [9.7 oracle 数据的分类：哪些会随项目推进消失，哪些需要学习方法](#97-oracle-数据的分类哪些会随项目推进消失哪些需要学习方法)
+  - [9.8 失败模式与验证手段](#98-失败模式与验证手段)
 
 ---
 
@@ -195,7 +205,7 @@
 1. ~~**加了 box 之后 vendor 的 `home` keyframe 会失配**（E/C 类）— `<key qpos>` 的长度必须等于 `nq`；加一个 freejoint 就把 `nq` 从 9 推到 16。值得问的是：**长度写错时 MuJoCo 是加载失败、静默截断，还是读越界？** 三种行为对应三种完全不同的防护手段，现在不知道是哪种。~~ **已在 Stage G 解答**：静默补零（不是加载失败，也不是读越界），且第一次实测被一次不相关的名字冲突报错掩盖过一轮——完整过程见 [8.8](#88-排查记录keyframe-名字冲突与长度不匹配是两件独立的事结论被推翻)。
 2. **"到位"阈值 ε 目前没有任何依据**（C 类）— 用零误差判据会永远卡住（position servo 的稳态误差是[实测过的](week1.md#107-怎么快速做一次独立的-fk-验证) mm 级）；但阈值取太松会让 FSM 在没真到位时就推进到下一阶段，**表现为偶发失败而不是报错**。Stage I 之前该先问"这个数该怎么测出来而不是猜出来"。
 3. **"20 次连续成功"在确定性仿真里可能是假的**（F 类，知识边界）— 固定物体位姿 + 固定 waypoint + 确定性物理 = 20 次跑的其实**几乎是同一条轨迹**。那这个 20 次到底验证了什么？值得在 Stage J 之前想清楚，否则会拿一个没有信息量的数字当验收通过。
-4. **`max_effort` 字段可能无法实现**（C 类）— MJCF 现在只有位置伺服 actuator（[11.4](week1.md#114-position-servo-actuator-的本质一个-pd-控制器)）。如果 `GripperCommand.max_effort` 被静默忽略，下游会以为自己在控制夹持力。**该显式拒绝、该 WARN、还是该改模型**，是 Stage H 要定的。
+4. ~~**`max_effort` 字段可能无法实现**（C 类）— MJCF 现在只有位置伺服 actuator（[11.4](week1.md#114-position-servo-actuator-的本质一个-pd-控制器)）。如果 `GripperCommand.max_effort` 被静默忽略，下游会以为自己在控制夹持力。**该显式拒绝、该 WARN、还是该改模型**，是 Stage H 要定的。~~ **已在 Stage H 解答**：选了"警告一次但继续接受命令"，不是拒绝——因为这是纯 topic（没有 service/action 那种失败返回通道），拒绝只能表现成"什么都没发生"，比警告更难诊断；而 `max_effort=0` 在一些 `control_msgs` 使用惯例里本身就是"不限制"的哨兵值，不能无脑当成用户明确要求限力后再拒绝。真要支持力限制需要换成 action 逐步斜坡加压，见 [9.3](#93-为什么不直接用-grippercommand-action)。
 
 ## 6. 悬挂问题（本周新增）
 
@@ -205,6 +215,9 @@
 
 - **`gripper_actuator_id_`/`gripper_ctrl_scale_`（`buildActuatorIndex`）和 `kHandBodyName="hand"`（`buildFrameIndex`）都是隐式单机械臂假设**（[8.7](#87-失败模式与验证手段)）——前者是两个标量，模型里若有第二条 tendon 驱动的夹爪会被循环无条件覆盖，只留最后一个，且没有任何警告；后者硬编码查找名字恰好叫 `hand` 的 body，第二条臂必须重命名（否则和第一条臂一样撞上 keyframe 那种编译期重名错误），重命名之后这行代码就再也找不到它。**缺参照系**：现在没有第二条臂，无法验证"改成怎样的 per-arm 索引才对"，而且计划书 2.2 节明确把双臂列进"暂不进入 MVP"。解锁条件：真正引入第二条机械臂时。
 - **多个可操作物体的通用化设计**（`kObjectBodyName="box"` 单一常量、单一 oracle 话题）——**缺参照系**：不知道 bin picking 阶段（Chap 5）实际需要"每个物体一条话题"还是"一条话题发数组"，现在设计只是猜。解锁条件：进入 bin picking / 杂乱清空阶段（计划书第7节，明确排在单物体 pick-and-place 稳定之后）。
+- **`grasp.lift_height_threshold_m`/`grasp.region_radius_m` 目前是猜的，不是测出来的**（Stage H）——三场景实测（[9.1](#91-改动清单与验证结果)）覆盖了 `GRASP_EMPTY`/`SLIP`/`UNEXPECTED_CONTACT`，但受限于手调 waypoint 精度，没有一次真正把 box 抬过阈值触发 `kSuccess`。**缺参照系**：现在定这两个数字只能靠猜，没有一次"真正抬起来"的轨迹作对照。解锁条件：Stage I 有了能实际完成一次抓取的 `WaypointSource` 之后，用那次的实测高度反推。
+- **`classifyGrasp` 判定 `kSlip` 没有时间维度**（Stage H，[grasp_criteria.hpp](../../src/mujoco_bridge/include/mujoco_bridge/grasp_criteria.hpp) 已在注释里承认）——单个瞬间快照分不清"刚抓住还没起飞"和"起飞后真的滑了"，两者现在返回同一个 `kSlip`。**缺参照系**：区分两者需要阶段/历史状态，这正是 Stage I 的 FSM 才有的东西，现在这层单独测不出"应该怎么区分"。解锁条件：Stage I 的 FSM 有了阶段信息后，评估要不要在 FSM 侧而不是 `classifyGrasp` 里加时间窗判断。
+- **`GraspOutcome` 目前只进日志，没有对应的 ROS topic**（Stage H）——`publishGripperContact()` 里刻意不发话题，因为不知道 Stage I 的 FSM 想要整个分类结果、还是原始 `GraspSignals`、还是别的形状。**缺参照系**：`task_executor` 还不存在，现在定话题契约只是猜。解锁条件：Stage I 写 FSM 第一次需要读这个结果时。
 - **是否要给 `mujoco_bridge_node` 嵌入原生渲染器**（GLFW + `mjr_render`，画同一份 `data_`，不经 TF/RViz 这一层）——**缺参照系**：现在 RViz 已经能实时看，加原生渲染器的唯一动机是"更像 `simulate` 那种可交互调试"，但值不值得为这个多接一层 GLFW 事件循环和 `onTimer`/`onReset` 的互斥访问，需要先有具体的"RViz 不够用"的场景才能判断。
 
 ### 6.2 反向清单：现在就该做的
@@ -218,6 +231,8 @@
 - **`~/ground_truth/object_pose` 的发布逻辑（`resolveObjectOracle`/`publishObjectPose`）完全没有单元测试**——不像 Stage F 把 `frame_math`/`state_ops` 剥成纯函数配了 gtest，这段"直接抄 `xpos`/`xquat`"还焊在节点里。现在简单到不太会错，但和"多个物体的通用化"（[6.1](#61-清单)）是同一批要重构的代码，值得等那时候一起剥离和测试，而不是现在单独做一次半成品抽象。
 - **`~/ground_truth/object_pose` 与 `/tf` 共享 `tf_decimation_`，没有独立的发布频率开关**——两者数值上刻意设计成可以互相印证同一物理步，但如果以后 FSM 需要比 `/tf` 更高频的物体反馈，现在的代码结构没有单独调节 oracle 频率的参数。解锁条件：Stage I 给 FSM 接反馈时评估是否需要。
 - **`condim=3` 下 `friction` 的扭转/滚动两个分量（`0.03`、`0.003`）是抄来的死代码**——`condim` 不到 4/6 这两个数字完全不参与计算，从未验证过数值本身是否合理。解锁条件：Stage H 调抓取判据发现打滑/旋转问题，或以后主动把 `condim` 升级时。
+- **`bodiesInContact` 没有检查 `mjContact::exclude`**（Stage H，[grasp_state.cpp](../../src/mujoco_bridge/src/grasp_state.cpp)）——`mjContact` 有 `margin`/`gap` 相关的 `exclude` 字段（0=计入求解，非0=因各种原因被排除，包括"在 gap 区间内但还没真正接触"），当前实现只要这对 body 出现在 `mjData::contact` 数组里就算 `true`，不看这个字段。现在 box/桌面/手指的 geom 都没配非零 `margin`（默认 0），大概率不会被触发，但没有测试验证过这个假设。缺一次推演：给某个 geom 配一个非零 `margin`，观察 `exclude!=0` 的接触是否真的会被现在的实现误判为"接触"。
+- **`~/gripper_command` 和 `~/joint_command` 共享 `gripper_actuator_id_`，没有互斥/冲突检测**（Stage H）——`~/joint_command` 现在遇到手指关节名会警告并跳过，不会再写 `ctrl[gripper_actuator_id_]`，但这只是"约定好了不冲突"，不是运行时保护：如果以后哪个调用方忘了这条约定，两个话题在同一控制周期都写这个 actuator，最后一次 `onXxxCommand` 会静默覆盖前一次，没有任何冲突检测或警告。缺一次推演：现在没有真实场景触发这个冲突，值得写一个测试或至少想清楚要不要加。
 
 ## 7. Stage F：测试地基与胶水层收口
 
@@ -579,3 +594,151 @@ box 被静默传送到接近世界原点（`(0,0,0,1,0,0,0)` 补零的结果）�
 1. **"编译报错了"不代表"报的是我以为的那个错误"**。第一次看到 `repeated name` 报错时没有细究"这到底是名字问题还是长度问题"，直接套用到了悬挂清单里现成的那个问题上——两者表面看起来很像（"keyframe 写坏了会怎样"），实际是完全不同的检查路径。
 2. **之前写下的结论已被推翻，教训记在这里，不做静默修改**：week2.md 5.1 第1条问题的真实答案不是"编译期硬错误"，是"**看具体是哪种坏法**：名字冲突→硬错误；长度不匹配→静默补零"。这个更细的答案已经同步进 [docs/architecture.md 第0.1节](../../docs/architecture.md)。
 3. 这次推翻是**因为多问了一步"给我看实际展开后的文件"**才发现的——再一次印证"质疑证据链优于质疑结论"（[STUDY_NOTES_GUIDE 4.4](../../STUDY_NOTES_GUIDE.md)）：第一次的结论表面自洽（有报错、看起来像回答了问题），只有去看原始展开文件才暴露出报错原因被张冠李戴。
+
+## 9. Stage H：夹爪命令接口与抓取成功判据
+
+### 9.0 一句话总结
+
+把夹爪命令从 `~/joint_command` 分出独立的 `~/gripper_command`（`control_msgs/msg/GripperCommand`，对齐真机 ros2_control 的接口形状但仍是 topic 不是 action）；新增两个纯函数模块——[grasp_criteria.hpp/cpp](../../src/mujoco_bridge/include/mujoco_bridge/grasp_criteria.hpp)（`classifyGrasp`，Stage F 定义的第1层，不碰 `mjModel`/`mjData`，10 个 gtest）和 [grasp_state.hpp/cpp](../../src/mujoco_bridge/include/mujoco_bridge/grasp_state.hpp)（`gripperWidth`/`bodiesInContact`，第2层，6 个 gtest，新 fixture [contact_probe.xml](../../src/mujoco_bridge/test/fixtures/contact_probe.xml)）；节点新增 `~/ground_truth/left_finger_contact`/`right_finger_contact` 两个话题和一条"分类结果变化时打日志"的胶水代码。三场景实测（空抓/正常夹住/诱导 slip）覆盖了 `GRASP_EMPTY`/`SLIP`/`UNEXPECTED_CONTACT`，但没能真正触发 `kSuccess`——这本身就是留给 Stage I 的一条悬挂项。
+
+### 9.1 改动清单与验证结果
+
+**改动**：
+
+- [grasp_criteria.hpp](../../src/mujoco_bridge/include/mujoco_bridge/grasp_criteria.hpp) / [grasp_criteria.cpp](../../src/mujoco_bridge/src/grasp_criteria.cpp)（新）：`GraspOutcome` 枚举（`kSuccess`/`kNoObject`/`kGraspEmpty`/`kSlip`/`kTimeout`/`kPlaceMissed`/`kUnexpectedContact`）、`GraspSignals`/`GraspCriteria` 结构体、纯函数 `classifyGrasp`
+- [grasp_state.hpp](../../src/mujoco_bridge/include/mujoco_bridge/grasp_state.hpp) / [grasp_state.cpp](../../src/mujoco_bridge/src/grasp_state.cpp)（新）：`gripperWidth`（两指 qpos 求和）、`bodiesInContact`（遍历 `mjData::contact` 判断两个 body 是否有接触，双向查 geom 顺序）
+- [mujoco_bridge_node.cpp](../../src/mujoco_bridge/src/mujoco_bridge_node.cpp)：新增 `~/gripper_command`（`onGripperCommand`）；`~/joint_command`（`onJointCommand`）删掉手指特殊分支，改成遇到手指关节名 `WARN_ONCE` 提示迁移；新增 `resolveGripperFingers()`、`publishGripperContact()`；`grasp.*` 四个 ROS 参数（`box_width_m`/`width_epsilon_m`/`lift_height_threshold_m`/`region_radius_m`）
+- [test/test_grasp_criteria.cpp](../../src/mujoco_bridge/test/test_grasp_criteria.cpp)、[test/test_grasp_state.cpp](../../src/mujoco_bridge/test/test_grasp_state.cpp)、[test/fixtures/contact_probe.xml](../../src/mujoco_bridge/test/fixtures/contact_probe.xml)（新）
+- [CMakeLists.txt](../../src/mujoco_bridge/CMakeLists.txt) / [package.xml](../../src/mujoco_bridge/package.xml)：两个新 `ament_add_gtest` 目标；新增 `std_msgs` 依赖（`~/ground_truth/*_finger_contact` 用 `std_msgs/Bool`）
+- [scripts/gripper_test.py](../../scripts/gripper_test.py)：改用 `~/gripper_command`，`position` 语义从"每指位移"改成"总开口宽度"
+
+**编译**：
+
+```
+Starting >>> robot_description
+Finished <<< robot_description [0.08s]
+Starting >>> mujoco_bridge
+Finished <<< mujoco_bridge [7.88s]
+
+Summary: 2 packages finished [8.09s]
+```
+
+**测试**（直接跑 gtest 二进制）：
+
+```
+test_frame_math:      3/3 PASSED
+test_state_ops:       6/6 PASSED
+test_grasp_criteria: 10/10 PASSED
+test_grasp_state:     6/6 PASSED
+```
+
+**"故意注入错误，测试必须变红"实测**（延续 Stage F 定的验收标准）：把 `classifyGrasp` 里 `lifted` 的比较符从 `box_height_m > threshold` 改成 `<`，重新编译后 `AllFourConditionsMetIsSuccess`/`GrippedButNeverLiftedIsSlip`/`WidthJustInsideEpsilonIsBracketed` 三个用例应声变红（`[ FAILED ]`，10 个测试里 3 个失败），改回后重新编译，10/10 恢复全绿。
+
+**三场景实测数据表**（环境卫生按 [STUDY_NOTES_GUIDE 3.1](../../STUDY_NOTES_GUIDE.md) 确认后，直接跑可执行文件，通过 `~/joint_command`/`~/gripper_command` 手动摆位置验证）：
+
+| 场景 | 操作 | 实测数值（width / box_z / box_to_tcp / L / R） | `classifyGrasp` 分类 |
+|---|---|---|---|
+| **空抓** | 手指下降到 box 附近，命令 `position=0.0`（全闭），两指都没碰到东西 | width≈0.0m, box_z≈0.240m（桌面）, box_to_tcp≈0.03~0.05m, L=0 R=0 | `GRASP_EMPTY`（在 region 内但没夹住） |
+| **正常夹住** | 手指落到 box 两侧，命令 `position=0.032` | width≈0.045~0.05m, box_z≈0.239~0.243m（仍在桌面）, box_to_tcp≈0.004m, L=1 R=1 | 途中经过 `UNEXPECTED_CONTACT`（单侧先触发）→ `SLIP`（双侧接触、宽度对但还没抬起，`lifted` 未满足） |
+| **诱导 slip** | 夹住后突然发一条大位移的 `~/joint_command`，相当于给 box 一个扰动 | box_to_tcp 从 0.004m 跳到 0.03m 以上，contact 从双 `true` 变成不稳定的单侧/无 | 在 `SLIP`/`UNEXPECTED_CONTACT` 之间跳动 |
+
+**没能触发的一格**：受限于手调 waypoint、没有 IK，这次没能把 box 真正抬过 `lift_height_threshold_m=0.26m`（占位值）触发一次 `kSuccess`——这正是 Stage I 要解决的问题，见第6节悬挂清单新增项。
+
+**手动验证摘录**（`ros2 topic pub`/`ros2 topic echo`，节点日志 `grasp outcome -> ...` 行是 `classifyGrasp` 实时结果）：
+
+```
+[INFO] [mujoco_bridge]: gripper fingers `left_finger`/`right_finger` found; publishing ~/ground_truth/*_finger_contact
+...
+[INFO] [mujoco_bridge]: grasp outcome -> GRASP_EMPTY (width=0.0800m box_z=0.2399m box_to_tcp=0.0489m L=0 R=0)
+[INFO] [mujoco_bridge]: grasp outcome -> UNEXPECTED_CONTACT (width=0.0800m box_z=0.2399m box_to_tcp=0.0192m L=1 R=0)
+[INFO] [mujoco_bridge]: grasp outcome -> SLIP (width=0.0456m box_z=0.2378m box_to_tcp=0.0045m L=1 R=1)
+```
+
+`~/gripper_command` 与 `~/joint_command` 的切换验证：给 `~/joint_command` 发手指关节名，只在第一次触发 `WARN_ONCE`（"finger joints must be commanded via ~/gripper_command now"），`ctrl` 不再被写；`~/gripper_command` 发 `max_effort != 0` 同样只警告一次，`ctrl` 正常按 `position/2 * gripper_ctrl_scale_` 写入。
+
+### 9.2 position servo 下"夹住"为什么是稳态位置误差，不是力
+
+MJCF 手指 actuator 是 `biastype="affine"` 的 PD 控制器（[week1 11.4](week1.md#114-position-servo-actuator-的本质一个-pd-控制器)），没有独立的力控制通道。命令一个比 box 宽度更小的目标宽度时，伺服持续施加朝闭合方向的力，box 的刚体碰撞反作用力和伺服力在稳态相互平衡——这个平衡点就是"夹住"的物理体现：**手指实际停在的位置比命令的目标位置更宽**（被 box 挡住）。这正是为什么判据要看**实测宽度**（`gripperWidth` 读 `qpos`）而不是"命令发出去了"：命令 `position=0.0`（全闭）但手指卡在 box 两侧时，实测宽度依然是 box 的宽度，不是 0——三场景表里"正常夹住"那一行 width≈0.045~0.05m 而不是命令的 0.032m，就是这个平衡点的直接证据。
+
+### 9.3 为什么不直接用 `GripperCommand` action
+
+真机上这确实是一个 action（有 goal/feedback/取消语义：夹爪可能需要几百毫秒才能到位，中途要能取消）。但本周这层只是"设今天的目标"，和 `~/joint_command` 是同一个哲学（Stage E 定的：没有执行语义，只有目标设定）。换成真 action 需要在这个节点里跑一个 action server 循环（判断到位、发 feedback、支持 cancel），这个复杂度现在没有对应的下游消费者去驱动设计——Stage I 的 FSM 才是第一个会问"到位了吗"的调用方，届时如果真的需要 action 语义，应该在 FSM 侧包一层，而不是现在就在 bridge 里造。
+
+`max_effort` 被忽略而不是拒绝的理由见第5节第4条（已解答）。
+
+### 9.4 `mjContact` 与 `bodiesInContact`：接触检测怎么工作
+
+> Q: 讲解 mjContact 的相关知识，主要是包括在 bodiesInContact 里的使用。这个 bodiesInContact 目前主要是判断机械手的任一夹爪是否和物体接触对吗？
+
+`mjContact`（`mjdata.h`）是碰撞检测的**逐对结果**，`mjData::contact` 是长度 `ncon` 的数组，每次 `mj_forward`/`mj_step` 的位置阶段重新生成——不是持久状态，上一步的接触在这一步会被完全覆盖，`test_grasp_state.cpp` 的 `SetSlidesAndForward` helper 每次都显式调 `api_->forward` 就是因为设了 `qpos` 不会自动触发碰撞检测，必须手动 `mj_forward`。
+
+用到的字段：
+
+- `geom[2]`：**是 geom id，不是 body id**。这是 `bodiesInContact` 必须转换的原因——一个 body 可能挂好几个 collision geom（`left_finger` body 就有 `finger_0` 主体 mesh + 5 个 `fingertip_pad_collision_N` 小方块，见 [panda.xml:220-228](../../robot_description/mujoco/franka_emika_panda/panda.xml)），按 geom 查询会漏掉"手指用另一块 pad 碰到"的情况，所以必须用 `m->geom_bodyid[c.geom[i]]` 转成 body id 再比较。
+- `dist`：负值表示穿透，当前实现没用到，只要这对 body 出现在 `contact` 数组里就算接触。
+- `frame[9]`：法线方向（`[0-2]`，从 `geom[0]` 指向 `geom[1]`），也没用到，这次只判断"有没有接触"不判断方向。
+
+双向检查（`(b0==a && b1==b) || (b0==b && b1==a)`）的原因：MuJoCo 不保证 broadphase 排序后哪个 geom 落在 `geom[0]`，`test_grasp_state.ContactDetectionIsOrderIndependent` 专门钉住这条。
+
+**你的理解是对的**：目前生产代码里唯一的调用点是 `publishGripperContact()`，分别查 `(left_finger, box)` 和 `(right_finger, box)`。函数本身是通用的两参数接口（不限定必须是"夹爪 vs 物体"），`test_grasp_state.cpp` 里甚至验证了"两个手指不会互相接触"（`FingersDoNotTouchEachOtherWhileBothTouchTarget`），这条测试本身没有生产代码依赖，纯粹是给通用性质的回归保护。
+
+**一个没验证过的缺口**（已进第6节反向清单）：`mjContact` 有 `margin`/`gap` 相关的 `exclude` 字段（0=计入求解，非0=被排除，包括"还在 gap 区间内、检测到了但没真正接触"）。`bodiesInContact` 完全没检查这个字段。当前场景所有相关 geom 的 `margin` 都是默认值 0，大概率不会被触发，但这只是没测过的假设，不是验证过的事实。
+
+### 9.5 `hand_tcp` 为什么要合成、为什么只有 z 轴有偏移
+
+TCP（工具中心点）本周第一次被真正用上——`publishGripperContact()` 里要算 `box_to_tcp_horizontal_m`，需要 TCP 的世界坐标。`hand_tcp` 是什么、偏移量 `0.1034` 从哪来、−45° 手腕旋转为什么不在这个变换里，[docs/architecture.md 第1节](../../docs/architecture.md) 已经是权威记录（Stage C 定的，含一次结论更正），这里不重复，只补两条这次讨论里新的、architecture.md 没写的推理：
+
+**为什么必须合成，不能直接用 `hand`**：`hand` body 的原点是机械设计上的法兰/安装基准面，不是"两个指尖之间、真正发生抓取的那个点"。规划/判据代码要的目标始终是"TCP 到哪"，不是"法兰盘到哪"——不合成这一步，`box_to_tcp_horizontal_m` 这类计算就要在每个用到它的地方各自重复硬编码 `0.1034`，现在集中在 `buildFrameIndex`（TF 合成）和 `publishGripperContact`（数值计算，两处共享同一个 `kHandToTcpZ`）两处，第4周换视觉、第6周接 MoveIt 时下游代码不用再各自算一遍。
+
+**为什么只有 z 轴变化，没有旋转、没有 x/y**：因为 URDF 上游定义的 `tcp_rpy` 就是 `0 0 0`（architecture.md 已记）——两个指尖天然对称分布在 `hand` 局部坐标系的 z 轴（法兰安装面法线方向，也是夹爪"伸出去"的方向）两侧，抓取中心必然落在这条轴上，左右不偏、姿态和 `hand` 完全一致。这不是巧合，是 parallel 夹爪对称设计的必然结果；如果指尖不对称排布，TCP 就需要额外的 x/y 分量。代码里体现为 `publishGripperContact()` 用 `rotVecQuat` 把局部偏移 `{0,0,kHandToTcpZ}` 转到世界系再加到 `hand` 的 `xpos` 上——只转一个纯 z 向量，而不是走 `relativePose`/`frame_math.hpp` 那套完整的父子变换复合，因为这里只需要"合成"（局部→世界），不需要"分解"（世界→父相对）。
+
+### 9.6 夹爪构型：为什么同时解析 `hand` 和 `finger` 两套 body id
+
+> Q: 我看到你同时考虑了 finger 和 hand 的 body id，为什么？实践中会存在有 finger 没 hand 的吗？在这个 panda 里面具体来说是什么样子的。
+
+它们回答的是两个不同问题，`publishGripperContact()` 里能看得很清楚：
+
+- **`hand_body_id_`**（`buildFrameIndex` 里解析）→ 算 TCP 的世界坐标，回答"抓取点现在在世界的哪个位置"——用来算 `box_to_tcp_horizontal_m`（位置判据）。
+- **`left_finger_body_id_`/`right_finger_body_id_`**（`resolveGripperFingers()` 里解析）→ 读 `qpos` 算实测宽度，查 `mjContact` 算接触——回答"手指实际张合到多少、有没有真的碰到东西"（宽度/接触判据）。
+
+`classifyGrasp` 的四个条件里，`lifted` 只需要 box 自己的高度，其余三个各自需要上面两组 id 之一——这是两组都要单独解析、单独存的直接原因。
+
+**这两处解析在代码里刻意分开、各自独立 guard**：`buildFrameIndex` 查 `hand` 失败只影响 TCP frame 合成，`resolveGripperFingers()` 查 `left_finger`/`right_finger` 失败只关掉接触/宽度这两个话题，互不影响。原因是它们在原则上可以独立缺失，只是**这个仓库 vendor 进来的两个模型恰好没有给出"有 hand 没手指"或"有手指没 hand"的例子**：
+
+| 模型 | `hand` | `left_finger`/`right_finger` |
+|---|---|---|
+| `panda.xml`（当前默认用的） | 有 | 有 |
+| `panda_nohand.xml` | 没有（`link7` 直接接一个叫 `attachment` 的空 body + `<site>`，留给别的末端执行器用） | 没有 |
+
+**"有手指没 hand"在物理上基本不成立**：两个手指是通过 tendon 被 `hand` 内部的执行器驱动的，手指必须挂在某个父体上，那个父体在设计上就叫 `hand`——概念上不可能真的没有"手指的载体"这一层，只能重命名，不能去掉。
+
+**"有 hand 没手指"是完全合理的场景**：换一个末端执行器（吸盘、三指夹爪、别的品牌夹爪），`hand` 这个法兰/壳体可能还在（TCP 参考点还需要它），但 `left_finger`/`right_finger` 这两个名字就不存在了。这种情况下代码行为是：`hand_body_id_ >= 0` → TCP frame 正常合成；`resolveGripperFingers()` 查不到手指 → 只关掉接触/宽度两个话题，`RCLCPP_INFO` 一行日志，不报错、不影响其他功能。这是比 `docs/architecture.md` 第4节标注过的"单机械臂假设"更细的一层保护——如果当时把 finger 存在性和 hand 存在性绑在一个 if 里，换夹爪时会连 TCP 都跟着消失，是过度耦合。
+
+### 9.7 oracle 数据的分类：哪些会随项目推进消失，哪些需要学习方法
+
+> Q: 我注意到现在似乎有很多的 oracle 数据？比如说 box 的高度、对接触点的解析、整个抓取的 criteria 设计，很多数据都是需要直接从 mujoco 仿真器的 pub 获取的（它们和机械臂的本体数据不一样），我们应该总是假定没有对应的传感器来获取这样的数据对吧？随着项目的推进，哪些 oracle 是可以逐渐去除的？哪些是需要加入学习方法（比如 RL、YOLO、VLA）才可以逐渐解决的。
+
+先分两类，性质完全不同：
+
+**不是 oracle，本体自带、真机上照样有的**：`/joint_states` 的 `position`/`velocity`（编码器）、`effort`（电流估算力矩的类比）、整条机械臂的 TF（由关节角做 FK 算出来，真机上 `robot_state_publisher` 干的就是这件事）、`gripperWidth`（真 Franka Hand 也有编码器读宽度）。这些不需要"去除"，本来就该留到最后。
+
+**真正的 oracle**，按替换手段分三档：
+
+| 信号 | 现在怎么拿 | 替换路径 | 需要学习方法吗 |
+|---|---|---|---|
+| `~/ground_truth/object_pose`（box 绝对位姿） | `data_->xpos`/`xquat` 直读 | **中间态**：固定场景+已知相机外参，用 ArUco/AprilTag + PnP，纯几何不需要学习；**通用态**：物体种类/纹理/遮挡不可控时，需要检测/分割（YOLO 之类）+ 6D 位姿估计网络，或深度点云配准 | 中间态不需要，通用态需要 |
+| `~/ground_truth/left_finger_contact`/`right_finger_contact`（`bodiesInContact` 直查） | `mjData::contact` 直查 | 真机 Franka Hand **本身没有触觉阵列**，标准做法是靠宽度稳态值判断（`franka_gripper` 的 `Grasp` action 就是命令宽度、结束后比较实测宽度和期望宽度是否在 `epsilon` 内）。这条信号在真机上**不是被更聪明的传感器替换，而是被重新设计的判据绕开**——`classifyGrasp` 已经把 contact 和 width 设成两个独立信号，真机版本缺 contact 这一路，只剩 width，判据要退化成两条腿走路 | 不是学习问题，是硬件/判据设计问题 |
+| `box_height_m`/`box_to_tcp_horizontal_m`（`classifyGrasp` 的位置项） | 同样来自 `xpos` 直读 | 一旦 `object_pose` 换成感知估计值，这两个数字**自动跟着换**——`classifyGrasp` 吃的是 `GraspSignals` 结构体，不关心信号从哪来，这是 Stage F/H 特意留的口子（`grasp_criteria.hpp` 完全不依赖 `mjModel`/`mjData`） | 跟随 `object_pose` 那一档 |
+
+**RL/VLA 在这里的位置**，和上表是两件不同的事：上表说的是"状态估计"要不要学习方法，RL/VLA 通常解决的是**决策**——如果最终目标是训练一个从图像/本体感受直接映射到动作的策略（VLA 风格），"要不要显式估计 object_pose"这个问题本身可能被绕过：训练时 oracle 仍然存在（用来算 reward、算成功标签），但**部署时 oracle 完全消失**，策略网络直接吃像素+关节状态出动作，不存在"物体位姿"这个中间表示。这正好对应计划书"ground truth 必须走独立接口"的动机——不是为了现在删掉它，是为了保证它可以**在不改任何下游代码的前提下被整体摘除**，换成感知模块或者换成一个端到端策略，这条边界现在就在 `resolveObjectOracle()`/`resolveGripperFingers()` 的独立 guard 里画好了。
+
+### 9.8 失败模式与验证手段
+
+| 失败模式 | 现象 | 怎么发现/防住 |
+|---|---|---|
+| 单侧手指接触被误判为空抓或抓住 | 只看 `any_finger_touches` 会把"一边卡住一边悬空"归类成正常状态 | `classifyGrasp` 显式区分 `any_finger_touches != both_fingers_touch`，`test_grasp_criteria.OnlyOneFingerTouchingIsUnexpectedContact` 钉死 |
+| `bodiesInContact` 假设 geom 顺序 | MuJoCo 不保证 `contact.geom[0]/[1]` 谁是谁 | `test_grasp_state.ContactDetectionIsOrderIndependent` 双向查询都测 |
+| `max_effort` 被静默忽略 | 下游以为在控力，实际什么都没发生 | 改成显式 `WARN_ONCE`，不是纯静默——但仍然只警告一次，长期运行中只有第一次调用会被看到 |
+| **`kSuccess` 至今没被真实触发过** | 三场景实测覆盖了 `GRASP_EMPTY`/`SLIP`/`UNEXPECTED_CONTACT`，没有一次真正抬起 box | 已进第6节悬挂清单，等 Stage I 的 waypoint |
+| `bodiesInContact` 不检查 `exclude` | `margin`/`gap` 非零时可能把"检测到但未生效"的接触误判为真接触 | 目前场景 `margin` 都是 0，未验证过；已进第6节反向清单 |
+| `~/gripper_command`/`~/joint_command` 写同一个 `gripper_actuator_id_` 无互斥 | 两个话题同周期都发消息时，最后一次覆盖前一次，无警告 | 目前靠"约定不冲突"，没有运行时保护；已进第6节反向清单 |
