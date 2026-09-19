@@ -60,6 +60,31 @@
   - [9.6 夹爪构型：为什么同时解析 `hand` 和 `finger` 两套 body id](#96-夹爪构型为什么同时解析-hand-和-finger-两套-body-id)
   - [9.7 oracle 数据的分类：哪些会随项目推进消失，哪些需要学习方法](#97-oracle-数据的分类哪些会随项目推进消失哪些需要学习方法)
   - [9.8 失败模式与验证手段](#98-失败模式与验证手段)
+- [10. Stage I：FSM 与 `WaypointSource` 抽象（新包 `task_executor`）](#10-stage-ifsm-与-waypointsource-抽象新包-task_executor)
+  - [10.0 一句话总结](#100-一句话总结)
+  - [10.1 改动清单与验证结果](#101-改动清单与验证结果)
+  - [10.2 纯函数层为什么不用消息类型：Layer 1 的"message-free"原则](#102-纯函数层为什么不用消息类型layer-1-的message-free原则)
+  - [10.3 FSM 的输入、参数、决策与消费：不看 if-else 的整体形状](#103-fsm-的输入参数决策与消费不看-if-else-的整体形状)
+    - [10.3.1 `RECOVER` 完整机制：从触发到重试到力竭（此前散落在各处，没有整体讲过）](#1031-recover-完整机制从触发到重试到力竭此前散落在各处没有整体讲过)
+    - [10.3.2 `FsmParams` 完整设计：这些参数怎么编码了整个抓取过程的阶段设计](#1032-fsmparams-完整设计这些参数怎么编码了整个抓取过程的阶段设计)
+    - [10.3.3 `step()`/`FsmDecision` 的设计形状（不看具体实现，只看设计契约）](#1033-stepfsmdecision-的设计形状不看具体实现只看设计契约)
+    - [10.3.4 `requestReset()` 是节点调 service 的一般写法吗，和命令行 `ros2 service call` 有什么关系](#1034-requestreset-是节点调-service-的一般写法吗和命令行-ros2-service-call-有什么关系)
+  - [10.4 为什么选状态机模型？工程实践里的适用场景与替代方案](#104-为什么选状态机模型工程实践里的适用场景与替代方案)
+  - [10.5 `WaypointSource` 接口设计：为什么现在只有一个查表实现](#105-waypointsource-接口设计为什么现在只有一个查表实现)
+    - [10.5.1 这些关节数字的依据在哪：实测搜索过程（此前只在会话记录里，未落盘，这次补上）](#1051-这些关节数字的依据在哪实测搜索过程此前只在会话记录里未落盘这次补上)
+  - [10.6 到位判据为什么分层：三条独立的"等一等"，不是同一件事](#106-到位判据为什么分层三条独立的等一等不是同一件事)
+  - [10.7 为什么 `task_executor` 不发布/订阅一个 `GraspOutcome` 话题](#107-为什么-task_executor-不发布订阅一个-graspoutcome-话题)
+    - [10.7.1 `GraspSignals`/`classifyGrasp` 为什么物理上放在 `mujoco_bridge` 包里，不是 `task_executor`](#1071-graspsignalsclassifygrasp-为什么物理上放在-mujoco_bridge-包里不是-task_executor)
+  - [10.8 `task_executor` 的可扩展性：后续步骤会替换哪些部分](#108-task_executor-的可扩展性后续步骤会替换哪些部分)
+  - [10.9 实测复现：`~/gripper_command` 双发布者冲突](#109-实测复现gripper_command-双发布者冲突)
+  - [10.10 排查记录：三个连续 bug，都是跑起来才炸出来的](#1010-排查记录三个连续-bug都是跑起来才炸出来的)
+    - [10.10.1 第一个 bug：`kRecover → kHome` 的重试转移被 `exit_reason == kNone` 误判成"没有发生"](#10101-第一个-bugkrecover--khome-的重试转移被-exit_reason--knone-误判成没有发生)
+    - [10.10.2 第二个 bug：接触检测闪烁撞上到位检查（根因已查清，含一次被推翻的旧结论）](#10102-第二个-bug接触检测闪烁撞上到位检查根因已查清含一次被推翻的旧结论)
+    - [10.10.3 第三个 bug：夹爪刚接触 box 瞬间的 `kSlip` 被当成"ready，进入 LIFT"](#10103-第三个-bug夹爪刚接触-box-瞬间的-kslip-被当成ready进入-lift)
+    - [10.10.4 第四个（独立）问题：`kPreplace`/`kPlace` 的掉落判据看瞬时接触布尔值，被接触检测噪声误判](#10104-第四个独立问题kpreplacekplace-的掉落判据看瞬时接触布尔值被接触检测噪声误判)
+    - [10.10.5 一次独立的物理调参：夹爪闭合力度不够，撑不住 `kPreplace` 的侧向摆动](#10105-一次独立的物理调参夹爪闭合力度不够撑不住-kpreplace-的侧向摆动)
+  - [10.11 失败模式与验证手段](#1011-失败模式与验证手段)
+  - [10.12 你没问但值得注意的](#1012-你没问但值得注意的)
 
 ---
 
@@ -215,10 +240,18 @@
 
 - **`gripper_actuator_id_`/`gripper_ctrl_scale_`（`buildActuatorIndex`）和 `kHandBodyName="hand"`（`buildFrameIndex`）都是隐式单机械臂假设**（[8.7](#87-失败模式与验证手段)）——前者是两个标量，模型里若有第二条 tendon 驱动的夹爪会被循环无条件覆盖，只留最后一个，且没有任何警告；后者硬编码查找名字恰好叫 `hand` 的 body，第二条臂必须重命名（否则和第一条臂一样撞上 keyframe 那种编译期重名错误），重命名之后这行代码就再也找不到它。**缺参照系**：现在没有第二条臂，无法验证"改成怎样的 per-arm 索引才对"，而且计划书 2.2 节明确把双臂列进"暂不进入 MVP"。解锁条件：真正引入第二条机械臂时。
 - **多个可操作物体的通用化设计**（`kObjectBodyName="box"` 单一常量、单一 oracle 话题）——**缺参照系**：不知道 bin picking 阶段（Chap 5）实际需要"每个物体一条话题"还是"一条话题发数组"，现在设计只是猜。解锁条件：进入 bin picking / 杂乱清空阶段（计划书第7节，明确排在单物体 pick-and-place 稳定之后）。
-- **`grasp.lift_height_threshold_m`/`grasp.region_radius_m` 目前是猜的，不是测出来的**（Stage H）——三场景实测（[9.1](#91-改动清单与验证结果)）覆盖了 `GRASP_EMPTY`/`SLIP`/`UNEXPECTED_CONTACT`，但受限于手调 waypoint 精度，没有一次真正把 box 抬过阈值触发 `kSuccess`。**缺参照系**：现在定这两个数字只能靠猜，没有一次"真正抬起来"的轨迹作对照。解锁条件：Stage I 有了能实际完成一次抓取的 `WaypointSource` 之后，用那次的实测高度反推。
-- **`classifyGrasp` 判定 `kSlip` 没有时间维度**（Stage H，[grasp_criteria.hpp](../../src/mujoco_bridge/include/mujoco_bridge/grasp_criteria.hpp) 已在注释里承认）——单个瞬间快照分不清"刚抓住还没起飞"和"起飞后真的滑了"，两者现在返回同一个 `kSlip`。**缺参照系**：区分两者需要阶段/历史状态，这正是 Stage I 的 FSM 才有的东西，现在这层单独测不出"应该怎么区分"。解锁条件：Stage I 的 FSM 有了阶段信息后，评估要不要在 FSM 侧而不是 `classifyGrasp` 里加时间窗判断。
-- **`GraspOutcome` 目前只进日志，没有对应的 ROS topic**（Stage H）——`publishGripperContact()` 里刻意不发话题，因为不知道 Stage I 的 FSM 想要整个分类结果、还是原始 `GraspSignals`、还是别的形状。**缺参照系**：`task_executor` 还不存在，现在定话题契约只是猜。解锁条件：Stage I 写 FSM 第一次需要读这个结果时。
+- ~~**`grasp.lift_height_threshold_m`/`grasp.region_radius_m` 目前是猜的，不是测出来的**（Stage H）~~ **已在 Stage I 解锁**：`KeyframeWaypointSource` 跑出了一条真正把 box 抬过阈值的轨迹（`box_z` 0.24→0.40→0.24，详见 [10.10.5](#10105-一次独立的物理调参夹爪闭合力度不够撑不住-kpreplace-的侧向摆动)），默认值 `0.26` 在这次实测里够用，没有改。
+- ~~**`classifyGrasp` 判定 `kSlip` 没有时间维度**（Stage H）~~ **已在 Stage I 解锁**：FSM 侧按阶段消歧——`kClose` 把 `kSlip` 读成"抓住了，还没试着抬"，`kLift` 把同一个 `kSlip` 读成"抬起来后真的滑了"，见 [10.10.2](#10102-第二个-bug接触检测闪烁撞上到位检查根因已查清含一次被推翻的旧结论)/[10.10.3](#10103-第三个-bug夹爪刚接触-box-瞬间的-kslip-被当成ready进入-lift)。没有改 `classifyGrasp` 本身。
+- ~~**`GraspOutcome` 目前只进日志，没有对应的 ROS topic**（Stage H）~~ **已在 Stage I 解锁**：答案是"不需要新话题"——`task_executor_node` 直接复用现有的 `~/ground_truth/*` 话题拼 `GraspSignals`，调导出的库函数 `classifyGrasp()` 自己算，见 [10.7](#107-为什么-task_executor-不发布订阅一个-graspoutcome-话题)。
 - **是否要给 `mujoco_bridge_node` 嵌入原生渲染器**（GLFW + `mjr_render`，画同一份 `data_`，不经 TF/RViz 这一层）——**缺参照系**：现在 RViz 已经能实时看，加原生渲染器的唯一动机是"更像 `simulate` 那种可交互调试"，但值不值得为这个多接一层 GLFW 事件循环和 `onTimer`/`onReset` 的互斥访问，需要先有具体的"RViz 不够用"的场景才能判断。
+- **`close_settle_s`/`lift_settle_grace_s`（Stage I，各 2.0s）是"改到实测稳定通过为止"定的，不是从物理量推出来的**（[10.12](#1012-你没问但值得注意的) 第1条）——**缺参照系**：第3周把 `KeyframeWaypointSource` 换成 IK 驱动的连续轨迹后，这两个常数背后的物理场景（"发一个离散目标、等伺服收敛"）整体改变，现在的数值大概率不能直接照搬。解锁条件：第3周接入 diff-IK 的 `WaypointSource` 之后重新测。
+- **`RECOVER` 目前不区分 `ExitReason`，所有失败原因都统一回 `kHome` 重试**（Stage I，[10.8](#108-task_executor-的可扩展性后续步骤会替换哪些部分) 第5点）——`ExitReason` 枚举已经区分了 `kTimeout`/`kSlipped`/`kPlaceMissed` 等，但 `kRecover` 分支目前对所有原因一视同仁。**缺参照系**：现在只有一次真实失败模式的实测（人为制造的 `PLACE_MISSED`），不知道不同失败码是否真的需要不同恢复策略。解锁条件：Stage J 的失败码分布统计出来后，看是否有某类失败"重试无效"，值得针对性设计。
+- **`task_executor` 的 `CMakeLists.txt`/`package.xml` 硬依赖 `mujoco_bridge` 这个具体包名，只为了拿 `grasp_criteria` 一段纯函数**（Stage I，[10.7.1](#1071-graspsignalsclassifygrasp-为什么物理上放在-mujoco_bridge-包里不是-task_executor)）——仓库里其实已经有一个空的 `manipulation_interfaces` 占位包，当初若把这段代码放进去，`task_executor` 就不用直接依赖 `mujoco_bridge`。**缺参照系**：现在没有真的换驱动/换包名的场景来验证这条依赖会不会真的咬人。解锁条件：第6周真正把 `mujoco_bridge` 换成真机驱动、或者需要决定 `grasp_criteria` 要不要搬进 `manipulation_interfaces` 时。
+- **`task_executor_node` 到达 `kDone`/`kFailed` 后没有任何自动重新开始的机制，只能重启整个进程**（Stage I，[10.3.1](#1031-recover-完整机制从触发到重试到力竭此前散落在各处没有整体讲过) 第四步）——`onTimer()` 在这两个终态直接 `return`，`phase_` 不会被任何代码再改动。**这不是缺参照系，是 Stage J 马上就要撞上的真实空白**：episode runner 要"连续跑 N 次"，现在的节点一次只能跑一个 episode。解锁条件：Stage J 设计 episode runner 时必须先决定——每次重启整个节点，还是给 `task_executor` 加一个"重新开始"的话题/服务。
+- **`kRecover` 的异步 `~/reset` 请求和 `phase_` 切到 `kHome` 之间没有显式同步，只靠 `min_settle_s` 的余量兜底**（Stage I，[10.3.1](#1031-recover-完整机制从触发到重试到力竭此前散落在各处没有整体讲过) 第三步）——`async_send_request` 发出去立刻返回，下一行就把 `phase_` 切了，没有等复位真正完成的确认。实测多次重试没出过问题，但这只是"跑过没翻车"，不是"验证过不会翻车"。**缺一次推演**：故意让 `~/reset` 服务响应延迟（或者让 `mujoco_bridge` 短暂不可用），观察这条竞态会不会真的被 `min_settle_s` 挡住，还是只是运气好。
+- **`kOpen` 分支的开口阈值（`kOpenWidthM`/`kOpenEpsilonM`）锁死在 `fsm.cpp` 源码里的局部 `constexpr`，不像其它阈值那样是 `FsmParams`/ROS 参数**（Stage I，[10.3.2](#1032-fsmparams-完整设计这些参数怎么编码了整个抓取过程的阶段设计) 末尾）——系统里其它每一个阈值都能不改代码、不重新编译地在运行时调，唯独这两个数字不行，破坏了"可调参数都在 `FsmParams` 里"这条一致性。**缺一次推演**：现在没有真实场景需要调这两个数字，值得先想清楚要不要现在就补齐一致性，还是等真的需要调它时才动手。
+- **`task_executor_node` 快速重启后，`~/reset` 客户端可能在和 `mujoco_bridge` 完成 DDS 发现之前就发出第一次复位请求，静默失败**（Stage I，[10.10.2](#10102-第二个-bug接触检测闪烁撞上到位检查根因已查清含一次被推翻的旧结论) 排查过程中意外撞见）——现象是 `~/reset not available yet` 警告，box 停在上一轮遗留的位置，后续动作全部建立在错误的初始状态上，且没有任何机制会重试或报错升级。**这不是缺参照系，是 Stage J 的 episode runner 会直接撞上的真实问题**：如果 runner 靠"重启进程"的方式开始新一轮 episode，第一个 episode 大概率会因为这个竞态跑错。解锁条件：Stage J 设计 episode runner 时要么改成不重启进程只调 `~/reset`（[10.3.4](#1034-requestreset-是节点调-service-的一般写法吗和命令行-ros2-service-call-有什么关系) 已经讲过节点内异步调用的写法），要么在 `requestReset()` 里给 `service_is_ready()` 失败的情况加真正的重试，不能只是打个警告就放弃。
+- **`classifyGrasp` 没有"宽度-only"的降级判据，完全依赖接触信号——但接触信号在真机上不存在**（Stage I，[10.10.2](#10102-第二个-bug接触检测闪烁撞上到位检查根因已查清含一次被推翻的旧结论) 排查过程中确认：接触检测的逐 tick 抖动窗口长短取决于夹爪力度，是这次 `kLift` bug 的确认根因）——真机 Franka Hand 没有触觉阵列，标准做法（`franka_gripper` 的 `Grasp` action）是只看稳态宽度误差（[week2.md 9.7](#97-oracle-数据的分类哪些会随项目推进消失哪些需要学习方法)）。**这不是缺参照系**：现在就可以实现一份宽度-only 版本的判据去验证抓取流程在没有接触信号时是否还站得住，这份投入不管以后买不买得起真机都有意义，而且顺带绕开了接触信号抖动这整类问题。解锁条件：现在就可以做，没有前置依赖。
 
 ### 6.2 反向清单：现在就该做的
 
@@ -232,7 +265,8 @@
 - **`~/ground_truth/object_pose` 与 `/tf` 共享 `tf_decimation_`，没有独立的发布频率开关**——两者数值上刻意设计成可以互相印证同一物理步，但如果以后 FSM 需要比 `/tf` 更高频的物体反馈，现在的代码结构没有单独调节 oracle 频率的参数。解锁条件：Stage I 给 FSM 接反馈时评估是否需要。
 - **`condim=3` 下 `friction` 的扭转/滚动两个分量（`0.03`、`0.003`）是抄来的死代码**——`condim` 不到 4/6 这两个数字完全不参与计算，从未验证过数值本身是否合理。解锁条件：Stage H 调抓取判据发现打滑/旋转问题，或以后主动把 `condim` 升级时。
 - **`bodiesInContact` 没有检查 `mjContact::exclude`**（Stage H，[grasp_state.cpp](../../src/mujoco_bridge/src/grasp_state.cpp)）——`mjContact` 有 `margin`/`gap` 相关的 `exclude` 字段（0=计入求解，非0=因各种原因被排除，包括"在 gap 区间内但还没真正接触"），当前实现只要这对 body 出现在 `mjData::contact` 数组里就算 `true`，不看这个字段。现在 box/桌面/手指的 geom 都没配非零 `margin`（默认 0），大概率不会被触发，但没有测试验证过这个假设。缺一次推演：给某个 geom 配一个非零 `margin`，观察 `exclude!=0` 的接触是否真的会被现在的实现误判为"接触"。
-- **`~/gripper_command` 和 `~/joint_command` 共享 `gripper_actuator_id_`，没有互斥/冲突检测**（Stage H）——`~/joint_command` 现在遇到手指关节名会警告并跳过，不会再写 `ctrl[gripper_actuator_id_]`，但这只是"约定好了不冲突"，不是运行时保护：如果以后哪个调用方忘了这条约定，两个话题在同一控制周期都写这个 actuator，最后一次 `onXxxCommand` 会静默覆盖前一次，没有任何冲突检测或警告。缺一次推演：现在没有真实场景触发这个冲突，值得写一个测试或至少想清楚要不要加。
+- **`task_executor_node.cpp` 的 `extractArmState()`/`extractGripperWidth()` 没有剥成纯函数、没有单测**（Stage I，[10.12](#1012-你没问但值得注意的) 第3条）——两者已经是"输入一个 `JointState`、输出一个结构体"的形状，逻辑上很接近 Stage F 剥 `frame_math`/`state_ops` 时用的判据，但比 `mujoco_bridge_node.cpp` 通常的胶水层更厚。缺一次推演：按 [2.1.1](#211-这类系统该怎么测四层本周只取前两层) 的判据（"写错了人眼看 RViz 能不能发现"）评估要不要现在就剥。
+- **`fsm.cpp` 的连续量判据（`box_height_m`）本身的噪声幅度没有量化过**（Stage I，[10.12](#1012-你没问但值得注意的) 第2条）——只有直觉上"连续量比逐 tick 重新生成的接触布尔值稳"，没有像 `frame_math`/`state_ops` 那样写 gtest 量化这条连续量在更剧烈运动下会不会也开始在阈值附近抖动。
 
 ## 7. Stage F：测试地基与胶水层收口
 
@@ -742,3 +776,703 @@ TCP（工具中心点）本周第一次被真正用上——`publishGripperConta
 | **`kSuccess` 至今没被真实触发过** | 三场景实测覆盖了 `GRASP_EMPTY`/`SLIP`/`UNEXPECTED_CONTACT`，没有一次真正抬起 box | 已进第6节悬挂清单，等 Stage I 的 waypoint |
 | `bodiesInContact` 不检查 `exclude` | `margin`/`gap` 非零时可能把"检测到但未生效"的接触误判为真接触 | 目前场景 `margin` 都是 0，未验证过；已进第6节反向清单 |
 | `~/gripper_command`/`~/joint_command` 写同一个 `gripper_actuator_id_` 无互斥 | 两个话题同周期都发消息时，最后一次覆盖前一次，无警告 | 目前靠"约定不冲突"，没有运行时保护；已进第6节反向清单 |
+
+## 10. Stage I：FSM 与 `WaypointSource` 抽象（新包 `task_executor`）
+
+### 10.0 一句话总结
+
+新包 [task_executor](../../src/task_executor/)：状态机 `HOME → PREGRASP → GRASP → CLOSE → LIFT → PREPLACE → PLACE → OPEN → RETRACT → VERIFY → DONE`（外加 `RECOVER`/`FAILED` 两个异常出口）的纯函数核心 [fsm.hpp/cpp](../../src/task_executor/include/task_executor/fsm.hpp)（19 个 gtest，Stage F 定的 Layer 1）、`WaypointSource` 接口 + 本周唯一实现 [KeyframeWaypointSource](../../src/task_executor/include/task_executor/keyframe_waypoint_source.hpp)（手测出来的关节空间查表，3 个 gtest）、以及节点胶水 [task_executor_node.cpp](../../src/task_executor/src/task_executor_node.cpp)。`mujoco_bridge` 的 `grasp_criteria.hpp/cpp` 被拆成独立 CMake 库目标 `mujoco_bridge::grasp_criteria` 并导出，`task_executor` 直接链接复用 `classifyGrasp`，不重新实现一遍。
+
+**这个 stage 没有走"用户提问 → 讲解"的形状**——是在自主实现后自己发现、自己排查的（下面 10.9 详细记录）。整段实现踩了三个连续的真 bug，都是在**真跑起来看行为**这一步才发现的，光看代码逻辑看不出来：
+
+1. `motionStep` 的到位判据里，`min_settle_s`（防止读到"上一阶段遗留的已归零速度"）没有被 `kClose`/`kLift`/`kOpen`/`kVerify` 各自的分支复用，只在共享的 `motionStep` helper 里生效；
+2. `task_executor_node.cpp` 把"这一 tick 没有发生转移"错误地判定成 `exit_reason == kNone`，但 `kRecover → kHome` 的重试转移**本身**就被 `fsm.cpp` 标成了 `kNone`（它是个重定向，不是一个失败结果）——这个判据让 FSM 卡在 `RECOVER` 死循环，永远不重试；
+3. `kPreplace`/`kPlace` 用瞬时的双指接触布尔值判断"掉了没掉"，但 `mujoco_bridge` 自己的抓取日志早就显示过（[9.1](#91-改动清单与验证结果)）单指接触在稳定持握时也会逐 tick 闪烁——用布尔值当判据，会把接触检测的噪声误判成真摔。
+
+三个都在 [10.10](#1010-排查记录三个连续-bug都是跑起来才炸出来的) 详细记录；三个也都在跑通完整流程后**留下了对应的回归测试**（`test_fsm.cpp` 的 `MotionPhaseDoesNotAdvanceBeforeMinSettle`、`CloseDoesNotAdvanceOnSlipBeforeCloseSettleS`、`LiftGivesTheBoxTimeToCatchUpBeforeCallingItSlipped`、`PreplaceToleratesMomentaryFingerContactFlickerWhileStillHeldAloft`）。
+
+### 10.1 改动清单与验证结果
+
+**改动**：
+
+- [src/task_executor/](../../src/task_executor/)（新包）：`package.xml`、`CMakeLists.txt`
+- [include/task_executor/phase.hpp](../../src/task_executor/include/task_executor/phase.hpp) / [src/phase.cpp](../../src/task_executor/src/phase.cpp)：`Phase` 枚举 + `nextPhase()` 查表
+- [include/task_executor/waypoint_source.hpp](../../src/task_executor/include/task_executor/waypoint_source.hpp)：`WaypointSource` 抽象接口、`ObjectPose`/`JointTarget` 纯结构体
+- [include/task_executor/keyframe_waypoint_source.hpp](../../src/task_executor/include/task_executor/keyframe_waypoint_source.hpp)：本周唯一实现，固定查表，忽略 `object_pose`
+- [include/task_executor/fsm.hpp](../../src/task_executor/include/task_executor/fsm.hpp) / [src/fsm.cpp](../../src/task_executor/src/fsm.cpp)：纯函数 `step()`，不依赖 `rclcpp`/`mjModel`，只吃手搭的结构体
+- [src/task_executor_node.cpp](../../src/task_executor/src/task_executor_node.cpp)：节点胶水——订阅 `/joint_states`、`~/ground_truth/object_pose`、`~/ground_truth/{left,right}_finger_contact`、`/tf`（查 `world→hand_tcp`），发布 `~/joint_command`/`~/gripper_command`，调 `~/reset`，20Hz 定时器驱动 `step()`
+- [test/test_fsm.cpp](../../src/task_executor/test/test_fsm.cpp)（19 个用例）、[test/test_keyframe_waypoint_source.cpp](../../src/task_executor/test/test_keyframe_waypoint_source.cpp)（3 个用例）
+- [mujoco_bridge/CMakeLists.txt](../../src/mujoco_bridge/CMakeLists.txt) / [package.xml](../../src/mujoco_bridge/package.xml)：把 `grasp_criteria.cpp` 从 `mujoco_bridge_node` 的直接源文件列表里拆成独立库目标 `grasp_criteria`，`ament_export_targets` 导出，`test_grasp_criteria` 改成链接这个库而不是重新编译源文件
+- [demo.launch.py](../../src/mujoco_bridge/launch/demo.launch.py)：加入 `task_executor_node`（`use_sim_time=true`），补全 week1 就写在注释里、当时还不存在的"第二个节点"
+
+**编译**（`colcon build --packages-select robot_description mujoco_bridge task_executor`）：
+
+```
+Starting >>> robot_description
+Finished <<< robot_description [0.08s]
+Starting >>> mujoco_bridge
+Finished <<< mujoco_bridge [0.10s]
+Starting >>> task_executor
+Finished <<< task_executor [0.64s]
+
+Summary: 3 packages finished [0.94s]
+```
+
+**测试**（`colcon test --packages-select mujoco_bridge task_executor --ctest-args -R "test_"`，仅看 gtest 部分，lint 部分沿用 [6.2](#62-反向清单现在就该做的) 已记录的历史债务）：
+
+```
+test_frame_math:               3/3 PASSED
+test_state_ops:                6/6 PASSED
+test_grasp_criteria:          10/10 PASSED
+test_grasp_state:               6/6 PASSED
+test_fsm:                      19/19 PASSED
+test_keyframe_waypoint_source:  3/3 PASSED
+```
+
+**"故意注入错误，测试必须变红"实测**（延续 Stage F/H 定的验收标准，这次在 `fsm.cpp` 上做了两次独立注入）：
+
+| 注入的错误 | 结果 |
+|---|---|
+| `kClose` 分支的 `outcome == kSuccess \|\| outcome == kSlip` 改成只判 `kSuccess` | `CloseAdvancesOnSlipBecauseThatMeansGrippedNotYetLifted` 变红（1 failure / 3 tests in `Close*` 子集） |
+| `motionStep` 里去掉 `elapsed_in_phase_s >= min_settle_s` 这个条件 | `MotionPhaseDoesNotAdvanceBeforeMinSettle` 变红（1 failure / 2 tests in该子集） |
+
+两次都改回后重新编译，`test_fsm` 恢复 19/19。
+
+**行为回归验证**（环境卫生按 [STUDY_NOTES_GUIDE 3.1](../../STUDY_NOTES_GUIDE.md) 确认后，`mujoco_bridge_node` 与 `task_executor_node` 都直接跑可执行文件、不经 `ros2 run`）：
+
+一次完整成功的 episode，全 11 个阶段逐一到位，日志逐阶段打印阶段名/目标构型/到位误差/耗时/退出原因（计划书 [5.3 第3条](../5.%20视觉机械臂%20Pick-and-Place%20项目计划书.md) 本周范围内那部分）：
+
+```
+phase HOME -> PREGRASP: pos_err=0.0066rad elapsed=0.50s exit=REACHED
+phase PREGRASP -> GRASP: pos_err=0.0064rad elapsed=0.50s exit=REACHED
+phase GRASP -> CLOSE: pos_err=0.1840rad elapsed=0.60s exit=REACHED
+phase CLOSE -> LIFT: pos_err=0.1777rad elapsed=2.00s exit=REACHED
+phase LIFT -> PREPLACE: pos_err=0.0118rad elapsed=0.50s exit=REACHED
+phase PREPLACE -> PLACE: pos_err=0.0082rad elapsed=0.60s exit=REACHED
+phase PLACE -> OPEN: pos_err=0.0079rad elapsed=0.50s exit=REACHED
+phase OPEN -> RETRACT: pos_err=0.0083rad elapsed=0.50s exit=REACHED
+phase RETRACT -> VERIFY: pos_err=0.0088rad elapsed=0.50s exit=REACHED
+phase VERIFY -> DONE: pos_err=0.0081rad elapsed=0.50s exit=REACHED
+episode DONE
+```
+
+`mujoco_bridge` 自己的抓取日志同一段时间窗口里没有一条 WARN/ERROR，`grasp outcome` 在 `SUCCESS`/`UNEXPECTED_CONTACT` 之间正常抖动但始终维持在"抬起来了"的高度区间（`box_z` 从 0.26 一路到 0.40），从未跌回桌面高度——这正是 [10.10](#1010-排查记录三个连续-bug都是跑起来才炸出来的) 修完三个 bug 之后才第一次看到的样子。
+
+**至少一次人为制造失败，确认走 `RECOVER` 而不是卡死或假成功**（本 stage 验收标准里的硬要求）：把 `verify.place_x_m`/`verify.place_y_m` 参数改成物理上不可能到达的 `(99.0, 99.0)`（等价于"把 box 挪到抓不到的位置"这条要求想验证的东西——放置目标永远校验不过），`fsm.phase_timeout_s` 缩到 3s 加速复现：
+
+```
+phase VERIFY -> RECOVER: elapsed=3.05s exit=PLACE_MISSED
+phase RECOVER -> HOME: exit=NONE
+retry 1/3: recovering to HOME
+... (完整流程原样再跑一遍，第二次 VERIFY 仍然 miss)
+retry 2/3 ...
+retry 3/3 ...
+phase VERIFY -> RECOVER: elapsed=3.05s exit=PLACE_MISSED
+phase RECOVER -> FAILED: exit=RETRY_LIMIT_EXCEEDED
+episode FAILED after 3 retries
+```
+
+三次完整重试（每次都重新 `~/reset`、重新走一遍全部阶段），第三次耗尽 `max_retries` 后正确落到 `FAILED` 并停止发布命令，不是卡死、也不是在 `VERIFY` 原地假装成功。
+
+### 10.2 纯函数层为什么不用消息类型：Layer 1 的"message-free"原则
+
+> Q: 你提到了"纯函数不使用消息类型"，这里的"纯函数"指的是什么？
+
+**"纯函数"不是 C++ 的语法/语言机制**（不像模板、虚函数那样有对应的关键字），是一个通用的软件工程/编程范式概念，判据是两条：
+
+1. **没有副作用**：不修改任何超出自己参数/返回值范围的状态——不碰成员变量、不碰全局变量、不做 I/O（发消息、写日志、读文件都算）、不修改传进来的引用/指针指向的对象（除非那正是这个函数唯一的目的，比如 `resetToKeyframe(model, data, key)` 修改 `data` 是它的本职工作，但它不会因此碰任何其他状态）。
+2. **确定性 / 引用透明**：同样的输入，任何时候调用都得到同样的输出——不依赖隐藏状态（当前时间、随机数、文件内容、网络、`this` 指向的对象内部状态）。
+
+`classifyGrasp(signals, criteria)`、`relativePose(...)`、`step(in, target, params)` 都符合这两条：给定同一组结构体，调用一百次结果完全一样，且调用过程中不产生任何看不见的副作用。这正是它们能在 `test_fsm.cpp`/`test_grasp_criteria.cpp` 里"手搭结构体、不起节点、不连 DDS"就测起来的根本原因——**不是因为它们在哪个包里，而是因为它们没有隐藏输入也没有隐藏输出**。
+
+这个概念本身跨语言通用（Python/Rust/Haskell 里说的是同一件事），只是这份笔记里"纯函数"这个词从 Stage F（[2.1.1](#211-这类系统该怎么测四层本周只取前两层) 的"Layer 1：纯数学/纯函数"）开始反复出现，却一直没有正式定义过，借这次问题补上——记在这里（`week2.md`）而不是 [cpp_concepts.md](cpp_concepts.md)，是因为它不是 C++ 语言机制本身，是贯穿整个项目可测试性纪律的设计概念（跟"要不要给 `onTimer` 造 mock"是同一类判断），按 [STUDY_NOTES_GUIDE 分流规则](../../STUDY_NOTES_GUIDE.md) 应该待在讲"为什么这段代码这样写"的地方。
+
+> Q: 你在 `waypoint_source.hpp` 里提到 "Layer 1 stays message-free discipline"，可以再解释一下这个原则的含义吗？
+
+"message-free" 具体指的是**不直接用 ROS 的消息类型**（`geometry_msgs::msg::Pose`、`sensor_msgs::msg::JointState` 这类由 `.msg` 文件生成的类型），不是"不能有任何外部类型依赖"——`FsmInputs` 里照样嵌了 `mujoco_bridge::GraspSignals`（Stage F/H 就是按同一原则写的纯结构体，本身也不是消息类型）。这条纪律第一次成文是在 [grasp_criteria.hpp](../../src/mujoco_bridge/include/mujoco_bridge/grasp_criteria.hpp) 的注释里——`GraspSignals` "Deliberately not mjModel/mjData"；这次 `ObjectPose`/`JointTarget`（`waypoint_source.hpp`）、`FsmInputs`/`FsmParams`/`FsmDecision`（`fsm.hpp`）是同一原则在 `task_executor` 里的延续。
+
+不用消息类型的三个具体理由：
+
+1. **依赖方向要对**。`geometry_msgs::msg::PoseStamped` 定义在 `geometry_msgs` 包里，链接/包含它意味着这个纯函数模块的构建依赖多了一整个 ROS 消息包——而这个函数本身要的只是 3 个 double（`x, y, z`）加 4 个 double（四元数）。[test_fsm.cpp](../../src/task_executor/test/test_fsm.cpp) 能在**不起 rclcpp、不建 DDS 参与者**的情况下手搭 19 个用例，前提就是它依赖的类型只有 `<array>`/`<cmath>` 和这几个自定义 POD struct。
+2. **消息里有和这次计算无关的字段**。`PoseStamped` 还带 `header.stamp`、`header.frame_id`——`jointTargetFor()`/`step()` 根本不关心这次的 pose 是哪个 frame、什么时刻发布的（那是节点侧翻译成 `ObjectPose`/`FsmInputs` 之前就该确认好的事）。让纯函数吃一个带着无关字段的消息类型，等于给"这个函数其实依赖时间戳/frame"这种错误留了一条能编译通过的路。
+3. **消息 schema 会变，纯函数的输入契约不该跟着它一起变**。`control_msgs::msg::GripperCommand`、`geometry_msgs::msg::Pose` 是别的包维护的，字段增减不受这个项目控制；`ObjectPose`/`JointTarget` 是本项目自己定义、自己维护的最小接口，只包含 `step()`/`jointTargetFor()` 真正用到的字段，改动只可能发生在这个项目自己决定的时候。
+
+这条原则划的正是 [2.1.1](#211-这类系统该怎么测四层本周只取前两层) 里 Layer 1（纯数学/纯函数）和 Layer 2/3（模型契约、节点契约）之间的边界——**翻译**（把 ROS 消息形状转换成这几个纯结构体）这一步，永远发生在节点胶水层（`task_executor_node.cpp` 的 `onTimer()`），不发生在 `fsm.cpp`/`keyframe_waypoint_source.hpp` 内部。
+
+### 10.3 FSM 的输入、参数、决策与消费：不看 if-else 的整体形状
+
+> Q: 我不希望看状态机的具体 if-else，希望你讲清楚 inputs、params 怎么选的；decision 怎么做出来的；这个状态机最后怎么被使用。
+
+`step()`（[fsm.hpp](../../src/task_executor/include/task_executor/fsm.hpp)）的签名是 `FsmDecision step(const FsmInputs&, const JointTarget&, const FsmParams&)`——三个入参、一个返回值，下面按这四个类型逐一说明，不涉及每个 `Phase` 内部具体判几个条件。
+
+**`FsmInputs`：这一 tick 已知的全部事实**
+
+| 字段 | 来源 | 为什么在这 |
+|---|---|---|
+| `phase` | 节点自己维护的状态（不是传感器读数） | `step()` 要知道"现在该用哪套判据" |
+| `arm`（7 个 position + 7 个 velocity） | `/joint_states` 前 7 个关节，逐 tick 原样搬进来 | 到位判据（`armReached()`）要用 |
+| `gripper_width_m` | `/joint_states` 两个手指关节 qpos 相加（沿用 Stage H `gripperWidth()` 的公式） | `kOpen` 阶段单独用 |
+| `grasp_signals` | 拼给 `classifyGrasp()` 的结构体——四个字段分别来自 `~/ground_truth/object_pose`（box 高度）、`/tf` 的 `world→hand_tcp`（算 box 到 tcp 的水平距离）、`~/ground_truth/{left,right}_finger_contact` | `kClose`/`kLift` 判据要用同一个（现在导出成库的）`classifyGrasp()` |
+| `box_x_m`/`box_y_m` | 同一个 `~/ground_truth/object_pose`，只是给 `kVerify` 单独核对"落点对不对" | `classifyGrasp()` 的 `GraspSignals` 不带这个（它只关心 box 相对 tcp 的距离，不关心相对"放置目标"的距离——两个不同的问题） |
+| `elapsed_in_phase_s` | 节点自己算：`get_clock()->now() - phase_start_time_` | 到位判据和超时判据都要用 |
+| `retry_count` | 节点自己维护的计数器 | `kRecover` 判断还要不要再给一次机会 |
+
+**没有一个字段是"凭空编出来的"**：全部可以指到某个具体话题或节点自己的簿记状态。这张表本身就是"胶水层要做的翻译工作"的清单——`task_executor_node.cpp` 的 `onTimer()` 前半段基本就是把订阅回调缓存的最新消息，按这张表拼成一个 `FsmInputs`。
+
+**`FsmParams`：判据里的每个数字都能指回一次实测**
+
+不是所有参数都同一来源，按类型分三组：
+
+- **几何/速度容差**（`position_epsilon_rad`、`grasp_position_epsilon_rad`、`velocity_epsilon_rad_s`）——继承 week1 已经确认的事实："ε 不能取零"（position servo 有稳态误差），`grasp_position_epsilon_rad` 单独放大一个量级是因为 `kGrasp`/`kClose` 那个构型下手臂对重力矩的稳态误差本身就大（[keyframe_waypoint_source.hpp](../../src/task_executor/include/task_executor/keyframe_waypoint_source.hpp) 文档已记录具体数值）。
+- **三层等待时间**（`min_settle_s`、`close_settle_s`、`lift_settle_grace_s`）——[10.6](#106-到位判据为什么分层三条独立的等一等不是同一件事) 已经讲过，全部来自 [10.10](#1010-排查记录三个连续-bug都是跑起来才炸出来的) 的真实排查过程，不是预先设计好的。
+- **抓取判据本身**（`grasp_criteria`）与**放置验收**（`place_x_m`/`place_y_m`/`place_region_radius_m`）——前者直接复用 Stage H 三场景实测定的四个数（[9.1](#91-改动清单与验证结果)），后者是这次自己跑出来的实测落点（[10.1](#101-改动清单与验证结果)）。
+
+**没有一个参数是"随便设的默认值"**——但这不代表它们已经是"对的"，[10.12](#1012-你没问但值得注意的) 第1条已经记了一条悬挂项：三层等待时间的数值本身没有从物理量推导过。
+
+**`FsmDecision`：`step()` 只回答三个问题**
+
+```cpp
+struct FsmDecision {
+  Phase next_phase;      // 接下来该停在哪个阶段
+  ExitReason exit_reason; // 如果发生了转移，原因是什么（用于日志/诊断，不用于流程控制）
+  bool is_retry;          // 这次转移是不是 kRecover -> kHome 那个特殊的重定向
+};
+```
+
+`step()` 的契约是：**给我这些事实，我告诉你接下来该停在哪、要不要报点什么**。它不发消息、不查时钟、不碰任何 ROS/MuJoCo 类型——`exit_reason` 存在的唯一目的是让调用方打日志/统计失败原因，`next_phase == phase`（阶段没变）和 `next_phase != phase`（发生了转移）才是调用方真正要做流程判断的依据（[10.10.1](#10101-第一个-bugkrecover--khome-的重试转移被-exit_reason--knone-误判成没有发生) 记录过一次把这两件事搞混的真实事故）。`is_retry` 单独存在，是因为"要不要给 `retry_count_` 加一"和"接下来去哪个阶段"是两个独立的问题——`kHome` 既是正常开局的第一个阶段，也是每次 `kRecover` 重试后要回到的地方，不能靠"下一个阶段是不是 `kHome`"来判断这次转移算不算一次重试。
+
+**怎么被消费：`task_executor_node.cpp` 的 `onTimer()`，20Hz**
+
+1. 订阅回调只做一件事——把收到的最新消息存进成员变量（`latest_joint_state_` 等），不在回调里做任何计算。
+2. 定时器每 50ms 触发一次，做六件事，顺序固定：
+   - 从缓存的消息里拼出这一 tick 的 `FsmInputs`（表格里那几行的具体实现，也是**唯一**把 ROS 消息类型翻译成 Layer 1 纯结构体的地方，对应 [10.2](#102-纯函数层为什么不用消息类型layer-1-的message-free原则) 划的边界）；
+   - 用当前 `phase_` 问 `waypoint_source_` 要这一阶段该发的 `JointTarget`；
+   - **无条件**把这个 `JointTarget` 发布到 `~/joint_command`/`~/gripper_command`——不等 `step()` 的结果，因为哪怕这一 tick 判定"还没到位"，仍然要持续发送同一个目标，否则伺服会松开、机械臂会掉回上一个目标；
+   - 调 `step(in, target, params_)`；
+   - 如果 `next_phase == phase_`（没发生转移），这一 tick 到此为止；
+   - 如果发生了转移：打一行完整日志（阶段/目标/误差/耗时/退出原因，对应验收标准第3条）、按 `is_retry` 决定要不要 `++retry_count_` 并调 `~/reset`、按 `next_phase` 是否为 `kDone`/`kFailed` 决定要不要打收尾日志，最后把 `phase_`/`phase_start_time_` 更新成新值。
+
+这个顺序里最容易漏掉的一点是"无条件发布 target"这一步和"调用 `step()` 判断要不要转移"是**两个独立的动作**，不是一回事——`step()` 从来不负责"让机械臂动起来"，它只负责"看着已经在发生的物理过程，判断该不该换阶段"。这也是为什么 `fsm.cpp` 可以完全不知道"发布"这件事存在：**执行**（把目标变成实际的电机指令）永远在节点侧，**决策**（要不要换下一个目标）被剥成了一个可以喂假数据单独测试的纯函数——和 [2.1.1](#211-这类系统该怎么测四层本周只取前两层) 第3点"不给 `onTimer` 造 mock"是同一个原则的另一次应用：这次胶水层比 `mujoco_bridge_node.cpp` 的更厚（多了拼 `FsmInputs`、查 `WaypointSource`、处理转移），但"胶水层本身不需要测试，测试保护的是它调用的那个决策函数"这条纪律没有变。
+
+#### 10.3.1 `RECOVER` 完整机制：从触发到重试到力竭（此前散落在各处，没有整体讲过）
+
+> Q: 你似乎从来没有记录过整个抓取过程的恢复机制？导致我对状态机的这部分不太能够理解？
+
+这个批评是对的——之前 `is_retry`/`RECOVER` 只在讲别的东西（10.9.1 的 bug、失败模式表里的一行）时被提到过，从没把"一次失败从发生到恢复到力竭"的完整链路串起来讲。补上，按时间顺序走一遍。
+
+**第一步：谁会把 FSM 送进 `kRecover`，条件是什么**——`fsm.cpp` 里一共 7 处 `return {Phase::kRecover, ...}`，按阶段归类：
+
+| 阶段 | 触发条件 | `ExitReason` |
+|---|---|---|
+| `kHome`/`kPregrasp`/`kGrasp`/`kRetract`/`kOpen` | 走 `motionStep()`：`phase_timeout_s`（默认 6s）内没到位 | `kTimeout` |
+| `kClose` | `phase_timeout_s` 内 `classifyGrasp()` 一直没报 `kSuccess`/`kSlip` | `kUnexpectedContact` 或 `kGraspEmpty`（看 `classifyGrasp()` 当时的具体输出） |
+| `kLift` | 两条路：①手臂已到位（`armReached()`）且过了 `lift_settle_grace_s`，但 `classifyGrasp()` 还没报 `kSuccess` → `kSlipped`；②纯粹超时（手臂都还没到位）→ `kTimeout` |
+| `kPreplace`/`kPlace` | **不等超时**，只要这一 tick `box_height_m` 掉到 `lift_height_threshold_m` 以下就立刻触发（[10.10.4](#10104-第四个独立问题kpreplacekplace-的掉落判据看瞬时接触布尔值被接触检测噪声误判) 讲过为什么看高度不看接触布尔值） | `kSlipped` |
+| `kVerify` | `phase_timeout_s` 内没有"box 落在放置区半径内 **且** 松开"这个组合条件 | `kPlaceMissed` |
+
+**没有任何路径能从 `kRecover` 之外直接跳到 `kFailed`**——所有失败都先汇合到 `kRecover` 这一个"路口"，`kFailed` 只能从 `kRecover` 里走出去。这是故意的单一出口设计，[10.4](#104-为什么选状态机模型工程实践里的适用场景与替代方案) 已经讲过"目前还没有出现需要针对不同失败码走不同应对策略的复杂度"，所以这个路口现在只做一件事——数数。
+
+**第二步：`kRecover` 自己只问一个问题**（`fsm.cpp`）：
+
+```cpp
+case Phase::kRecover:
+  if (in.retry_count < params.max_retries) {
+    return {Phase::kHome, ExitReason::kNone, true};
+  }
+  return {Phase::kFailed, ExitReason::kRetryLimitExceeded, false};
+```
+
+`retry_count` 够不够，`max_retries` 默认 3——够就回 `kHome` 重新走一遍全流程（`is_retry=true`），不够（已经用完）就去 `kFailed`（终态）。**这一步本身不知道刚才是哪种 `ExitReason` 把它送进来的**——`fsm.cpp` 只在这个 tick 看得到 `in.phase == kRecover`，上一个 `ExitReason` 只进了日志，没有作为输入传给这次判断。这正是 [10.8](#108-task_executor-的可扩展性后续步骤会替换哪些部分) 表格里"`RECOVER` 不区分 `ExitReason`"那条悬挂项的代码级证据。
+
+**第三步：节点侧怎么真正执行一次重试**（`task_executor_node.cpp` 的 `onTimer()`）：
+
+```cpp
+if (decision.is_retry) {
+  ++retry_count_;
+  RCLCPP_WARN(get_logger(), "retry %d/%d: recovering to HOME", retry_count_, params_.max_retries);
+  requestReset();
+}
+...
+phase_ = decision.next_phase;          // == kHome
+phase_start_time_ = get_clock()->now();
+```
+
+`requestReset()` 调的是 `~/reset` 服务，但**是异步的**（`async_send_request` + 回调，不 `spin_until_future_complete` 等结果）：
+
+```cpp
+reset_client_->async_send_request(
+  request, [this](rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future) {
+    const auto response = future.get();
+    RCLCPP_INFO(get_logger(), "reset for retry: success=%d message='%s'", ...);
+  });
+```
+
+**这里有一个没有被显式同步、只靠时序凑巧对的地方**：`phase_ = kHome` 和 `requestReset()` 几乎同一时刻发生，但没有任何代码保证"仿真那边真的先复位完，`phase_` 再切到 `kHome`"——`async_send_request` 发出去立刻返回，下一行就把阶段切了。如果下一个 50ms tick 到来时 `~/reset` 还没被 `mujoco_bridge` 处理完，`onTimer()` 读到的 `/joint_states` 可能还是重试前、卡在半路的旧姿态，`armReached(HOME 目标)` 这时候大概率是 `false`（旧姿态离 HOME 目标通常还有明显差距），所以**实际上不会误判"已经到家"**——但这依赖的是"旧姿态凑巧不满足 HOME 判据"这个偶然事实，不是显式的等待/确认机制。真正的安全网是 `min_settle_s`（0.5s）：即使复位在下一 tick 就已完成、`armReached()` 立刻为真，`min_settle_s` 还是会挡住第一个 tick 就判定"到位"——这是 `min_settle_s` 存在理由清单里**没写过的第三条**（前两条是"读到上一阶段残留状态"和"kClose 刚接触瞬间"），这次是"异步 reset 请求发出去，但还没确认真的落地"这第三种情况。三条理由不同，但挡的手法是同一个：**给了半秒钟余量，不代表任何具体机制被验证过，只是经验上够用**。实测上（[week2.md 10.9](#109-实测复现gripper_command-双发布者冲突) 那次 `~/gripper_command` 竞态演示，FSM 连续走了 3 次完整重试）从没在这个环节翻过车，但这只是"跑过几次没出问题"，不是"证明过不会出问题"。
+
+**第四步：`kFailed` 是纯粹的死胡同，没有自动重新开始**：
+
+```cpp
+void onTimer() {
+  if (phase_ == Phase::kDone || phase_ == Phase::kFailed) {
+    return;  // 停止发布/决策，节点继续活着但什么都不做
+  }
+  ...
+```
+
+`kFailed`（以及成功的 `kDone`）一旦到达，`onTimer()` 从这行直接 `return`，`phase_` 再也不会被任何代码改动——**没有任何机制会让它自动回到 `kHome` 开始新一轮**。想再跑一次，唯一的办法是重启整个 `task_executor_node` 进程。这是一个**当前故意留白、Stage J 才要填的空白**：Stage J 的 episode runner 需要"连续跑 20 次"，而现在的 `task_executor_node` 一次只能跑一个 episode 到 `DONE`/`kFailed` 就停下——runner 到底是每次都重启整个节点，还是往 `task_executor` 加一个"重新开始"的话题/服务，这个决定还没做，值得记进悬挂清单。
+
+**完整时间线示例**（对照一次真实失败重试，[10.1](#101-改动清单与验证结果) 末尾那次人为制造的 `PLACE_MISSED`）：
+
+```
+VERIFY  -> RECOVER: exit=PLACE_MISSED         # 第一步：某阶段触发失败
+RECOVER -> HOME:    exit=NONE   (is_retry)    # 第二步：kRecover 判断"还能重试"
+  [节点侧] retry_count_: 0->1，WARN 日志，requestReset() 异步发出
+  [下一 tick] phase_=HOME, phase_start_time_=now()
+HOME -> PREGRASP -> ... -> VERIFY             # 第三步：完整重走一遍全流程
+VERIFY  -> RECOVER: exit=PLACE_MISSED         # 同样的失败，再来一次
+RECOVER -> HOME:    exit=NONE   (is_retry)    # retry_count_: 1->2
+... (第三次同样失败) ...
+RECOVER -> HOME:    exit=NONE   (is_retry)    # retry_count_: 2->3，达到 max_retries
+... (第四次同样失败) ...
+VERIFY  -> RECOVER: exit=PLACE_MISSED
+RECOVER -> FAILED:  exit=RETRY_LIMIT_EXCEEDED # 第四步：retry_count_(3) 不小于 max_retries(3)，终态
+[ERROR] episode FAILED after 3 retries
+```
+
+`max_retries=3` 意味着**总共跑 4 次完整流程**（1 次原始尝试 + 3 次重试），不是 3 次——这个"差一次"的计数细节值得单独记一下，容易凭直觉猜错。
+
+#### 10.3.2 `FsmParams` 完整设计：这些参数怎么编码了整个抓取过程的阶段设计
+
+> Q: 你对 FsmParams 的设计，我希望你能够单开一个章节来介绍，这块的逻辑比较复杂。但是我觉得有利于我了解一下整个抓取过程的阶段设计？
+
+`FsmParams` 不是一堆调参旋钮的杂货堆——每个字段都在回答"这个阶段判断'完成了'需要哪种证据"或"这个证据值得信吗"这两类问题之一。按问题分类，比按字段声明顺序看更容易看出设计意图：
+
+**第一类：几何到位判据——"手臂到了没"**
+
+| 字段 | 回答的问题 |
+|---|---|
+| `position_epsilon_rad` | 大多数阶段（`HOME`/`PREGRASP`/`RETRACT`/`VERIFY` 等）判断"到位"用的位置容差 |
+| `grasp_position_epsilon_rad` | `GRASP`/`CLOSE`/`PREPLACE`/`PLACE` 专用，比上面大一个量级——这几个阶段的目标构型本身要对抗更大的重力矩，伺服稳态误差天生更大（[10.5.1](#1051-这些关节数字的依据在哪实测搜索过程此前只在会话记录里未落盘这次补上) 的搜索数据已经量化过这个现象），用同一个容差会在这些阶段永远判不到位 |
+| `velocity_epsilon_rad_s` | 光看位置够不够近不够——还得确认没有在运动中"路过"目标点，两个条件（位置+速度）合在一起才是"稳定停在那"，不是"恰好经过" |
+
+**第二类：三层等待时间——"这一刻的读数值得信吗"**（[10.6](#106-到位判据为什么分层三条独立的等一等不是同一件事) 已经详细讲过每一条背后的物理原因，这里只重复结论）：`min_settle_s`（通用，防"读到上一阶段残留状态"）、`close_settle_s`（`kClose` 专用，防"伺服刚开始收紧就误判抓稳"）、`lift_settle_grace_s`（`kLift` 专用，防"接触检测的逐 tick 抖动恰好撞上 `armReached()` 变真的那一刻"——原先记的"box 需要物理时间追赶手臂"已被实测推翻，见 [10.10.2](#10102-第二个-bug接触检测闪烁撞上到位检查根因已查清含一次被推翻的旧结论)）。
+
+**第三类：全局安全阀——"要不要放弃"**
+
+| 字段 | 回答的问题 |
+|---|---|
+| `phase_timeout_s` | 单个阶段最多等多久——这不是"到位"判据的一部分，是兜底：如果前两类判据永远等不到满足的那一刻（比如目标本来就不可达），总得有个机制让 FSM 离开这个阶段，而不是永远卡住 |
+| `max_retries` | 整个 episode 最多重试几次——[10.3.1](#1031-recover-完整机制从触发到重试到力竭此前散落在各处没有整体讲过) 已经讲过，这条只在 `kRecover` 里用，不参与任何单个阶段的到位判断 |
+
+**第四类：任务语义本身的物理定义**——这两组字段不是"抓取过程的阶段判据"，是**任务成功/失败的定义**，阶段判据只是拿这些定义去比对：
+
+| 字段组 | 定义的是什么 | 复用自哪里 |
+|---|---|---|
+| `grasp_criteria`（`box_width_m`/`width_epsilon_m`/`lift_height_threshold_m`/`region_radius_m`） | "抓住了"在物理上长什么样 | 原样复用 Stage H 三场景实测定的四个数（[9.1](#91-改动清单与验证结果)），`kClose`/`kLift`/`kPreplace`/`kPlace` 全部拿它去问 `classifyGrasp()` |
+| `place_x_m`/`place_y_m`/`place_region_radius_m` | "放对地方了"在物理上长什么样 | Stage I 自己实测出的落点（[10.5.1](#1051-这些关节数字的依据在哪实测搜索过程此前只在会话记录里未落盘这次补上)），只有 `kVerify` 用 |
+
+**把这套分类映射回 11 个阶段，就是整个抓取过程的阶段设计全貌**——每个阶段用了哪几类判据、有没有额外的"值得信吗"防护：
+
+| 阶段 | "到位"用什么证据 | 用到的 `FsmParams` | 额外的读数防护 |
+|---|---|---|---|
+| `HOME`/`PREGRASP`/`RETRACT` | 纯几何：关节位置+速度 | `position_epsilon_rad`、`velocity_epsilon_rad_s` | `min_settle_s` |
+| `GRASP` | 同上，容差放大 | `grasp_position_epsilon_rad`、`velocity_epsilon_rad_s` | `min_settle_s` |
+| `CLOSE` | 抓取判据（`classifyGrasp`），不看几何 | `grasp_criteria.*` | `close_settle_s`（比 `min_settle_s` 长，等伺服真收紧） |
+| `LIFT` | 抓取判据成功；或"手臂到位且总耗时过了下限却仍不成功"判定失败 | `grasp_criteria.*`、`position_epsilon_rad`、`velocity_epsilon_rad_s` | `lift_settle_grace_s`（阶段总预算下限，非"到位后另起"，见 [10.6](#106-到位判据为什么分层三条独立的等一等不是同一件事)）、`min_settle_s` |
+| `PREPLACE`/`PLACE` | 几何到位 + 全程盯着 box 高度没掉 | `grasp_position_epsilon_rad`、`grasp_criteria.lift_height_threshold_m` | 无（掉落检测本身是连续量，不需要防抖，[10.10.4](#10104-第四个独立问题kpreplacekplace-的掉落判据看瞬时接触布尔值被接触检测噪声误判) 讲过为什么） |
+| `OPEN` | 夹爪自己的宽度阈值，不是手臂几何 | **不在 `FsmParams` 里**（见下面的发现） | `min_settle_s` |
+| `VERIFY` | 位置落在放置区半径内 + 松开 | `place_x_m`/`place_y_m`/`place_region_radius_m` | `min_settle_s` |
+| `RECOVER` | 不是到位判据，是计数判据 | `max_retries` | 无 |
+
+**做这张表时发现一个之前没注意到的设计不一致**：`kOpen` 分支自己的开口阈值——
+
+```cpp
+constexpr double kOpenWidthM = 0.08;
+constexpr double kOpenEpsilonM = 0.02;
+```
+
+是写在 `fsm.cpp` 函数体内部的局部 `constexpr`，**不是** `FsmParams` 的字段。系统里所有其它阈值（容差、等待时间、抓取/放置判据）都做成了 ROS 参数（`task_executor_node.cpp` 构造函数里 `declare_parameter`），可以不改代码、不重新编译，只用命令行/launch 文件调；唯独这两个数字锁死在源码里，想改就得改 `fsm.cpp` 重新编译。这不是一个 bug（`kOpen` 目前确实不需要经常调），但破坏了"这套系统的可调参数都在 `FsmParams` 里"这条本来贯穿全局的一致性，值得记一条悬挂项。
+
+#### 10.3.3 `step()`/`FsmDecision` 的设计形状（不看具体实现，只看设计契约）
+
+> Q: 同样的，`FsmDecision step` 这里的逻辑也比较复杂，我希望能有一章节专门对应。对于代码，我觉得只应该学习设计，而不应该在意具体的实现（实现这块我相信你得心应手，至少我可以通过测试程序来控制这块的质量）？
+
+**先定性 `step()` 是哪种函数**：给定"现在的状态"和"这一刻观察到的证据"，算出"下一个状态该是什么"——控制理论/自动机理论里这叫 **Mealy 型转移函数**：输出（这里是 `ExitReason`，带着"为什么"这个诊断信息）既依赖当前状态**也**依赖这一刻的输入，不是只看状态本身（那样是 Moore 型）。举个能感觉到区别的例子：同一个 `kLift` 状态，这一 tick 的 `ExitReason` 到底是 `kReached`、`kSlipped` 还是 `kTimeout`，完全取决于这一刻 `classifyGrasp()`/`armReached()`/`elapsed_in_phase_s` 这几个输入的具体取值——状态本身（"我在 `kLift`"）不能决定输出，必须结合输入才能决定。这不是重要到必须记住的术语，只是"为什么用状态机"（[10.4](#104-为什么选状态机模型工程实践里的适用场景与替代方案)）这个问题在更细的机制层面的延伸答案。
+
+**`FsmDecision` 是一个"命令对象"，不是一次状态修改**——这是全篇最值得记住的设计判断：`step()` 自己**不修改任何状态**，它只返回一个描述"接下来该怎样"的小结构体，由调用方（`task_executor_node.cpp`）决定要不要真的照做。这正是 [10.2](#102-纯函数层为什么不用消息类型layer-1-的message-free原则) 定义的"纯函数"性质在状态机这个场景下的具体应用——**决策**和**执行**被拆成了两个独立的东西：`step()` 只做决策，"真正把 `phase_` 改掉、给 `retry_count_` 加一、调 `~/reset`"这些执行动作全部在节点侧。这个拆分是 `test_fsm.cpp` 能用手搭结构体测 19 个用例、完全不需要起节点的根本原因——不是因为凑巧测得动，是设计本身就把"可测的部分"和"必须有真实 ROS 环境才能跑的部分"物理分开了。
+
+**无论每个阶段内部的判断逻辑多复杂，`step()` 的返回值永远只落进四种形状之一**——这是设计契约的核心，也是"学设计不学实现"这句话真正该看的地方：
+
+| 形状 | 长什么样 | 出现在哪 |
+|---|---|---|
+| **停留（Hold）** | `{ in.phase, kNone, false }` | 任何阶段，判据还没满足、也没超时 |
+| **前进（Advance）** | `{ nextPhase(in.phase), kReached, false }` | 任何阶段的判据满足了，走查表得到的下一个阶段 |
+| **求救（Recover）** | `{ kRecover, <某个失败 ExitReason>, false }` | 任何阶段判定失败（超时/掉落/抓空等），统一送进同一个出口 |
+| **`kRecover` 自己的两种特殊输出** | `{ kHome, kNone, true }` 或 `{ kFailed, kRetryLimitExceeded, false }` | 只有 `kRecover` 这一个阶段会产生，别处不会 |
+
+**每个阶段"判断该走哪条路"用的证据千差万别**（几何位置、`classifyGrasp` 的抓取分类、夹爪宽度、box 相对放置区的距离），**但无论这次判断多复杂，最后落地的返回值形状永远是上面四种之一**——`task_executor_node.cpp` 只需要认识这四种形状（"阶段变了没有""要不要重试""是不是终态"），完全不需要知道某个阶段这次是靠什么证据做出判断的。这种"内部逻辑各自复杂、对外契约统一简单"的设计，正是让 [10.3](#103-fsm-的输入参数决策与消费不看-if-else-的整体形状) 那六步胶水逻辑能保持简单的原因。
+
+**重复出现的判断形状被提炼成了共享函数，不是每处各写一遍**——11 个阶段里，`HOME`/`PREGRASP`/`RETRACT`（以及 `GRASP`，`PREPLACE`/`PLACE` 兜底路径）用的都是同一种判断形状："几何到位就前进，超时就求救"，这个形状被提成一个叫 `motionStep()` 的共享函数，各阶段只需要传入"用哪个容差"这一个变化的轴。这是一种可命名、可复用的设计技巧——**把转移图里重复出现的判断形状提炼成参数化的共享函数**，而不是在每个分支里复制粘贴同一段 if/else——第3周给 `WaypointSource` 加新实现、或者以后阶段数量继续增长时，同样的技巧还能再用一次。
+
+**真正"特殊"的阶段只有 `kRecover` 一个**——`kClose`/`kLift`/`kPreplace`/`kPlace`/`kVerify` 看起来判断逻辑各不相同，但它们的判断结果**依然落进上面四种形状里的"前进"或"求救"**，只是决定走哪条路时问的问题换成了抓取/位置语义，不是纯几何。只有 `kRecover` 会产生"重试重定向"和"终态"这两种别处完全不会出现的输出——这也是为什么 [10.3.1](#1031-recover-完整机制从触发到重试到力竭此前散落在各处没有整体讲过) 把它单独拎出来整段讲：它是这套转移函数里唯一真正打破"统一四形状"这条规则（准确说是新增了两种只属于它的形状）的地方。
+
+#### 10.3.4 `requestReset()` 是节点调 service 的一般写法吗，和命令行 `ros2 service call` 有什么关系
+
+> Q: `requestReset()` 这里是其它节点调用 service 的一般写法吗？这和我们在命令行上使用 `ros2 service call` 来调用有什么区别和联系？
+
+**是，这是 rclcpp 里调用服务的标准写法之一**——`create_client<ServiceType>(name)` 建一次客户端对象，之后反复用同一个对象发请求，是节点内调用 service 的规范路径。但 `requestReset()` 具体选的是这套标准写法里**两种变体中的异步那种**，这个选择不是随意的，下面分三层讲：
+
+**第一层：两种变体，都是"标准写法"，选哪个看调用点在哪**
+
+| 变体 | 怎么写 | 调用线程会不会被卡住 |
+|---|---|---|
+| **同步阻塞** | `client->async_send_request(req)` 拿到 `future`，再调 `rclcpp::spin_until_future_complete(node, future)` | 会——当前线程原地等，直到响应到达或超时 |
+| **异步回调**（`requestReset()` 用的这种） | `client->async_send_request(req, callback)`，传一个 lambda 作为第二个参数 | 不会——`async_send_request` 立刻返回，请求发出去后当前函数继续往下走，响应到达时 callback 在**未来某次** executor 的 spin 里被调用 |
+
+**第二层：为什么 `requestReset()` 必须用异步，不能用同步阻塞**——`requestReset()` 是从 `onTimer()`（一个定时器回调）内部调用的，而 `task_executor_node` 用的是默认的**单线程 executor**：所有回调（定时器、订阅、这次服务响应）排队在同一个线程上依次执行。如果这里换成同步阻塞的 `spin_until_future_complete`，会立刻死锁——`spin_until_future_complete` 要等的那个"响应到达、完成 future"的事件，恰恰需要同一个线程继续 spin 才能被处理到，但这个线程这一刻正卡在 `spin_until_future_complete` 内部动不了。**从单线程 executor 的某个回调内部，同步阻塞地等待同一个 executor 上的另一个事件，是这套并发模型里一个经典的死锁陷阱**——这也是为什么 `requestReset()` 只能选异步回调这条路，`service_is_ready()` 检查失败时也是直接 `return`（打个警告，下次重试再看），不会等着服务变可用，同样是为了不阻塞这个线程。
+
+**第三层：和 `ros2 service call` 的关系——底层机制完全相同，只是外层包了不同的壳**——`ros2 service call` 命令本身也是一个（临时的）ROS2 节点：它临时建一个 `rclcpp`/`rclpy` 节点，对目标服务 `create_client`，发一次请求，**同步阻塞等待**（这次是安全的，因为这个临时节点除了这一件事什么都不干，没有其它回调需要同一个线程去处理，不存在死锁风险），拿到响应后打印到你的终端，然后进程退出。这正是我在这次会话里给你写的诊断探测脚本（`lift_probe.py` 的 `do_reset()`）用的同一种模式——`call_async()` + `spin_until_future_complete()`，因为那些脚本是一次性跑完就退的独立进程，跟 `ros2 service call` 是同一种"用后即抛、阻塞等结果没关系"的场景。
+
+**一张表总结这次对比涉及的三种角色**：
+
+| 角色 | 用同步还是异步 | 为什么这么选 |
+|---|---|---|
+| `ros2 service call`（命令行工具） | 同步阻塞 | 临时进程，只做这一件事，阻塞没有代价，用户就是想看到结果再退出 |
+| 本次会话写的诊断脚本（`lift_probe.py` 等） | 同步阻塞 | 同上——一次性脚本，没有其它并发任务要抢同一个线程 |
+| `task_executor_node::requestReset()` | 异步回调 | 长期运行的节点，`onTimer()` 之后还要继续正常工作（20Hz 定时器不能停），且调用点本身就在同一个 executor 的回调内部，同步阻塞会死锁 |
+
+**联系是**：三者背后调的是同一套 rclcpp 客户端 API（`create_client`/`async_send_request`），传输层走的也是同一条 DDS request/reply 通道——区别只在于"这次调用之后，这个进程/这个线程还有没有别的事要做"：没有别的事，阻塞等结果最简单（`ros2 service call`、诊断脚本）；有别的事必须继续跑（长期节点的回调内部），就只能用异步回调，把"等结果"这件事交还给 executor 自己的调度。
+
+### 10.4 为什么选状态机模型？工程实践里的适用场景与替代方案
+
+> Q: 为什么选择使用状态机模型？在工程实践中通常什么情况下会选择状态机模型？是否还存在其他的类似模型？
+
+**状态机适合的形状**：任务本身就是一串离散、顺序、数量固定的阶段，每个阶段有明确可判定的"到位"条件，失败模式可以枚举归类。Pick-and-place 正好长这个样子——`HOME→...→VERIFY` 这 10 个阶段是计划书直接给定的顺序，不需要运行时决定"接下来做哪个动作"，只需要判断"这一步做完了没"。这类任务的工程实践里，状态机几乎是默认选择：工业机器人的示教/回放模式、大多数 SCADA/PLC 控制逻辑，都是同一个形状。
+
+**状态机不够用/不该用的场景**：
+
+- **阶段数量和顺序在运行时才能确定**（比如根据感知结果动态决定先抓哪个物体、要不要先挪开障碍物）——这时候转移表会随状态数量平方级增长（"状态爆炸"），更适合**行为树（Behavior Tree）**：允许把子行为组合成树、天然支持"优先级 fallback"和并行分支，新增一种应对策略只需要接一个新子树，不需要改所有其他状态的转移表。ROS2 的 Nav2 导航栈就是用 BT.CPP 实现整个导航行为的调度层，比线性 FSM 更适合"正常路径 + N 种恢复策略"的组合爆炸。
+- **需要在连续空间里实时决策，而不是在离散阶段间跳转**（比如力控接触任务、动态避障）——这类更适合基于反馈的连续控制器（MPC）或者学习到的策略（RL policy），FSM 的离散切换在连续控制问题里会产生生硬的目标跳变，而不是这次遇到的"稳态误差"这种可以靠 ε 容差解决的问题。
+- **状态本身有层次结构**（比如"抓取"这个大阶段内部还有"接近/闭合/确认"三个子阶段，且这种嵌套在多个大阶段里重复出现）——这时候**分层状态机**（Hierarchical State Machine，ROS1 生态常见的是 SMACH/SMACC）能把重复的子状态机封成一个可复用单元，避免每个大阶段都手写一遍相同的转移逻辑。
+
+**本项目现在选 FSM 而不是 BT 的理由**：计划书本身要求的形状就是"阶段划分、到位判据、失败码分层、恢复动作"（[2.4](#24-stage-i--fsm-与-waypointsource-抽象新包-task_executor)），这恰好是 FSM 的教科书场景——阶段数量小而固定（10 个 + 1 个 `RECOVER` 环），转移逻辑目前是一条线加一个统一的恢复出口，还没有出现"多种失败需要不同应对策略"的组合复杂度。这和 [architecture.md 6.2 复用 vs 自建的判断标准](../../docs/architecture.md#62-复用-vs-自建的判断标准) 是同一类判断的另一个维度——那张表回答"这段逻辑该自己写还是调库"，这次回答"该用哪种复杂度的表达工具"，两者的共同原则都是**先用能把当前问题说清楚的最简单工具，工具明显不够用了再换**，不要提前为"可能出现的组合爆炸"设计。[10.8](#108-task_executor-的可扩展性后续步骤会替换哪些部分) 第5点已经记了一条：如果 `RECOVER` 真的需要针对不同 `ExitReason` 走不同恢复策略，到那时候可能就是"FSM 不够用了"的第一个信号。
+
+### 10.5 `WaypointSource` 接口设计：为什么现在只有一个查表实现
+
+`jointTargetFor(Phase, ObjectPose) -> JointTarget` 这个接口本周只有 `KeyframeWaypointSource` 一个实现，且这个实现**完全忽略** `object_pose` 参数——这不是接口设计早了，是计划书本身要求的顺序：本周固定物体位姿（[2.4 注意](#24-stage-i--fsm-与-waypointsource-抽象新包-task_executor) 已经写明），第3周才把手调 waypoint 换成 damped least-squares diff-IK。接口现在就定成这个形状，是让第3周那次替换只改 `WaypointSource` 的一个新实现类，`fsm.cpp`/`task_executor_node.cpp` 一行不改——`step()` 函数签名里 `target` 是作为参数传入的（由调用方从某个 `WaypointSource` 取出来），`fsm.cpp` 本身对"这个目标从哪来"毫无所知。
+
+代价是"多一层间接"：`KeyframeWaypointSource::jointTargetFor()` 里一个 12 行的 `switch` 语句，本可以直接写成 `task_executor_node.cpp` 里的一个查表数组。收益在 `test_keyframe_waypoint_source.cpp` 里已经能看到——`ObjectPoseIsIgnored` 这个测试**现在**看起来像多余的断言（"当然忽略，它是查表"），但它的价值是留一个自动化的哨兵：第3周把这个类换成/新增一个真正吃 `object_pose` 的 IK 实现时，如果有人在旧的 `KeyframeWaypointSource` 上手滑加了一条隐式依赖，这条测试会先炸，而不是等到集成测试才发现"欸这个类怎么还在用一个从没被正确传参的字段"。
+
+#### 10.5.1 这些关节数字的依据在哪：实测搜索过程（此前只在会话记录里，未落盘，这次补上）
+
+> Q: keyframe_waypoint_source 中，你提到关节查找表是实测出来的，提醒我一下依据在哪里？如果没有对应文档就加一下。
+
+依据目前分散在三处：[keyframe_waypoint_source.hpp](../../src/task_executor/include/task_executor/keyframe_waypoint_source.hpp) 头部的三点定性发现（稳态误差随重力矩变化、直接跳跃会撞飞 box、`0.03` 撑不住侧摆需要改 `0.0`）、[docs/architecture.md 第7节](../../docs/architecture.md#7-task_executor-任务状态机stage-i) 的最终数值表、以及 [10.10.5](#10105-一次独立的物理调参夹爪闭合力度不够撑不住-kpreplace-的侧向摆动) 的闭合力度排查记录。**但这三处都只有"最终结论"，没有"怎么搜出来的"这个中间过程**——按 [STUDY_NOTES_GUIDE](../../STUDY_NOTES_GUIDE.md) "实测数据优先于叙述"的纪律，这是一个真实缺口，补在这里。
+
+**方法**：写一个一次性探测脚本（订阅 `~/reset` 服务 + 发布 `~/joint_command`，起 `tf2_ros::Buffer`/`TransformListener` 查 `world→hand_tcp`），对每个候选构型：`~/reset` 回到标称位姿 → 发送候选关节角 → 等待伺服稳定（下面会看到这个等待时长本身就是一项发现）→ 读回 `/tf` 的 `hand_tcp` 世界坐标和 `~/ground_truth/object_pose`。
+
+**发现1：稳态误差需要等多久才算数**——同一个候选构型，等待时长不同，读出的 `hand_tcp` 不同：
+
+| 等待时长 | `hand_tcp` |
+|---|---|
+| 2s | `(0.7466, -0.0002, 0.2478)` |
+| 5s | `(0.7516, -0.0001, 0.2531)` |
+| 10s | `(0.7516, -0.0001, 0.2532)` |
+| 20s | `(0.7516, -0.0001, 0.2532)` |
+
+5s 之后基本不再变化——这就是 `KeyframeWaypointSource` 文档里"`>= 5 sim seconds`"这个数字的来源，不是拍脑袋定的下限。
+
+**发现2：commanded 越过某点后，实际角度完全不再变化（伺服力矩饱和）**——固定 `joint4=-2.0`，只改 `joint2` 的命令值：
+
+| 命令 `joint2` | 实测 `joint2` | `hand_tcp` |
+|---|---|---|
+| 0.9 | 0.5566 | `(0.7507, -0.0000, 0.2979)` |
+| 1.0 | 0.5566 | `(0.7507, -0.0000, 0.2979)` |
+| 1.1 | 0.5566 | `(0.7507, -0.0000, 0.2979)` |
+| 1.2 | 0.5566 | `(0.7507, -0.0000, 0.2979)` |
+
+命令从 0.9 加到 1.2，实测角度和末端位置**完全没变**——`joint2` 这个 actuator 在这个伸展姿态下已经被自身重力矩把 `forcerange` 撑满，命令再往前推没有意义。这是 `fsm.cpp` 里 `grasp_position_epsilon_rad` 要比其他阶段松一个量级的直接证据，不是为了让测试通过随便调大的容差。
+
+> Q: 这个定点过程基本上就是在暴力搜索对吗，而且只搜了 joint2 和 joint4；由于只搜了这两个点，没有像 IK 那样利用到所有的关节，所以容易触发到力矩饱和的限制，导致稳态误差大？
+
+**是暴力搜索**——手动挑候选值、发命令、等 5 秒收敛、读 `hand_tcp`，没有任何数值优化或雅可比逆解，纯靠人眼盯坐标数字试出来的。
+
+**"只搜两个关节导致更容易撞饱和"这个因果关系需要澄清一下方向**：不是"因为只搜了这两个关节，所以更容易撞上饱和"，是反过来的——**这次的目标构型（手伸向桌面附近、够到 box 的姿态）本身就需要 `joint2`/`joint4` 承担绝大部分的重力矩负载**，这是任务的几何要求决定的，不是搜索方法造成的。`joint1`（绕竖直轴转，不对抗重力）、`joint5`/`joint6`/`joint7`（负载小，MJCF 里 `forcerange` 也确实只有 ±12，远小于 `joint2`/`joint4` 继承的 ±87）在这个姿态下天然不会饱和，固定它们、只搜 `joint2`/`joint4` 是合理的简化，不是"漏搜了别的关节才导致饱和"。
+
+**但 IK vs 暴力搜索这个对比，抓到了一个更深层的真实差异**：问题不在"搜了几个关节"，在于**暴力搜索没有利用冗余自由度去分散负载**。Panda 是 7 自由度冗余机械臂，到达同一个末端位姿，理论上存在一整条零空间的关节角组合，其中一些组合可能让负载在关节间分摊得更均匀（甚至部分转移到本来空闲的关节），从而避开饱和、把稳态误差压得更小。加了零空间优化的 IK 确实能在解出末端位姿的同时顺便去找一个更省力的关节角组合——这是第3周换成 diff-IK 之后，这类"力度不够"的问题理论上会有所改善的原因，虽然这次没有验证过，第3周接入 IK 后才有意义验证。
+
+**发现3：GRASP/CLOSE 一侧最终定案的过程**（固定 `joint1=0, joint6=1.5708, joint7=-0.7853`，搜 `joint2`/`joint4`）：
+
+| `joint2`, `joint4` | `hand_tcp` |
+|---|---|
+| 0.2, -1.6 | `(0.5730, -0.0001, 0.3871)` → 定为 **PREGRASP**（悬停在 box 正上方，高度够安全） |
+| 0.3, -1.8 | `(0.5122, -0.0001, 0.2555)` |
+| 0.4, -2.0 | `(0.4749, -0.0001, 0.2357)` → 定为 **GRASP/CLOSE**（高度接近桌面 0.24，水平位置对准 box 中心 0.50） |
+| 0.5, -2.4 | `(0.6443, -0.0000, 0.2871)` |
+
+**发现4：PLACE 一侧同理**（固定 `joint1=0.62` 转到放置区角度后，搜 `joint2`/`joint4`）：
+
+| `joint2`, `joint4` | `hand_tcp` |
+|---|---|
+| 0.2, -1.6 | `(0.4914, 0.2947, 0.3871)` → 定为 **PREPLACE**（同一悬停高度，只是 x/y 换到放置区上方） |
+| 0.22, -1.65 | `(0.4632, 0.3168, 0.3548)` |
+| 0.25, -1.72 | `(0.4466, 0.3054, 0.3106)` |
+| 0.27, -1.75 | `(0.4322, 0.3084, 0.2887)` → 定为 **PLACE**（这就是 [10.10.5](#10105-一次独立的物理调参夹爪闭合力度不够撑不住-kpreplace-的侧向摆动) 里提到的、实测落点比 `place_marker` 名义位置 `(0.5, 0.3)` 少几厘米的那个数） |
+
+**这张表本身回答了"为什么 PLACE 的实际落点和视觉标记差几厘米"**：不是 bug，是"伸展越远、重力矩越大、稳态误差越大"这条规律（发现2）在水平方向的体现——`joint2`/`joint4` 每往外推一点，`hand_tcp` 的 x/y 就比线性外推的更保守一点，最终稳定在 `(0.43, 0.31)` 附近而不是 `(0.5, 0.3)`。`verify.place_x_m/place_y_m` 参数直接抄的是这次实测的落点，不是标记的名义坐标。
+
+### 10.6 到位判据为什么分层：三条独立的"等一等"，不是同一件事
+
+`FsmParams` 里有三个时间常数，`min_settle_s`、`close_settle_s`、`lift_settle_grace_s`，第一眼像是同一个"防抖"参数抄了三遍，实际回答的是三个不同的物理问题：
+
+| 常数 | 回答的问题 | 为什么不能合并 |
+|---|---|---|
+| `min_settle_s`（0.5s） | 这一 tick 读到的传感数据，是不是上一个阶段留下的旧值？ | 每次刚进入一个新阶段，`armReached()` 检查的速度分量可能因为"上一个目标已经稳定归零"而恰好也是零，跟"新目标已经到位"完全无法区分。这条对**所有**阶段通用（`motionStep` 内部）——除了 `kClose`，见下一行 |
+| `close_settle_s`（2.0s） | 夹爪这一 tick 读到的宽度/接触，是不是刚开始收紧、还没挤紧到位？ | `kClose` 是本周三个 bug 里踩得最深的一个（[10.10.3](#10103-第三个-bug夹爪刚接触-box-瞬间的-kslip-被当成ready进入-lift)）：`classifyGrasp` 在手指刚碰到 box 的瞬间就可能报 `kSlip`（宽度+接触"看起来像抓住了"），但伺服还远没挤紧，这个夹持撑不住接下来的 `kLift`。这条比 `min_settle_s` 大一个量级（2s vs 0.5s），因为要等的是伺服**收敛**，不是单纯"跳过上一个阶段的余量" |
+| `lift_settle_grace_s`（2.0s） | `armReached()` 首次持续变真的那个精确 tick，恰好撞上接触检测的一次单指假读数，怎么办？ | **原先记录的解释（"box 靠摩擦被动追赶手臂，需要将近 1 秒物理响应时间"）已被实测推翻并进一步查明确切根因**——box 高度越过成功阈值的时刻（t≈0.02s）反而比手臂自己收敛完成（t≈0.46s）早了二十多倍，不存在"box 追赶"。真正的根因（50 次实验里 1 次实测撞见，[10.10.2](#10102-第二个-bug接触检测闪烁撞上到位检查根因已查清含一次被推翻的旧结论) 有完整数据）：夹爪力度较松时，接触检测的逐 tick 抖动窗口可能长达数百毫秒，恰好覆盖住手臂收敛完成的那一刻，约 2% 概率撞车。**注意计时起点**：这条预算是从进入 `kLift` 这个阶段起算，不是从"手臂到位"那一刻起算的第二个独立计时器。健康的抓取流程大概率根本不会走到这个分支——`classifyGrasp()` 的成功判定通常在阶段刚开始不久就已经满足 |
+
+三者共同的结构是**"到位"从来不是单一时刻的判断，是要先问清楚现在这个读数值不值得信**——第1周（[week1.md 8.2](week1.md#82-sim-time-vs-wall-time以及-use_sim_time)）已经在时钟语义上撞过一次同类问题，这次是同一个教训在关节空间/接触空间的重现。
+
+### 10.7 为什么 `task_executor` 不发布/订阅一个 `GraspOutcome` 话题
+
+Stage H 结束时留了一条悬挂项（[6.1](#61-清单) 第4条）：`GraspOutcome` 只进日志，没有配套话题，因为"不知道 `task_executor` 想要整个分类结果、还是原始 `GraspSignals`"。这次的答案是**都不要，直接复用函数**：`mujoco_bridge` 已发布的四条话题——`~/ground_truth/object_pose`、`~/ground_truth/{left,right}_finger_contact`、`/joint_states`——已经是 `classifyGrasp()` 需要的全部输入，`task_executor_node.cpp` 自己在 `onTimer()` 里拼一个 `GraspSignals` 结构体，调同一个 `mujoco_bridge::classifyGrasp()`（现在是导出的库函数，见 [10.0](#100-一句话总结)），而不是等 `mujoco_bridge` 先算好再发过来。
+
+理由是**谁需要额外上下文，谁就该拥有计算权**——`classifyGrasp()` 自己承认（`grasp_criteria.hpp` 的文档）分不清"抓住但还没起飞"和"起飞后真的滑了"，这个歧义只有拥有阶段信息的调用方才能消歧（[10.10.2](#10102-第二个-bug接触检测闪烁撞上到位检查根因已查清含一次被推翻的旧结论) 就是这个消歧的具体样子：同一个 `kSlip` 结果，在 `kClose` 里读成"可以，进入下一步"，在 `kLift` 里读成"真摔了，去 `RECOVER`"）。如果让 `mujoco_bridge` 先分类好再发布，等于让不掌握阶段信息的一方替掌握阶段信息的一方做决定，结果只能是发一个粗粒度结果、下游再重新猜一遍上下文——不如直接把原始信号发出去（已经在发），分类逻辑作为一个纯函数库随时可以在任何知道自己在哪个阶段的地方调用。这也顺带解决了 Stage H 那条悬挂项：不是"话题契约现在定不出来"，是"这里根本不需要一个新话题"。
+
+#### 10.7.1 `GraspSignals`/`classifyGrasp` 为什么物理上放在 `mujoco_bridge` 包里，不是 `task_executor`
+
+> Q: 我注意到 `GraspSignals` 被放在 `mujoco_bridge` 而不是 `task_executor` 这里，我猜想原因也是：尽可能减少依赖，抓取程序的测试需要 mujoco 的 oracle 数据，所以放在 mujoco 这里可以让我们在不依赖其它节点的情况下实现抓取信号和抓取判定。（对吗）
+
+**不完全对，猜想里的因果关系反了**——"能不依赖其它节点单独测试"这件事，靠的是 [10.2](#102-纯函数层为什么不用消息类型layer-1-的message-free原则) 讲的"纯函数"性质（不碰 `mjModel`/`mjData`/`rclcpp`，只吃手搭的结构体），跟这段代码**physically 放在哪个包**没有关系。就算把 `grasp_criteria.hpp/cpp` 整个搬进 `task_executor`，只要它继续保持纯函数的形状，一样可以脱离节点独立测试——`test_grasp_criteria.cpp` 现在能测起来，不是因为它在 `mujoco_bridge` 里，是因为它是纯函数。
+
+**真实原因是历史顺序，不是刻意的依赖最小化设计**：`classifyGrasp()`/`GraspSignals` 是 Stage H 造出来的，那时候 `task_executor` 这个包**还不存在**。Stage H 造这套东西的直接目的是让 `mujoco_bridge_node` 自己在 `onTimer()` 里实时打印抓取状态（三场景手动验证，见 [9.1](#91-改动清单与验证结果)），所以它自然就长在 `mujoco_bridge` 包里——不是因为提前规划好"以后要给 task_executor 用，先放这里比较好测"，而是当时唯一的消费者就是 `mujoco_bridge` 自己。等 Stage I 造 `task_executor` 时才发现它也需要同一套分类逻辑，这时候面前有三个选择：①在 `task_executor` 里重新写一遍 `classifyGrasp()`（两份逻辑迟早会静默漂开，[CMakeLists.txt](../../src/mujoco_bridge/CMakeLists.txt) 里 `grasp_criteria` 库那段注释原话是"reimplementing classifyGrasp() a second time...having the two drift apart silently"）；②把这段代码从 `mujoco_bridge` 挪到一个两边都能依赖的中立位置；③原地导出成一个库目标，两边都链接同一份实现。选的是③，不是②——**这其实是个务实但不完美的选择**。
+
+**一个值得诚实指出的架构瑕疵**：仓库里其实已经有一个空的 [manipulation_interfaces](../../src/manipulation_interfaces) 占位包（`package.xml`/`CMakeLists.txt` 都没有，纯空目录）——如果当初把 `grasp_criteria.hpp/cpp` 放进这样一个两边都不特殊依赖的中立包，`task_executor` 就不需要在 `package.xml`/`CMakeLists.txt` 里写 `find_package(mujoco_bridge REQUIRED)`。现在的写法制造了一个有点奇怪的依赖方向：**一个任务执行节点，为了拿一段纯数学分类函数，要在构建期依赖"整个仿真桥接包"**。这和 [10.8](#108-task_executor-的可扩展性后续步骤会替换哪些部分) 表格里"话题契约不变就不用改"的说法不完全一致——话题契约层面 `task_executor` 确实不关心背后是仿真还是真机，但**构建期**它现在硬链接着 `mujoco_bridge` 这个具体包名。真到了第6周换真实驱动、`mujoco_bridge` 这个包本身可能被换掉或者不再随手起时，`task_executor` 的 `CMakeLists.txt` 会因为 `find_package(mujoco_bridge REQUIRED)` 找不到包直接编译失败——这不是"缺一次推演"，是一个已知但目前决定不修的技术债，值得记进悬挂清单。
+
+### 10.8 `task_executor` 的可扩展性：后续步骤会替换哪些部分
+
+> Q: 解释一下 `task_executor` 的扩展性体现在哪里，在后续的步骤中哪些地方会被替换掉？
+
+按"谁会被换、换了以后 `task_executor` 要不要跟着改"整理成一张表：
+
+| 会被替换的部分 | 现在是什么 | 换成什么、什么时候 | `task_executor` 要不要跟着改 |
+|---|---|---|---|
+| `WaypointSource` 的具体实现 | `KeyframeWaypointSource`：固定查表，忽略 `object_pose` | 第3周：damped least-squares diff-IK，真正读 `object_pose` 算目标 | **不改** `fsm.cpp`/`task_executor_node.cpp`——这正是 [10.5](#105-waypointsource-接口设计为什么现在只有一个查表实现) 定的接口存在的理由 |
+| `~/ground_truth/object_pose` 的发布者 | `mujoco_bridge` 直读 `xpos`/`xquat`（oracle） | 第4周：感知节点发布估计位姿 | **只要话题名/消息类型/frame 不变，不改一行**——[9.7](#97-oracle-数据的分类哪些会随项目推进消失哪些需要学习方法) 已经讨论过这条边界；如果换了话题名，只是改一处订阅参数，不是改逻辑 |
+| `~/ground_truth/{left,right}_finger_contact` | 仿真专有的接触检测 | 真机上没有这个信号（[9.7](#97-oracle-数据的分类哪些会随项目推进消失哪些需要学习方法) 已定：真机是判据设计问题，不是传感器升级问题） | **需要改**——`fsm.cpp` 里看 `bothFingersHolding()`/`classifyGrasp()` 接触信号那部分逻辑要退化成只看宽度，`grasp_criteria.hpp` 现在还没有这个"无 contact 版"的分类函数 |
+| `~/joint_command`/`~/gripper_command` 的接收者 | `mujoco_bridge_node` 直接写 `mjData::ctrl` | 第6周：真实 `ros2_control` 驱动 | **不改**——Stage E 就定的原则："这两个话题只设目标，不管执行"，`task_executor` 从一开始就只对着这个契约编程，不知道也不需要知道背后是仿真还是真机 |
+| `RECOVER` 的恢复策略 | 不区分 `ExitReason`，统一回 `kHome` 重试 | 未预定，可能在失败码分布（Stage J 的 CSV）显示某类失败重试无效时才会做 | 目前**接口已经预留、行为还没用上**：`ExitReason` 枚举已经区分了 `kTimeout`/`kSlipped`/`kPlaceMissed` 等（[fsm.hpp](../../src/task_executor/include/task_executor/fsm.hpp)），但 `kRecover` 分支对所有原因一视同仁。这是新悬挂项，已记进第6节 |
+| 物体初始位姿 | 固定（`pick_place_scene.xml` 的 `pick_place_home` keyframe） | 计划书 2.1 的下一步：随机化位置/偏航角 | `KeyframeWaypointSource` 完全忽略 `object_pose`，随机化的第一天就会立刻暴露这条短板——这正是"缺参照系"的悬挂项解锁条件（[10.5](#105-waypointsource-接口设计为什么现在只有一个查表实现) 已经指出，第3周接 IK 之后才有意义验证） |
+
+**共同的设计原则**：`task_executor` 之所以能在这么多处"不用跟着改"，是因为它从不直接依赖任何一处**实现**，只依赖三个**契约**——`WaypointSource` 接口、`mujoco_bridge` 的话题名+消息类型、`classifyGrasp()` 的函数签名。只要这三个契约不变，背后换成什么实现都和 `task_executor` 无关；一旦某处替换连契约本身也变了（比如去掉 finger contact 信号），才需要真的改 `task_executor` 的逻辑。这个边界本身不是显式设计出来的，是延续了 Stage C/D/E 已经定下的一系列"仿真专有接口用私有名/oracle 走独立话题/joint_command 只设目标不管执行"的既有原则——`task_executor` 只是这条边界的第一个真实受益者。
+
+### 10.9 实测复现：`~/gripper_command` 双发布者冲突
+
+> Q: 我注意到 `~/gripper_command` 被两个模块发布（[gripper_test.py](../../scripts/gripper_test.py) 和 `task_executor_node`），如果它们会同时发布，那么最后的混杂的消息是如何处理的？
+
+这条问题在 [6.2](#62-反向清单现在就该做的) 里已经记过一次悬挂项（Stage H："共享 `gripper_actuator_id_`，没有互斥/冲突检测"），当时是"缺一次推演"——没有真实场景触发过。这次直接跑了一次：同时起 `mujoco_bridge_node` + `task_executor_node` + `gripper_test.py`，两个客户端各自独立向 `~/gripper_command` 发消息，观察实际后果。
+
+**机制**：ROS2 的话题是多发布者/多订阅者模型，不是"一个话题只能有一个源"——订阅端收到的是**交错到达的、彼此独立的消息流**，中间没有合并、没有优先级、没有仲裁。`control_msgs/GripperCommand` 这个消息类型本身：
+
+```
+float64 position
+float64 max_effort
+```
+
+**没有 `header`，没有时间戳，没有任何字段能说明"这条消息是谁发的"**——`onGripperCommand()` 收到一条消息，唯一能做的就是全盘接受：
+
+```cpp
+data_->ctrl[gripper_actuator_id_] = (msg->position / 2.0) * gripper_ctrl_scale_;
+```
+
+这是一次无条件赋值，不是"合并"或"取平均"。两个发布者同一控制周期都发消息时，物理效果就是**最后被 `onGripperCommand()` 处理的那一条说了算**——而"哪一条最后被处理"取决于 DDS 中间件的调度和两个进程各自的发布节奏，从代码层面完全不可预测，也不会有任何日志或异常提示这件事发生过。
+
+**实测复现**（环境卫生按 [STUDY_NOTES_GUIDE 3.1](../../STUDY_NOTES_GUIDE.md) 确认后，三个节点都直接跑可执行文件/脚本，不经 `ros2 run`）：`task_executor` 进入 `CLOSE`/`LIFT` 阶段持续发送"闭合"命令的同时，`gripper_test.py` 按固定 2 秒周期独立发送开/合切换。日志对齐后看到的真实序列：
+
+```
+[gripper_test]  target: open                                                          # sim t=781.179
+[mujoco_bridge] grasp outcome -> SUCCESS (width=0.0404m box_z=0.3838m ...)             # t=781.238，box 稳定夹在半空
+[mujoco_bridge] grasp outcome -> UNEXPECTED_CONTACT (width=0.0434m box_z=0.3849m ...)  # t=781.298
+[mujoco_bridge] grasp outcome -> SUCCESS (width=0.0413m box_z=0.3759m ...)             # t=781.338
+[mujoco_bridge] grasp outcome -> UNEXPECTED_CONTACT (width=0.0434m box_z=0.3754m ...)  # t=781.388
+[mujoco_bridge] grasp outcome -> GRASP_EMPTY (width=0.0297m box_z=0.3325m ...)         # t=781.478 -- 90ms 内 width 跳水
+[mujoco_bridge] grasp outcome -> NO_OBJECT (width=0.0287m box_z=0.3230m ...)           # t=781.488
+[mujoco_bridge] grasp outcome -> UNEXPECTED_CONTACT (width=0.0310m box_z=0.3012m ...)  # t=781.508
+[mujoco_bridge] grasp outcome -> NO_OBJECT (width=0.0295m box_z=0.2755m ...)           # t=781.528 -- box 跌回桌面高度
+[task_executor] phase PREPLACE -> RECOVER: elapsed=0.20s exit=SLIPPED                  # t=781.551
+```
+
+`gripper_test.py` 的 `target: open` 一发出，`width` 在 90ms 内从 0.0434m 跳到 0.0297m——这正是伺服对新 ctrl 目标的物理响应时间，不是瞬间的（[week2.md 9.2](#92-position-servo-下夹住为什么是稳态位置误差不是力) 已经讲过这个伺服机制）。box 应声跌落（`box_z` 0.3838→0.3230→0.2755），`task_executor` 的 `fsm.cpp` 在 `PREPLACE` 阶段正确检测到高度跌破阈值，判定 `SLIPPED` 进 `RECOVER`——FSM 这一步反应是对的，但**根因**（夹爪command 被外部覆盖）从 bridge 到 FSM 全程没有一条日志指出来，只能靠下游物理状态的异常间接推断。
+
+**结论**：`gripper_test.py` 和 `task_executor_node` 不能同时对着同一个 `mujoco_bridge_node` 实例跑——这不是理论上的边界情况，是这次实测就复现的真实故障。两者都是各自独立、互不知情的合法发布者，ROS2 的话题模型本身不提供任何"排他访问"的机制；如果真的需要排他，要么靠**运行时的应用层协议**（比如加一个"当前控制权归属"的话题/参数，命令前先检查），要么把这类命令接口从 topic 换成 service/action（有返回值，能在同一时刻拒绝第二个调用者），要么最朴素地靠**人工纪律**（写清楚"这两个东西不能同时开"，就像现在这样）。这次复现把 [6.2](#62-反向清单现在就该做的) 那条悬挂项转正为一个已确认的真实约束，记进下面的失败模式表。
+
+### 10.10 排查记录：三个连续 bug，都是跑起来才炸出来的
+
+**背景**：这个 stage 是自主实现，中间没有走 STUDY_NOTES_GUIDE 常规的"用户提问→讲解"流程。但仍然完整走了"写代码 → build + 实跑验证"这一步——三个 bug 全部是在**真的跑一次完整 episode** 这一步暴露的，纯读代码/纯看单测通过看不出任何异常（三个 bug 出现前，`test_fsm` 全部 16 个原始用例都是绿的）。这恰好印证了 [STUDY_NOTES_GUIDE 3](../../STUDY_NOTES_GUIDE.md) 定的第2步"不是编译通过就算完"——这次连"单测全绿"也不够,必须接一次真实的 `mujoco_bridge` + `task_executor` 联调。
+
+#### 10.10.1 第一个 bug：`kRecover → kHome` 的重试转移被 `exit_reason == kNone` 误判成"没有发生"
+
+**现象**：第一次跑完整流程，`LIFT → RECOVER` 之后日志永远停在这一行，`task_executor_node` 既不重试也不报错，进程仍在跑（`ps` 正常），但没有任何后续日志——比"卡死"更隐蔽，因为进程状态看起来完全正常。
+
+**线索**：`fsm.cpp` 的 `kRecover` 分支：
+
+```cpp
+case Phase::kRecover:
+  if (in.retry_count < params.max_retries) {
+    return {Phase::kHome, ExitReason::kNone, true};
+  }
+```
+
+`kRecover → kHome` 这条转移本身**故意**标成 `ExitReason::kNone`——它是个重定向而不是一个失败结果，`kNone` 用来表示"这不是一个需要向用户解释的退出原因"。但 `task_executor_node.cpp` 的早退条件写的是：
+
+```cpp
+if (decision.exit_reason == ExitReason::kNone) {
+  return;  // Still in progress; nothing to log or transition.
+}
+```
+
+`kNone` 同时被两种情况复用：`step()` 还没做出决定（阶段没变）**和** `step()` 做出了决定但决定被标成"不是失败"（阶段变了）。这段判据把两者混为一谈，选错了那个更常见、更容易先测到的情况，直到联调才暴露被选错的那个分支。
+
+**修复**：改成比较阶段是否真的变了：
+
+```cpp
+if (decision.next_phase == phase_) {
+  return;  // Still in progress; nothing to log or transition.
+}
+```
+
+**留下的经验**：`FsmDecision` 里 `exit_reason` 和 `next_phase` 是两个独立的维度（"发生了什么"和"要不要继续走"），却只用其中一个字段做流程控制判据——这类"一个字段身兼两职"的设计，字段的两种用法总有一种是调用方没考虑到的，教训和 [8.8](#88-排查记录keyframe-名字冲突与长度不匹配是两件独立的事结论被推翻) 的"两个检查看起来像同一件事，实际是独立的"是同一类。
+
+#### 10.10.2 第二个 bug：接触检测闪烁撞上到位检查（根因已查清，含一次被推翻的旧结论）
+
+这一节记录四层内容，严格分开：**①事实**（现象和最初的实测数据）、**②被推翻的旧结论**（明确标记为错，留作教训）、**③排查过程**（两轮实验，含一次方法论错误）、**④确认的根因**（有实测证据支撑的最终结论）。
+
+**① 事实：现象**
+
+修完第一个 bug（[10.10.1](#10101-第一个-bugkrecover--khome-的重试转移被-exit_reason--knone-误判成没有发生)）后重新跑，流程能往前走了，但每次都在 `LIFT → RECOVER`（`exit=SLIPPED`）失败，不能继续到 `PREPLACE`。加上 `lift_settle_grace_s`（2.0s）之后，这条失败路径不再触发。
+
+**② 被推翻的旧结论**
+
+> ~~查同一时间窗口的日志，`box_z` 在持续上升（0.26→0.37），据此推断"box 靠摩擦力被夹爪带起来，不是刚性绑死在手上，手臂停止移动后 box 还要花将近 1 秒才能追上新高度"，`lift_settle_grace_s` 是给这段物理追赶时间留出的余量。~~
+
+这段话唯一的依据是两个日志时间窗口大致重叠，**从没有对着逐 tick 数据核实过谁先谁后**。用户追问"这是打滑吗""是网络延迟吗"，逼着回去重新实测才发现顺序是反的：写探测脚本逐 tick 记录 `joint2`/`joint4` 位置+速度、box 高度、接触布尔值，4 次重复实验一致显示 box 高度越过成功阈值（t≈0.02s）比手臂完成收敛（t≈0.46s）早了二十多倍——box 是**先**到的，根本不存在"box 追赶手臂"。
+
+**③ 排查过程：两轮实验**
+
+**第一轮尝试（方法论错误，作废）**：想通过快速重启 `task_executor_node` 进程 25 次来批量制造失败样本，3/25 出现"失败"，但逐条检查发现全部是假的——新进程的 `~/reset` 客户端还没和 `mujoco_bridge` 完成 DDS 发现就抢先发了复位请求（日志有 `~/reset not available yet` 警告），静默失败，box 停在上一轮 `PLACE` 的终点，后续抓空是必然的，跟 `kLift` 这个 bug 毫无关系。**这是一个真实但完全不同的问题**（连续 episode 之间的启动竞态），已记入 [6.1 悬挂清单](#61-清单)，不是这次答案。
+
+**第二轮实验（不重启进程，30 次独立 `CLOSE→LIFT` 循环，直接照抄 `classifyGrasp`/`armReached` 公式复现判据）**：全部使用**当前**的夹爪闭合命令 `grip(0.0)`（`KeyframeWaypointSource` 现在的值），结果 30/30 手臂到位那一刻分类结果都是 `kSuccess`，一次撞车都没有。更细的追踪（记录接触回调的原始时间戳）显示：接触闪烁只发生在 t≈0.05~0.08s（抓取刚建立的瞬间），到 t≈0.09s 就彻底稳定为 `True/True`——而 `armReached()` 变真在 t≈0.46s，比闪烁结束晚了将近 0.4 秒，**这两个窗口根本不重叠**，假说 A（接触闪烁撞车）在这个条件下不成立。
+
+**关键的转折点（用户追问带来的洞察）**：用户问"这么干脆的抓取，怎么会撞上 `min_settle_s` 都防不住的失败"，逼着重新核对实验条件——才意识到 `grip(0.0)` 是 [10.10.5](#10105-一次独立的物理调参夹爪闭合力度不够撑不住-kpreplace-的侧向摆动) 才改过来的**较新、较紧**的力度；而按 bug 发现的时间顺序，**这次 `kLift` bug（bug #2）比夹爪力度调参（bug #5）先被发现**——也就是说，原始 bug 触发时，夹爪闭合命令用的是**更早、更松**的 `grip(0.03)`（"比 box 窄一点"的常规写法），不是现在这个更紧的 `0.0`。之前的复现实验从一开始就用错了物理条件。
+
+**用正确的历史条件重新实验**：把探测脚本的夹爪命令改回 `grip(0.03)`，重复相同的 30 次流程，追踪接触闪烁的真实持续时长——**闪烁窗口从 t≈0.09s 结束，大幅拉长到 t≈0.8~0.9s 才结束**（10 次样本里 8 次），和之前 `0.0` 力度下"瞬间稳定"的表现完全不同：较松的挤压力度让接触本身在整个抬升过程中都不稳定，不是只在最初瞬间抖一下。
+
+**④ 确认的根因**
+
+把样本量加到 50 次（`grip(0.03)`），逐个核对"`armReached()` 首次持续变真的那个精确 tick，双指是否同时接触"——**第 47 次实验里真的撞车了**：
+
+```
+t=0.4519  right_finger_contact 变为 False
+t=0.4619  right_finger_contact 变回 True     <- 只持续了约 10ms 的假读数窗口
+armReached() 首次持续变真的时刻：t=0.4618   <- 精确落在这个假读数窗口内
+```
+
+这一刻 `left_finger_contact=True`、`right_finger_contact=False`，`both_fingers_touch` 为假，`classifyGrasp()` 不会报 `kSuccess`（不管宽度条件是否满足）——**这正是假说 A 描述的机制，第一次拿到了真实数据**：`armReached()` 的到位判断和接触检测的逐 tick 抖动是两个独立采样的信号，在这次夹爪力度较松（`0.03`）的条件下，接触闪烁窗口被拉长到能覆盖住手臂收敛完成的时刻，50 次里撞上 1 次（约 2% 概率）——低概率但真实存在，和"Stage I 排查时真实撞上过一次、之后很难再复现"这个历史描述完全吻合。
+
+**假说 B（手臂自身瞬时假到位）在这两轮实验（共 84 次独立试验）里从未被观察到**——手臂的收敛过程每次都是一次性、干净地进入稳定状态。不能说这个假说被彻底排除（可能需要更容易产生振荡的场景才会出现），但这次的证据全部指向假说 A。
+
+**为什么原来的推翻实验（4 次，用 `0.0` 力度）什么都没测到**：不是运气不好，是**从物理条件上就不可能撞车**——`0.0` 力度下闪烁在 t≈0.09s 就已经彻底停止，远早于手臂 t≈0.46s 收敛完成，两个窗口不重叠，撞车的必要条件都不满足。这次的 84 次实验分成"新力度 0.0"（34 次，0 次撞车）和"旧力度 0.03"（50 次，1 次撞车）两组，直接对比出了力度松紧对闪烁持续时长的影响。
+
+**当前修复为什么依然是对的**：`lift_settle_grace_s`（2.0s）——给足够多次独立的 tick 机会，等一次干净的读数——对这个已确认的机制完全对症：一次约 10ms 的假读数窗口，2 秒的预算里有大把机会等到下一次读到 `kSuccess`。**这个数字本身依然是"远超所需但凑巧够用"**：需要覆盖的只是一次接触闪烁的窗口（毫秒级），不是任何物理追赶过程，2.0s 这个量级没有被精确校准过，只是留了足够宽裕的余量。
+
+```cpp
+if (arm_at_lift_height && in.elapsed_in_phase_s > params.lift_settle_grace_s) {
+  return {Phase::kRecover, ExitReason::kSlipped, false};
+}
+```
+
+**现在能明确回答的问题——真正的修复方向该往哪走**：既然根因确认是"夹爪力度较松时，接触检测的逐 tick 抖动窗口变长，可能撞上到位检查"，`lift_settle_grace_s` 这种"拖时间等一次干净读数"的方案是**在消费端兜底**，没有解决"接触信号为什么会抖这么久"这个源头问题。更彻底的修复方向：① 现在 `KeyframeWaypointSource` 已经用了更紧的 `0.0` 力度（[10.10.5](#10105-一次独立的物理调参夹爪闭合力度不够撑不住-kpreplace-的侧向摆动) 出于另一个独立原因做的调整），这本身就顺带压缩了闪烁窗口，降低了撞车概率，但没有归零；② 真正对症的方向是给接触信号本身做去抖动（连续 N 个 tick 一致才采信），但这条信号在真机上根本不存在（[week2.md 9.7](#97-oracle-数据的分类哪些会随项目推进消失哪些需要学习方法)），投入在它身上不服务于"逼近真机"这个项目目标；③ 更值得投入的方向是实现一个真机同款的"宽度-only"抓取判据（不依赖接触信号，只看稳态宽度误差，[week2.md 9.7](#97-oracle-数据的分类哪些会随项目推进消失哪些需要学习方法) 已经指出这是 `franka_gripper` 的标准做法），这样既绕开了这次的抖动问题，又是一份不管有没有真机都有意义的投入——这个方向已经记进 [6.1 悬挂清单](#61-清单)，作为比"给接触信号去抖动"更优先的选项。
+
+**留下的经验**：
+
+1. **"两个现象发生在同一个大致的时间窗口"不等于"一个导致了另一个，顺序是我猜的那样"**——第一次推翻旧结论靠的就是这一条。
+2. **复现实验必须先核对物理条件和原始 bug 发生时是否一致，不能想当然用"现在的"配置去复现"过去的"bug**——这次的转折点正是发现"当前用的夹爪力度是后来才调整的，不是原始 bug 发生时的条件"，这条本该在设计第一轮复现实验时就想到，却是被用户追问逼出来的。
+3. **小概率事件需要足够的样本量才能被观测到**——1/50 的概率，用 4 次或 10 次实验都不可能可靠地看到，需要有意识地把样本量提到能覆盖目标概率量级的规模。
+
+#### 10.10.3 第三个 bug：夹爪刚接触 box 瞬间的 `kSlip` 被当成"ready，进入 LIFT"
+
+**现象**：修完前两个 bug，流程能到 `PREPLACE`，但 `PREPLACE → RECOVER`（`exit=SLIPPED`）几乎每次必炸；即使把判据从"瞬时双指接触布尔值"改成"box 高度是否仍在阈值之上"（见下一条 bug）之后，**仍然**偶发失败。
+
+**线索**：把 `kClose → kLift` 的转移时间戳和 box 高度对齐看：
+
+```
+CLOSE -> LIFT: elapsed=0.50s exit=REACHED   # 第一次尝试，close_settle_s 还不存在
+```
+
+只等了 0.5s（当时用的是通用的 `min_settle_s`）就判定"抓住了，可以进 `kLift`"。但 `classifyGrasp()` 报 `kSlip`（宽度+双指接触已经"看起来像抓住了"）的那一刻，伺服可能才刚刚开始收紧——`onGripperCommand` 写的是目标 ctrl，位置伺服达到这个目标需要真实时间，不是一个 tick 就到。半秒钟的夹持力还远没到稳态，接下来立刻抬起、再立刻做 `kPreplace` 需要的关节1旋转（一个侧向摆动），marginal 的夹持力扛不住这个额外的横向扰动。
+
+**修复**：给 `kClose` 单独配一条比 `min_settle_s` 大一个量级的 `close_settle_s`（2.0s）——`kClose`不再是"读到 kSlip/kSuccess 立刻走"，是"读到 kSlip/kSuccess **并且**已经在这个阶段停留够久"才走：
+
+```cpp
+if ((outcome == GraspOutcome::kSuccess || outcome == GraspOutcome::kSlip) &&
+  in.elapsed_in_phase_s >= params.close_settle_s)
+```
+
+**这个修复本身还不够**，配合它一起解决问题的是下面这条独立的 bug（10.9.4）——两个问题表面症状相同（都在 `PREPLACE`/`kLift` 之后掉落），根因却完全不同，是排查中第二次撞见"表面相似、根因独立"的情况（第一次是 [8.8](#88-排查记录keyframe-名字冲突与长度不匹配是两件独立的事结论被推翻) 的 keyframe 名字冲突 vs 长度不匹配）。
+
+#### 10.10.4 第四个（独立）问题：`kPreplace`/`kPlace` 的掉落判据看瞬时接触布尔值，被接触检测噪声误判
+
+**现象**：即使加了 `close_settle_s`，`PREPLACE → RECOVER (SLIPPED)` 仍然频繁出现，且时间点很早（`elapsed≈0.1~0.25s`，远早于任何超时）。
+
+**线索**：这不是新现象——[9.1](#91-改动清单与验证结果) 早就记录过（当时是在讲抓取判据，不是讲 FSM）：`classifyGrasp` 在一次完全稳定的持握过程中，日志显示 `SUCCESS`/`UNEXPECTED_CONTACT` 逐 tick 交替，因为 `bodiesInContact()`（[9.4](#94-mjcontact-与-bodiesincontact接触检测怎么工作)）每个物理步都从零重新生成接触列表，单指的接触检测本身就有逐 tick 的抖动，不代表真的松开过。`fsm.cpp` 最初的 `kPreplace`/`kPlace` 判据：
+
+```cpp
+if (!bothFingersHolding(in.grasp_signals)) {
+  return {Phase::kRecover, ExitReason::kSlipped, false};
+}
+```
+
+直接拿这个逐 tick 会抖动的布尔值当"掉了没掉"的判据，等于把接触检测的噪声原样透传成了假摔判定——box 明明还端端正正抬在半空，只因为这一 tick `right_finger_contact` 恰好读到 `false`，就立刻宣判失败。
+
+**修复**：改用连续量 `box_height_m`（是否仍在 `lift_height_threshold_m` 之上），而不是瞬时布尔值：
+
+```cpp
+if (in.grasp_signals.box_height_m < params.grasp_criteria.lift_height_threshold_m) {
+  return {Phase::kRecover, ExitReason::kSlipped, false};
+}
+```
+
+高度是积分出来的连续量，不会像逐 tick 重新生成的接触列表那样有相同幅度的高频噪声——真摔的时候，高度会持续跌落，不是单 tick 闪一下。
+
+**留下的经验**：这是 [9.4](#94-mjcontact-与-bodiesincontact接触检测怎么工作) 早就写明的性质（"`mjContact` 每步重新生成，不是持久状态"）在下游被忽视的一次具体案例——知道一个信号有噪声，和在设计判据时真的把这条知识用上，是两件事。`classifyGrasp()` 内部对同一个噪声源是稳健的（它同时看宽度+双指接触+位置三个信号，噪声只在其中一维出现时不会翻转整体结论），但 `task_executor` 这里绕过 `classifyGrasp()` 单独看接触布尔值时，重新引入了同一个坑。
+
+#### 10.10.5 一次独立的物理调参：夹爪闭合力度不够，撑不住 `kPreplace` 的侧向摆动
+
+**现象**：修完上述四个逻辑 bug 后，`PREPLACE → RECOVER` 仍偶发（不是必然）——`box_height_m` 判据显示 box 是**真的**掉了，不是误判。
+
+**排查**：手动复现 `HOME→PREGRASP→GRASP→CLOSE→LIFT→PREPLACE` 这条路径，逐步改变夹爪闭合命令的 `position` 字段对比：命令 `position=0.03`（比 box 宽度 0.04m 窄 1cm，"narrower than the box"的常规写法）能撑住纯垂直的 `kLift`，但撑不住 `kPreplace` 需要的 `joint1` 旋转（一次侧向摆动）——实测看到接触从双指变成单指、box 绕着剩下的接触点转出去，最后跌回桌面。命令 `position=0.0`（伺服朝着"完全闭合"尽力去推，被 box 挡住后停在比 0.03 更紧的挤压力度）能稳定撑过同一段侧向摆动，一路验证到 `kPlace`→松开→`box` 落在 `(0.42, 0.31)`附近（正是 `verify.place_x_m/place_y_m` 期望的区域）。
+
+**结论写进** [KeyframeWaypointSource](../../src/task_executor/include/task_executor/keyframe_waypoint_source.hpp) 的 `kClosedWidthM`：由 `0.03` 改成 `0.0`。这不是逻辑 bug，是一次纯物理调参——"narrower than the box" 这个写法本身没错（[9.2](#92-position-servo-下夹住为什么是稳态位置误差不是力) 讲过的稳态误差机制依然成立），只是 1cm 的挤压余量在承受横向扰动时不够。
+
+**留下的经验**：这条呼应 [6.1](#61-清单) 里"`lift_height_threshold_m`/`region_radius_m` 目前是猜的，缺一次真正抬起来的轨迹作对照"——这次终于有了那条轨迹（`box_z` 从 0.24 稳定升到 0.40 再降到 0.24 落地），阈值本身（`0.26`）在这次实测里够用，没有必要跟着改；改的是**产生这条轨迹所需的输入**（夹爪力度），不是判据本身。
+
+### 10.11 失败模式与验证手段
+
+| 失败模式 | 现象 | 怎么发现/防住 |
+|---|---|---|
+| `kRecover→kHome` 的重定向被判据误认成"没有转移" | FSM 卡在 `RECOVER`，进程正常但永远不重试，没有任何报错 | 真实联调才暴露；已改用 `next_phase == phase_` 判断是否发生转移，不看 `exit_reason` |
+| `kLift` 一到位就问 `classifyGrasp()`，接触检测的逐 tick 抖动恰好撞上就误判摔落 | `armReached()` 一到位立刻判 `kSlipped`，即使抓取本身正常。确认根因（[10.10.2](#10102-第二个-bug接触检测闪烁撞上到位检查根因已查清含一次被推翻的旧结论)）：50 次实验里 1 次实测撞见——`armReached()` 首次持续变真的精确 tick，恰好落进一次约 10ms 的单指接触假读数窗口 | `lift_settle_grace_s`（2s）+ `test_fsm.LiftGivesTheBoxTimeToCatchUpBeforeCallingItSlipped`（测试名字保留了旧叙述，行为断言仍然有效——见该测试小节的说明） |
+| `kClose` 一读到 `kSlip`/`kSuccess` 立刻进 `kLift`，夹持力还没收紧到位 | 半秒的夹持力扛不住紧接着的抬起+侧摆 | `close_settle_s`（2s）+ `test_fsm.CloseDoesNotAdvanceOnSlipBeforeCloseSettleS` |
+| `kPreplace`/`kPlace` 用瞬时双指接触布尔值判掉落 | 接触检测本身逐 tick 抖动（[9.4](#94-mjcontact-与-bodiesincontact接触检测怎么工作) 早记录过），被误判成真摔 | 改用连续量 `box_height_m` + `test_fsm.PreplaceToleratesMomentaryFingerContactFlickerWhileStillHeldAloft` |
+| 夹爪闭合力度不够，撑不住 `kPreplace` 的侧向摆动 | 纯垂直 `kLift` 能撑住，加一次旋转就掉 | 手动逐步复现找到阈值（[10.10.5](#10105-一次独立的物理调参夹爪闭合力度不够撑不住-kpreplace-的侧向摆动)），`kClosedWidthM` 改成完全闭合命令 |
+| `RECOVER` 耗尽重试次数后是否真的会停 | 若卡死或假装成功，20 次连跑（Stage J）会产出没有意义的数字 | 已用人为不可达的 `verify.place_x_m/y_m` 制造 3 次必然失败，确认 `RECOVER→HOME` 重试 3 次后正确落到 `FAILED` 并停止发布命令（[10.1](#101-改动清单与验证结果) 末尾） |
+| 两个独立发布者同时写 `~/gripper_command` | 90ms 内 width 从 0.0434m 跳到 0.0297m，box 从半空跌落，无任何冲突日志 | 实测复现（[10.9](#109-实测复现gripper_command-双发布者冲突)）；`GripperCommand` 无 header，订阅端无法分辨来源，只能靠人工纪律"两者不同时跑" |
+
+### 10.12 你没问但值得注意的
+
+按 [STUDY_NOTES_GUIDE 第5节](../../STUDY_NOTES_GUIDE.md) 的固定职责，这几条本 stage 尚未讨论：
+
+1. **`close_settle_s`/`lift_settle_grace_s` 这两个 2 秒的数字是怎么定的？**（D 类，缺参照系，先记不深挖）——目前是"改到实测稳定通过为止"，不是从物理量（伺服带宽、box 质量/摩擦系数）推出来的。一旦第3周把 `KeyframeWaypointSource` 换成 IK 驱动的连续轨迹（不再是"发一个目标、等着收敛"这种离散跳变），这两个常数的物理含义会整体改变，现在的数值不能直接照搬过去。
+2. **`box_height_m < lift_height_threshold_m` 这条判据本身也是瞬时读数，为什么就不会像接触布尔值一样抖动？**（E/C 类，值得追问但本 stage 没有专门验证）——理由在 [10.10.4](#10104-第四个独立问题kpreplacekplace-的掉落判据看瞬时接触布尔值被接触检测噪声误判) 里给了直觉解释（连续量 vs 逐 tick 重新生成的离散量），但没有像 `frame_math`/`state_ops` 那样写一个 gtest 去量化"这条连续量的物理噪声幅度到底有多大，会不会在更剧烈的运动下也开始抖动到跨过阈值"。
+3. **`task_executor_node.cpp` 完全没有单测**（E 类，延续 Stage F 定的纪律）——`fsm.cpp`/`keyframe_waypoint_source.hpp` 该测的都测了，节点胶水本身（读话题、拼 `FsmInputs`、发命令）刻意留白，理由和 [2.1.1](#211-这类系统该怎么测四层本周只取前两层) 第3条一致（"不给 `onTimer` 造 mock"），但这次它比 `mujoco_bridge_node.cpp` 的胶水层更厚——`extractArmState()`/`extractGripperWidth()` 这两个从 `sensor_msgs::msg::JointState` 里按名字找索引的函数，逻辑上已经接近可以剥成纯函数（输入一个 `JointState`，输出 `optional<ArmState>`），目前没有剥，是否值得剥值得下次讨论。
+4. **`WaypointSource` 只有一个实现时，这层抽象的"多一层间接"的代价现在体现在哪？**（B 类，权衡类问题，尚未展开）——`task_executor_node.cpp` 每个 tick 都要构造一次 `ObjectPose` 结构体传给 `jointTargetFor()`，即使 `KeyframeWaypointSource` 完全不看它；这是为第3周预留接口付的一点点运行时和代码复杂度成本，值不值得，要等第3周真的换实现时才能回答。

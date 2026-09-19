@@ -35,11 +35,11 @@
 
 | 标签 | 涉及的问答 |
 |---|---|
-| `#cpp_语言组织机制` | [namespace 与匿名 namespace](#namespace-与匿名-namespace)、[class 基础（以 MujocoBridgeNode 为例）](#class-基础以-mujocobridgenode-为例)、[头文件声明 vs .cpp 定义、无命名空间的 C 类型](#头文件声明-vs-cpp-定义无命名空间的-c-类型)、[单例初始化用匿名 lambda 的原因](#单例初始化用匿名-lambda-的原因)、[resolve 模板与 dlopen/dlsym](#resolve-模板与-dlopendlsym) |
-| `#cpp_更安全的默认写法` | [namespace 与匿名 namespace](#namespace-与匿名-namespace)、[class 基础（以 MujocoBridgeNode 为例）](#class-基础以-mujocobridgenode-为例)、[并发：data race 是 UB，以及为什么不要提前加锁](#并发data-race-是-ub以及为什么不要提前加锁) |
+| `#cpp_语言组织机制` | [namespace 与匿名 namespace](#namespace-与匿名-namespace)、[class 基础（以 MujocoBridgeNode 为例）](#class-基础以-mujocobridgenode-为例)、[头文件声明 vs .cpp 定义、无命名空间的 C 类型](#头文件声明-vs-cpp-定义无命名空间的-c-类型)、[单例初始化用匿名 lambda 的原因](#单例初始化用匿名-lambda-的原因)、[resolve 模板与 dlopen/dlsym](#resolve-模板与-dlopendlsym)、[虚函数与多态：以 `WaypointSource` 为例](#虚函数与多态以-waypointsource-为例)、[`static constexpr`：类作用域下的编译期常量](#static-constexpr类作用域下的编译期常量) |
+| `#cpp_更安全的默认写法` | [namespace 与匿名 namespace](#namespace-与匿名-namespace)、[class 基础（以 MujocoBridgeNode 为例）](#class-基础以-mujocobridgenode-为例)、[并发：data race 是 UB，以及为什么不要提前加锁](#并发data-race-是-ub以及为什么不要提前加锁)、[虚函数与多态：以 `WaypointSource` 为例](#虚函数与多态以-waypointsource-为例)、[`static constexpr`：类作用域下的编译期常量](#static-constexpr类作用域下的编译期常量) |
 | `#cpp_所有权明确化` | [class 基础（以 MujocoBridgeNode 为例）](#class-基础以-mujocobridgenode-为例)、[头文件声明 vs .cpp 定义、无命名空间的 C 类型](#头文件声明-vs-cpp-定义无命名空间的-c-类型) |
 | `#cpp_设计模式` | [单例初始化用匿名 lambda 的原因](#单例初始化用匿名-lambda-的原因) |
-| `#cpp_泛型与抽象增强` | [resolve 模板与 dlopen/dlsym](#resolve-模板与-dlopendlsym) |
+| `#cpp_泛型与抽象增强` | [resolve 模板与 dlopen/dlsym](#resolve-模板与-dlopendlsym)、[虚函数与多态：以 `WaypointSource` 为例](#虚函数与多态以-waypointsource-为例) |
 | `#cpp_并发与内存模型` | [并发：data race 是 UB，以及为什么不要提前加锁](#并发data-race-是-ub以及为什么不要提前加锁) |
 | `#cpp_资源自动管理` | [并发：data race 是 UB，以及为什么不要提前加锁](#并发data-race-是-ub以及为什么不要提前加锁) |
 
@@ -50,6 +50,8 @@
 - [头文件声明 vs .cpp 定义、无命名空间的 C 类型](#头文件声明-vs-cpp-定义无命名空间的-c-类型)
 - [单例初始化用匿名 lambda 的原因](#单例初始化用匿名-lambda-的原因)
 - [resolve 模板与 dlopen/dlsym](#resolve-模板与-dlopendlsym)
+- [虚函数与多态：以 `WaypointSource` 为例](#虚函数与多态以-waypointsource-为例)
+- [`static constexpr`：类作用域下的编译期常量](#static-constexpr类作用域下的编译期常量)
 - [并发：data race 是 UB，以及为什么不要提前加锁](#并发data-race-是-ub以及为什么不要提前加锁)
 - [待补充问答模板](#待补充问答模板)
 
@@ -379,6 +381,111 @@ void resolve(void * handle, const char * symbol, FuncPtr & out)
 跟正常链接对比：正常链接下，"查符号表、拿地址"是**链接器在编译期**做的，一次性焊死调用点；这里是把同一个动作挪到了**运行时**，用 `dlopen`+`dlsym` 手动做一遍——查到的还是**同一个符号、同一份机器码**，只是查的时机和方式变了，多了一步"裸地址转带类型函数指针"。所以本质上确实就是"把共享库里的同名函数接过来"，只是这次是运行时手动接线，而不是编译期焊死。
 
 **失败路径**：符号名字打错、或库升级后符号被删/改名，`dlsym` 返回 `nullptr`，`resolve` 立刻 `throw`。因为这发生在 `static MujocoApi api = []() { ... }();` 的 lambda 初始化表达式内部——按 C++ 标准，静态局部变量初始化中途抛异常，这次初始化被视为"没有发生过"，下次调用 `loadMujocoApi()` 会重新尝试整个初始化过程（呼应 [单例初始化用匿名 lambda 的原因](#单例初始化用匿名-lambda-的原因) 的 `static` 单例初始化保证）。
+
+---
+
+### 虚函数与多态：以 `WaypointSource` 为例
+
+`#cpp_泛型与抽象增强` `#cpp_语言组织机制` `#cpp_更安全的默认写法`
+
+> Q: 你在 `WaypointSource` 里使用了 `virtual` 关键字，我不太了解虚函数相关的知识，请你讲解其知识，并且说明为什么这里要用 `virtual`？
+
+**1. 没有 `virtual` 时，调用哪个函数是编译期定死的**
+
+```cpp
+struct Base { void f() { /* Base 版本 */ } };
+struct Derived : Base { void f() { /* Derived 版本 */ } };
+
+Base * p = new Derived();
+p->f();  // 调用哪个 f()？
+```
+
+普通（非 `virtual`）成员函数的调用地址在**编译期**就写进了机器码——编译器只看指针 `p` 的**静态类型**（代码里写的类型，`Base *`），完全不管它运行时实际指向什么。上面这段代码会调用 `Base::f()`，即使 `p` 实际指向一个 `Derived` 对象——这通常不是调用方想要的结果，却是没有 `virtual` 时的默认行为，是个常见陷阱。
+
+**2. `virtual` 把这个决定推迟到运行期**
+
+```cpp
+struct Base { virtual void f() { /* ... */ } };
+```
+
+一个类只要声明了至少一个 `virtual` 函数，它的每个对象在内存里就多带一个隐藏指针（vptr），指向一张按类生成的函数地址表（vtable）。调用 `p->f()` 时，编译器生成的代码变成"先查 `p` 指向对象的 vptr，再从表里取出 `f` 这一槏对应的实际地址，跳过去"——这叫**动态绑定**（运行期才决定调用哪个版本），是"运行期多态"的实现机制。这次是 `p` 实际指向的**动态类型**（`Derived`）说话，不是声明时的静态类型。
+
+**3. `WaypointSource` 用的是纯虚函数（`= 0`），意味着"这是一个接口"**
+
+```cpp
+class WaypointSource
+{
+public:
+  virtual ~WaypointSource() = default;
+  virtual JointTarget jointTargetFor(Phase phase, const ObjectPose & object_pose) const = 0;
+};
+```
+
+`= 0` 告诉编译器"这个函数在 `WaypointSource` 这一层没有函数体，必须由派生类提供"——同时把 `WaypointSource` 变成**抽象类**：不能 `new WaypointSource()`（编译器直接拒绝，因为它有未实现的虚函数），只能通过某个真正实现了 `jointTargetFor()` 的派生类（如 `KeyframeWaypointSource`）来用。一个只有纯虚函数、没有数据成员的类，就是 C++ 里写"接口"的标准方式——没有专门的 `interface` 关键字，`class` + 纯虚函数就是等价物。
+
+**4. 为什么 `task_executor` 这里要用这套机制**
+
+调用方（`task_executor_node.cpp`）想表达的是"给我一个能回答 `jointTargetFor()` 的东西，我不关心它具体怎么算的"。这正是虚函数/多态解决的问题——[week2.md 10.5](../my_study/week2.md#105-waypointsource-接口设计为什么现在只有一个查表实现) 已经讲过设计动机（第3周要把 `KeyframeWaypointSource` 换成 diff-IK 实现，`fsm.cpp`/`task_executor_node.cpp` 不用改），这里补语言机制那一半：如果不用虚函数/继承，"换一个实现"就没有对应的语言机制可以表达——要么把两套逻辑都写死在同一个函数里用 `if`/`switch` 分支切换（改动一处就要碰这整个函数），要么每次换实现都得把所有调用点的类型名手改一遍。有了这套接口，调用点看到的类型永远是 `WaypointSource`，具体是哪个派生类只在**构造**那一行决定。
+
+**当前代码的一个诚实的注记**：`task_executor_node.cpp` 目前是 `KeyframeWaypointSource waypoint_source_;`——直接持有具体类型的对象，不是指针/引用/`unique_ptr<WaypointSource>`。这种写法下，编译器在调用点已经知道静态类型就是 `KeyframeWaypointSource`，可以走静态绑定（甚至可能被优化器"去虚化"），虚函数机制此刻并没有真正被用上。它的价值是**面向第3周**：一旦这一行换成 `std::unique_ptr<WaypointSource> waypoint_source_ = std::make_unique<DiffIkWaypointSource>(...);`（具体类型由运行期的某个决定挑选），多态才真正发生。这是"接口先立好、当前只有一个实现"的常见模式（经典说法是**策略模式**/依赖倒置：调用方依赖一个抽象接口，不依赖具体实现），跟 week2.md 10.5 讨论"多一层间接的代价"是同一件事的两个侧面——那里讲的是工程取舍，这里讲的是这个取舍靠哪个语言机制落地。
+
+**5. 析构函数为什么也要 `virtual`**
+
+```cpp
+virtual ~WaypointSource() = default;
+```
+
+如果不写 `virtual`，通过基类指针 `delete` 一个派生类对象时，只会调用基类自己的析构函数——派生类新增的成员（如果有需要清理的资源）不会被正确销毁，是一个真实的内存/资源泄漏来源。规则很通用：**任何打算被多态使用（会经过基类指针/引用操作）的类，基类析构函数都该是 `virtual`**。[class 基础](#class-基础以-mujocobridgenode-为例) 那节从"派生类怎么覆盖基类析构函数"（`~MujocoBridgeNode() override`，覆盖 `rclcpp::Node` 的虚析构）讲过一次这个机制；这次是从"提供接口的这一侧，为什么必须主动声明这个虚析构"来看同一件事。
+
+**6. `override` 关键字**：`KeyframeWaypointSource::jointTargetFor(...) const override` 末尾的 `override` 不是语法必需（不写也能达到"覆盖"的效果，只要签名完全匹配），但它让编译器额外检查"这确实覆盖了某个基类的虚函数"——手误漏写 `const`、参数类型抄错，都会让编译器把它当成一个**新的、不相关的重载**而不是覆盖，`WaypointSource::jointTargetFor()` 依然是纯虚（未实现），这类错误没有 `override` 时不会在编译期暴露。
+
+---
+
+### `static constexpr`：类作用域下的编译期常量
+
+`#cpp_更安全的默认写法` `#cpp_语言组织机制`
+
+> Q: 解释一下 `keyframe_waypoint_source.hpp` 里使用的 `static constexpr double`，为什么要用这套关键字，我印象中它在 gripper_test 里测试的时候定义过。
+
+`keyframe_waypoint_source.hpp` 的 `private:` 区块里：
+
+```cpp
+static constexpr double kOpenWidthM = 0.08;
+static constexpr double kClosedWidthM = 0.0;
+```
+
+两个关键字各管一件事，叠加起来才是这行代码的完整含义：
+
+**1. `static`（类作用域，不是对象状态）**——不加 `static` 的普通成员变量（`double kOpenWidthM;`）是"每个对象各有一份"：每次 `new KeyframeWaypointSource()`，内存里就多一份 `0.08`，还必须在构造函数（或成员初始化器）里显式赋值。加了 `static`，这个名字就属于**类本身**，不属于任何具体对象——不管创建多少个 `KeyframeWaypointSource` 实例，`kOpenWidthM` 只有一份，甚至不需要任何对象存在就能引用它（虽然这里是 `private`，外部引用不了）。这里恰好合适：`0.08`/`0.0` 是"这个类代表的行为"的固有属性（夹爪开合的两个极值），不是"这一次具体调用"的状态，天然该属于类而不属于对象。
+
+**2. `constexpr`（编译期常量表达式）**——比 `const` 更强的保证：`const` 只承诺"运行后不能再改"，值可以来自运行期计算（比如 `const double x = someFunction();`）；`constexpr` 要求这个值在**编译期**就能求出来，编译器会在用到它的地方直接内联这个数字，效果类似给一个数字standard起了个类型安全的名字。`constexpr` 隐含 `const`（这两个关键字不冲突，但不需要重复写 `const constexpr`）。
+
+**3. 为什么两个叠在一起，而不是用别的写法**：
+
+| 备选写法 | 问题 |
+|---|---|
+| `#define kOpenWidthM 0.08` 宏 | 没有类型、没有作用域（会污染全局命名空间，任何文件 `#include` 这个头文件后 `kOpenWidthM` 这个名字到处能用、到处能被意外重定义），是纯文本替换，编译器给不出好的错误信息——这正是"更安全的默认写法"这个主题下 C++ 想让你避免的东西 |
+| 普通 `private: double kOpenWidthM = 0.08;`（非 static） | 每个对象存一份，纯粹浪费；且不是编译期常量，不能用在要求 `constexpr` 的上下文里（这里恰好没用到，但语义上"这本来就是个常量"没有被表达出来） |
+| 函数内部局部 `constexpr double kOpenWidthM = 0.08;` | `kOpenWidthM`/`kClosedWidthM` 在 `jointTargetFor()` 的多个 `case` 分支里重复用到，写成局部变量要么重复声明多次，要么只能在用到的第一个分支里声明、后面分支引用不到（作用域限制在那个 `case` 块内）——类作用域的 `static constexpr` 只需要声明一次，整个类的所有成员函数都能用 |
+| 全局命名空间常量 | 泄漏了作用域，容易和其他文件的同名常量冲突；也没有传达"这两个数字是 `KeyframeWaypointSource` 概念上的一部分"这层语义——`private` 修饰符还额外保证了外部代码无法直接读取或依赖这两个数字 |
+
+**4. 和 `fsm.cpp` 里另一种写法的对比**：`fsm.cpp` 的 `kOpen` 分支里也有类似的常量：
+
+```cpp
+constexpr double kOpenWidthM = 0.08;
+constexpr double kOpenEpsilonM = 0.02;
+```
+
+这里**没有** `static`，因为这是在一个自由函数（`step()`）内部的局部变量，不是类成员——局部 `constexpr` 变量本来就没有"每个对象一份"的问题（函数里从来不会有多个对象），`static` 在这里没有必要也不常见（如果写了 `static constexpr` 在函数局部作用域里，语义会变成"这个值只初始化一次，跨多次函数调用共享同一份存储"——对编译期常量而言效果和不加基本一样，只是明确了"只存一份"的意图，不是必须）。这个对比正好说明 `static` 的必要性完全取决于"这个常量归谁管"：类的成员函数之间共享，需要 `static`；单个自由函数内部自己用，不需要。
+
+**5. 你提到 gripper_test.py 里的印象——那是同一个"命名常量"意图，但语言机制完全不同**：
+
+```python
+OPEN_WIDTH_M = 0.08
+CLOSED_WIDTH_M = 0.0
+```
+
+这是 Python 模块顶层的普通变量赋值，不是类成员，也没有编译期/运行期的区分（Python 没有编译期常量这个概念，一切都在运行时求值）。`static`/`constexpr` 这两个关键字在 Python 里根本不存在对应物——Python 靠**全大写命名**这个纯约定来表达"这是个常量，别改它"，语言本身不会在你真的重新赋值时报错（`OPEN_WIDTH_M = 0.5` 完全合法，Python 解释器不会拦你）。C++ 这边 `constexpr` 是**语言强制**的：写 `kOpenWidthM = 0.5;` 在类外或类内都不会编译通过。两者解决的是同一个工程问题（给魔法数字一个名字，别到处抄字面量），但 C++ 能让编译器帮你守住这个约定，Python 只能靠人自律。
 
 ---
 

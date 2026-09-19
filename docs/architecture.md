@@ -151,6 +151,8 @@ xacro $(ros2 pkg prefix franka_description)/share/franka_description/robots/fer/
 - [ ] 编写第一个自动测试：5组固定 `q`，对比 MuJoCo 与 MoveIt FK（对应第15节任务5，需等 `motion_planner`/MoveIt 配置接入后才能跑）
 - [ ] keyframe 长度不匹配会被静默补零（不报错，见第 0.1 节）——需要至少一个 gtest 防止手滑改错 `qpos` 长度却没人发现（Stage G 实测，见 [week2.md 8.8](../Job_guides/my_study/week2.md#88-排查记录keyframe-名字冲突与长度不匹配是两件独立的事结论被推翻)）
 - [ ] `gripper_actuator_id_`/`kHandBodyName="hand"`（`mujoco_bridge_node.cpp`）目前是隐式单机械臂假设：模型里有第二个夹爪/第二个 `hand` body 会静默覆盖或找不到，不报错。解锁条件：真正引入第二条机械臂（第 2.2 节"暂不进入 MVP"包含双臂，当前不修）
+- [ ] `task_executor` 的 `close_settle_s`/`lift_settle_grace_s`（第7节）是"改到实测通过为止"定的，不是从物理量推出来的；第3周把 `WaypointSource` 换成 diff-IK 实现后，"发离散目标等伺服收敛"这个物理场景整体改变，需要重新测
+- [ ] `task_executor` 的 `CMakeLists.txt`/`package.xml` 直接 `find_package(mujoco_bridge REQUIRED)`，只为了拿 `grasp_criteria` 这段纯函数库——历史顺序造成的（`classifyGrasp()` 在 `task_executor` 包存在之前就已经长在 `mujoco_bridge` 里），不是刻意设计。仓库里已有空占位包 `manipulation_interfaces` 可以承载这类两边共享的纯函数，当初没有搬。解锁条件：第6周 `mujoco_bridge` 真的被换/重命名成真机驱动包时，评估要不要把 `grasp_criteria` 挪进 `manipulation_interfaces`
 
 ## 5. Pick-and-place 场景（Stage G）
 
@@ -204,3 +206,37 @@ xacro $(ros2 pkg prefix franka_description)/share/franka_description/robots/fer/
 | [gstavrinos/ez_pick_and_place](https://github.com/gstavrinos/ez_pick_and_place) | MoveIt + GraspIt 的胶水代码（`ez_tools.py`） | 无自定义判定，README 让用户自己看源码 | 作者本人在 moveit 仓库报过 `/compute_ik` 一直失败且未修的 issue——生产代码里留着未解决的集成 bug，缺测试覆盖 |
 
 三者的共同点：都合理地复用了 MoveIt/GraspIt 做规划和抓取姿态生成，但都把"抓取成功"这个最难验证、最容易出 bug 的环节跳过或简化掉了。本项目在 `mujoco_bridge` 上投入的时间，对应的正是这个被普遍跳过的验证层，而不是重新实现 MoveIt/GraspIt 已经做好的规划或抓取姿态生成能力。
+
+## 7. `task_executor` 任务状态机（Stage I）
+
+新增 [task_executor](../src/task_executor/)（C++ 节点，`use_sim_time=true`）。状态机固定顺序：`HOME → PREGRASP → GRASP → CLOSE → LIFT → PREPLACE → PLACE → OPEN → RETRACT → VERIFY → DONE`，异常出口 `RECOVER`（重试，回 `HOME`）→ 耗尽 `max_retries` 后 `FAILED`。核心决策函数 `step()`（[fsm.hpp/cpp](../src/task_executor/include/task_executor/fsm.hpp)）不依赖 `rclcpp`/`mjModel`，是 Stage F 定义的 Layer 1，19 个 gtest。
+
+**`grasp_criteria` 库的复用**：`mujoco_bridge` 的 `classifyGrasp()` 拆成独立 CMake 库目标 `mujoco_bridge::grasp_criteria` 并导出（`ament_export_targets`），`task_executor` 直接链接、不重新实现。`task_executor_node` 自己从 `/joint_states` + `mujoco_bridge` 已发布的 `~/ground_truth/*` 话题拼一份 `GraspSignals` 再调这个函数——**没有**新增一个 `GraspOutcome` ROS topic：Stage H 结束时留的悬挂项（"不知道 task_executor 想要整个分类结果还是原始信号"）答案是都不需要，谁掌握阶段信息就该拥有计算权。
+
+**`WaypointSource` 抽象**：`jointTargetFor(Phase, ObjectPose) -> JointTarget` 接口，本周唯一实现 `KeyframeWaypointSource` 是手测出来的固定关节空间查表，完全忽略 `object_pose`。第3周计划替换成 diff-IK 实现，`fsm.cpp`/`task_executor_node.cpp` 不需要跟着改。
+
+**手测出来的关节空间 waypoint**（`KeyframeWaypointSource`，单位 rad，顺序 joint1..joint7；`box` 初始位姿见第5节表格）：
+
+| 阶段 | joint1 | joint2 | joint4 | 其余关节 | 夹爪宽度 (m) |
+| --- | --- | --- | --- | --- | --- |
+| HOME | 0 | 0 | -1.5708 | joint3=0, joint5=0, joint6=1.5708, joint7=-0.7853（= MJCF `pick_place_home` 的臂部分） | 0.08（开） |
+| PREGRASP | 0 | 0.2 | -1.6 | 同上 | 0.08 |
+| GRASP / CLOSE | 0 | 0.4 | -2.0 | 同上 | GRASP=0.08，CLOSE=0.0（命令全闭，见下） |
+| LIFT | 0 | 0.2 | -1.6 | 同上 | 0.0（保持闭合） |
+| PREPLACE | 0.62 | 0.2 | -1.6 | 同上 | 0.0 |
+| PLACE | 0.62 | 0.27 | -1.75 | 同上 | 0.0 |
+| OPEN / RETRACT | 0.62 | 0.27→0.2 | -1.75→-1.6 | 同上 | 0.08（松开） |
+
+**`kClosedWidthM` 为什么是 0.0（命令全闭）而不是"比 box 宽度窄一点"（0.03，常规写法）**：0.03（比 box 的 0.04m 窄 1cm）能撑住纯垂直的 `LIFT`，但撑不住 `PREPLACE` 需要的 `joint1` 旋转（一次侧向摆动）——实测看到接触从双指变成单指、box 绕着剩下的接触点转出去、跌回桌面。0.0（伺服朝"完全闭合"尽力推，被 box 挡住后停在比 0.03 更紧的挤压力度）实测能撑过同一段摆动，一路验证到 `PLACE`→松开→box 落在 `(0.42, 0.31)` 附近。这是纯物理调参，不是逻辑修正——见 [week2.md 10.10.5](../Job_guides/my_study/week2.md#10105-一次独立的物理调参夹爪闭合力度不够撑不住-kpreplace-的侧向摆动)。
+
+**到位判据的三层等待时间**（`FsmParams`，详见 [week2.md 10.6](../Job_guides/my_study/week2.md#106-到位判据为什么分层三条独立的等一等不是同一件事)）：
+
+| 常数 | 默认值 | 回答的问题 |
+| --- | --- | --- |
+| `min_settle_s` | 0.5s | 这一 tick 是不是上一阶段留下的旧读数？（所有阶段通用） |
+| `close_settle_s` | 2.0s | `kClose` 专用：夹爪是不是刚开始收紧、伺服还没收敛？ |
+| `lift_settle_grace_s` | 2.0s | `kLift` 专用：手臂已到位，box（独立仿真体，靠摩擦耦合）有没有跟上？实测滞后接近 1s |
+
+**验收标准**：`place_x_m`/`place_y_m` 默认 `(0.43, 0.31)`——不是 `pick_place_scene.xml` 里 `place_marker` 几何体的名义位置 `(0.5, 0.3)`，是 `KeyframeWaypointSource` 的 `PLACE` waypoint 实际能送到的位置（重力下垂导致的系统性偏差，见笔记 Stage I 讨论），`place_region_radius_m` 默认 0.08m。已验证一次完整成功 episode（全 11 阶段到 `DONE`）和一次人为制造的必然失败（`place_x_m/y_m` 设为不可达值，`RECOVER` 重试 3 次后正确落到 `FAILED`）。
+
+- [ ] `close_settle_s`/`lift_settle_grace_s` 是"改到实测通过为止"定的，不是从物理量推出来的；第3周换 diff-IK 后需要重新测（见第4节延伸）

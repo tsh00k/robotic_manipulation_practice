@@ -28,27 +28,34 @@ distrobox enter robotics-dev
 
 **坑：Claude 的沙盒工具执行环境可能没有 `docker`/`podman` 客户端，导致 `distrobox enter` 报 "we need a container manager"。** 现象：`/var/run/docker.sock` 存在（通常是软链到 `/run/host/run/docker.sock`，说明宿主机 docker 确实挂进来了），但 `docker`/`podman` 二进制不在 PATH 上，`distrobox` 内部找不到客户端就直接报错——不是权限问题，是缺 CLI。
 
-**解法**：宿主机的 docker 二进制通常原样挂在 `/run/host/usr/bin/docker`，可以直接调用（`/run/host/usr/bin/docker --version` 验证）。把这个目录加进 PATH 前面再调 `distrobox`：
+**解法（推荐）**：宿主机的 docker 二进制通常原样挂在 `/run/host/usr/bin/docker`，可以直接调用（`/run/host/usr/bin/docker --version` 验证）。**不要把整个 `/run/host/usr/bin` 加进 PATH**——建一个只含 `docker` 一个符号链接的最小目录，把这个目录加进 PATH 前面：
 
 ```bash
-export PATH="/run/host/usr/bin:$PATH"
+mkdir -p /tmp/docker_shim
+ln -sf /run/host/usr/bin/docker /tmp/docker_shim/docker
+export PATH="/tmp/docker_shim:$PATH"
 distrobox enter robotics-dev -- bash -ic '...'
 ```
 
-**副作用，务必注意**：这样加的 PATH 会被 `distrobox`/`docker exec` 透传进容器内部 shell，导致容器里 `/run/host/usr/bin` 排到了容器自己 `/usr/bin` 前面。这会让 pyenv 的 "system" python3 判定失真——pyenv shim 找的是 PATH 上（除 shims 目录外）第一个 `python3`，现在变成了**宿主机的** python3（没有 `catkin_pkg`），而不是容器里装了 `catkin_pkg` 的那个，即使 `pyenv version` 依然正确显示 `system`。症状和下面"变体一"完全一样（`ModuleNotFoundError: No module named 'catkin_pkg'`），但根因是这条 PATH 污染，不是 `.python-version` 失效。
+**为什么不能直接 `export PATH="/run/host/usr/bin:$PATH"`（曾经这么做过，后来发现两个副作用）**：
 
-**对策**：进容器后，实际跑 ROS2/colcon 命令前，先把 `/run/host/*` 开头的 PATH 项过滤掉：
+1. **pyenv "system" python3 判定失真**：这条 PATH 会被 `distrobox`/`docker exec` 透传进容器内部 shell，容器里 `/run/host/usr/bin` 排到了容器自己 `/usr/bin` 前面——pyenv shim 找的是 PATH 上（除 shims 目录外）第一个 `python3`，变成了**宿主机的** python3（没有 `catkin_pkg`），而不是容器里装了 `catkin_pkg` 的那个，即使 `pyenv version` 依然正确显示 `system`。症状和下面"变体一"完全一样（`ModuleNotFoundError: No module named 'catkin_pkg'`），根因是这条 PATH 污染，不是 `.python-version` 失效。
+2. **更严重的一次（新发现）：`distrobox-enter` 脚本自身直接跑不起来**。`/run/host/usr/bin` 下的 `id`/`sed`/`grep` 等宿主机二进制需要比沙盒执行环境更新的 glibc，一旦这些名字排到 PATH 前面，`distrobox-enter` 脚本内部调用它们做环境检测时直接报 `GLIBC_2.38' not found`、`Illegal number` 一类的错误，`distrobox enter` 整个失败——这不是"结果错了"，是"工具本身跑不起来"，比第1条更难排查（表面看像 distrobox 自己坏了，其实是 PATH 污染）。
+
+只加一个 `docker` 符号链接就完全避开了这两条：`id`/`sed`/`grep` 等仍然解析到沙盒自己兼容的二进制，只有 `docker` 这一个名字被接到宿主机版本上。
+
+进容器后，实际跑 ROS2/colcon 命令前，仍然要把加进 PATH 的 shim 目录、以及下面"变体二"提到的 pyenv 版本目录都过滤掉：
 
 ```bash
 distrobox enter robotics-dev -- bash -ic '
-  export PATH=$(echo "$PATH" | tr ":" "\n" | grep -v "^/run/host" | paste -sd: -)
+  export PATH=$(echo "$PATH" | tr ":" "\n" | grep -v "^/tmp/docker_shim" | grep -v "^/home/anby/.pyenv/versions" | paste -sd: -)
   source /opt/ros/humble/setup.bash
   cd <repo_root>
   colcon build ...
 '
 ```
 
-这条只在"执行 `distrobox enter` 本身就需要先修 PATH 才能找到容器管理器"的沙盒环境里才会出现；在能直接访问 `docker`/`podman` 的正常环境里不会触发，可以跳过两条 PATH 处理。
+这条只在"执行 `distrobox enter` 本身就需要先修 PATH 才能找到容器管理器"的沙盒环境里才会出现；在能直接访问 `docker`/`podman` 的正常环境里不会触发，可以跳过这两条 PATH 处理。
 
 容器内已确认可用：
 - `colcon`、`/opt/ros/humble`（需要 `source /opt/ros/humble/setup.bash` 才能用 `ros2` 命令，`.bashrc` 里已配置好，交互式 shell 自动生效）
@@ -80,6 +87,8 @@ The C extension '/opt/ros/humble/lib/python3.10/site-packages/_rclpy_pybind11.cp
 注意错误信息里的 `python3.10` 和 `cpython-311` 打架——这是版本不匹配的特征。此时 `pyenv version` 会**正确地显示 `system`**，但 `python3` 仍然解析到 3.11.11，因为 `PATH` 最前面直接放着 `/home/anby/.pyenv/versions/3.11.11/bin`——**这个路径绕过了 pyenv 的 shim 机制，`.python-version` 管不着它**。
 
 **对策：跑 rclpy 脚本一律显式用 `/usr/bin/python3`**，不要写 `python3`。诊断一句话：`python3 -c "import sys; print(sys.version)"` 如果不是 3.10 就是踩到了。
+
+**这条路径绕过不是 rclpy 专属的**：`colcon build` 内部调用的某些 python 脚本（如 `ament_lint_auto` 的 `package_xml_2_cmake.py`）同样会解析到这条裸的 `/home/anby/.pyenv/versions/.../bin/python3`，表现成"变体一"的症状（`ModuleNotFoundError: No module named 'catkin_pkg'`），但根因其实是"变体二"这条路径绕过，不是 `.python-version` 失效——两者症状一样，成因不同，排查时不要看到 `catkin_pkg` 报错就直接归因到"变体一"。这条路径目前是这个沙盒会话默认就带着的（不是 docker PATH 修复引入的），所以 `colcon build`/`colcon test` 前过滤 PATH 时，除了 `^/run/host`（或 `/tmp/docker_shim`）之外，也要顺手 `grep -v "^/home/anby/.pyenv/versions"`，见上面 docker 那节的最终命令示例。
 
 容器内已确认**不可用/待装**：
 - **MuJoCo 的 Python 绑定**（`pip show mujoco` 未找到，`import mujoco` 失败）。如果后续需要 Python 侧原型验证（比如快速验证 MJCF、可视化调试），需要 `pip install mujoco`。核心项目走 C++ API，这个不是阻塞项。

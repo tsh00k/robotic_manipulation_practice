@@ -19,17 +19,31 @@ find_package(std_srvs REQUIRED)
 find_package(ament_index_cpp REQUIRED)
 find_package(mujoco REQUIRED)
 
+# Exported as its own target (not just compiled into mujoco_bridge_node) because
+# grasp_criteria.hpp/cpp has zero rclcpp/mjModel dependencies by design (Stage F's
+# Layer 1) and grasp_criteria.hpp's GraspOutcome enum was written expecting a second
+# consumer: task_executor (Stage I) needs kSlip/kGraspEmpty/etc. with the exact same
+# semantics, plus the phase/timing context only it has (for kTimeout/kPlaceMissed,
+# which classifyGrasp() itself never returns). Reusing this target beats
+# reimplementing classifyGrasp() a second time in task_executor and having the two
+# drift apart silently.
+add_library(grasp_criteria src/grasp_criteria.cpp)
+target_include_directories(grasp_criteria PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+
 add_executable(mujoco_bridge_node
   src/mujoco_bridge_node.cpp
   src/mujoco_dl.cpp
   src/frame_math.cpp
   src/state_ops.cpp
-  src/grasp_criteria.cpp
   src/grasp_state.cpp
 )
 target_include_directories(mujoco_bridge_node PRIVATE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
+target_link_libraries(mujoco_bridge_node grasp_criteria)
 ament_target_dependencies(mujoco_bridge_node
   rclcpp
   sensor_msgs
@@ -56,6 +70,14 @@ target_link_libraries(mujoco_bridge_node dl)
 install(TARGETS mujoco_bridge_node
   DESTINATION lib/${PROJECT_NAME}
 )
+
+install(TARGETS grasp_criteria
+  EXPORT export_grasp_criteria
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin
+)
+ament_export_targets(export_grasp_criteria HAS_LIBRARY_TARGET)
 
 install(DIRECTORY include/
   DESTINATION include
@@ -90,9 +112,9 @@ if(BUILD_TESTING)
 
   ament_add_gtest(test_grasp_criteria
     test/test_grasp_criteria.cpp
-    src/grasp_criteria.cpp
   )
   target_include_directories(test_grasp_criteria PRIVATE include)
+  target_link_libraries(test_grasp_criteria grasp_criteria)
 
   ament_add_gtest(test_grasp_state
     test/test_grasp_state.cpp

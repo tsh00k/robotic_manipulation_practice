@@ -26,6 +26,18 @@ def generate_launch_description():
         parameters=[{'use_sim_time': True}],
     )
 
+    task_executor_node = Node(
+        package='task_executor',
+        executable='task_executor_node',
+        name='task_executor',
+        output='screen',
+        # See bridge_node's own comment above -- this is that anticipated second
+        # node. Without this, fsm.cpp's phase_timeout_s (and every
+        # elapsed_in_phase_s measurement it is compared against) would run on wall
+        # time instead of sim time.
+        parameters=[{'use_sim_time': True}],
+    )
+
     rviz_node = Node(
         package='rviz2',
         executable='rviz2',
@@ -41,4 +53,4 @@ def generate_launch_description():
         additional_env={'LIBGL_ALWAYS_SOFTWARE': '1'},
     )
 
-    return LaunchDescription([rviz_config_arg, bridge_node, rviz_node])
+    return LaunchDescription([rviz_config_arg, bridge_node, task_executor_node, rviz_node])
