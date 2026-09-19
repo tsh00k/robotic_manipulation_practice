@@ -85,6 +85,14 @@
     - [10.10.5 一次独立的物理调参：夹爪闭合力度不够，撑不住 `kPreplace` 的侧向摆动](#10105-一次独立的物理调参夹爪闭合力度不够撑不住-kpreplace-的侧向摆动)
   - [10.11 失败模式与验证手段](#1011-失败模式与验证手段)
   - [10.12 你没问但值得注意的](#1012-你没问但值得注意的)
+- [11. Stage J：episode 边界重构与 episode runner](#11-stage-jepisode-边界重构与-episode-runner)
+  - [11.0 一句话总结](#110-一句话总结)
+  - [11.1 改动清单与验证结果](#111-改动清单与验证结果)
+  - [11.2 为什么是连续 20 次：这个数字真正验证的是什么](#112-为什么是连续-20-次这个数字真正验证的是什么)
+  - [11.3 为什么用 topic 而不是 service/action 做 episode 边界：与 `requestReset()` 是同一种死锁机制](#113-为什么用-topic-而不是-serviceaction-做-episode-边界与-requestreset-是同一种死锁机制)
+  - [11.4 排查记录：`episode_runner.py` 发布 `~/start_episode` 时撞上的 DDS 发现竞态](#114-排查记录episode_runnerpy-发布-start_episode-时撞上的-dds-发现竞态)
+  - [11.5 失败模式与验证手段](#115-失败模式与验证手段)
+  - [11.6 你没问但值得注意的](#116-你没问但值得注意的)
 
 ---
 
@@ -187,7 +195,7 @@
 
 | | 内容 |
 |---|---|
-| 改动 | ① `scripts/` 或新增 `experiment_runner` 里的 episode runner：调 `~/reset` → 触发一次任务 → 收结果 → 循环 N 次；② 输出 CSV 到 `results/`（每 episode：seed/物体位姿/成功与否/失败码/各阶段耗时）；③ `pick_place_demo.launch.py`（bridge + executor + rviz，`LIBGL_ALWAYS_SOFTWARE=1` 照旧）；④ launch 层暴露节点参数（解锁 week1 反向清单末条）；⑤ 录一段 rosbag |
+| 改动 | ① `scripts/` 或新增 `experiment_runner` 里的 episode runner：调 `~/reset` → 触发一次任务 → 收结果 → 循环 N 次；② 输出 CSV 到 `results/`（每 episode：seed/物体位姿/成功与否/失败码/各阶段耗时）；③ `pick_place_demo.launch.py`（bridge + executor + rviz，`LIBGL_ALWAYS_SOFTWARE=1` 照旧）——**这次顺带把 Stage I 收尾时讨论过、当时只存进 memory 没落地的 RViz 网格显示计划接进来**：加 `robot_state_publisher`（喂 `franka_description` 的 `fer.urdf.xacro`，`no_prefix:=true` 展开，链接名对齐 MJCF，remap 掉它自己的 `/tf`/`/tf_static` 避免和 `mujoco_bridge_node` 打架）+ `RobotModel` Display，让手臂在 RViz 里显示真实网格、跟着仿真动，不再只是坐标轴——已知局限：两个指尖网格因为 URDF 侧固定叫 `leftfinger`/`rightfinger`（无下划线），`no_prefix` 管不到，不会渲染/不会动，接受这个缺口不追；box/桌子仍然没有网格（另开一个 Marker 发布脚本才能做，本次不做）；④ launch 层暴露节点参数（解锁 week1 反向清单末条）；⑤ 录一段 rosbag |
 | 验收 | **固定物体位姿下连续 20 次成功，无非预期碰撞**（计划书 5.3 第 4 条）；CSV 里 20 行全绿；失败码分布表（哪怕全零也要有这张表的产出路径） |
 | 预期要讲的概念 | `~/reset` 作为 episode 边界的局限（[week1 反向清单](week1.md#132-反向清单现在就该做的属于缺一次推演)：reset 的跳变对下游不可见，而 episode runner 是**第一个真正跨 episode 比较数值的下游**）；rosbag2 记什么话题、sim time 下回放的坑；20 次"连续成功"和"20 次里成功 20 次"的区别 |
 
@@ -229,7 +237,7 @@
 
 1. ~~**加了 box 之后 vendor 的 `home` keyframe 会失配**（E/C 类）— `<key qpos>` 的长度必须等于 `nq`；加一个 freejoint 就把 `nq` 从 9 推到 16。值得问的是：**长度写错时 MuJoCo 是加载失败、静默截断，还是读越界？** 三种行为对应三种完全不同的防护手段，现在不知道是哪种。~~ **已在 Stage G 解答**：静默补零（不是加载失败，也不是读越界），且第一次实测被一次不相关的名字冲突报错掩盖过一轮——完整过程见 [8.8](#88-排查记录keyframe-名字冲突与长度不匹配是两件独立的事结论被推翻)。
 2. **"到位"阈值 ε 目前没有任何依据**（C 类）— 用零误差判据会永远卡住（position servo 的稳态误差是[实测过的](week1.md#107-怎么快速做一次独立的-fk-验证) mm 级）；但阈值取太松会让 FSM 在没真到位时就推进到下一阶段，**表现为偶发失败而不是报错**。Stage I 之前该先问"这个数该怎么测出来而不是猜出来"。
-3. **"20 次连续成功"在确定性仿真里可能是假的**（F 类，知识边界）— 固定物体位姿 + 固定 waypoint + 确定性物理 = 20 次跑的其实**几乎是同一条轨迹**。那这个 20 次到底验证了什么？值得在 Stage J 之前想清楚，否则会拿一个没有信息量的数字当验收通过。
+3. ~~**"20 次连续成功"在确定性仿真里可能是假的**（F 类，知识边界）— 固定物体位姿 + 固定 waypoint + 确定性物理 = 20 次跑的其实**几乎是同一条轨迹**。那这个 20 次到底验证了什么？值得在 Stage J 之前想清楚，否则会拿一个没有信息量的数字当验收通过。~~ **已在 Stage J 开工前解答**：20 次确实几乎是同一条轨迹（Stage J 实测证实：`total_duration_s` 全部落在 6.71~6.75s，box 终点坐标只在小数点第5~6位不同）——但这个"20次没有信息量"的直觉在这套系统里是错的：`mujoco_bridge`/`task_executor` 是两个独立进程、各自独立的定时器，物理确定不代表跨进程调度时序确定，[10.10.2](#10102-第二个-bug接触检测闪烁撞上到位检查根因已查清含一次被推翻的旧结论) 已经实测到一次真实的跨进程时序抖动（约2%概率）。20次真正验证的是"这类抖动有没有变得更频繁"，是冒烟回归测试，不是鲁棒性证明；这次20次恰好没有撞上那个约2%的窗口，不能倒推"bug已经不在了"。详见 [11.2](#112-为什么是连续-20-次这个数字真正验证的是什么)。
 4. ~~**`max_effort` 字段可能无法实现**（C 类）— MJCF 现在只有位置伺服 actuator（[11.4](week1.md#114-position-servo-actuator-的本质一个-pd-控制器)）。如果 `GripperCommand.max_effort` 被静默忽略，下游会以为自己在控制夹持力。**该显式拒绝、该 WARN、还是该改模型**，是 Stage H 要定的。~~ **已在 Stage H 解答**：选了"警告一次但继续接受命令"，不是拒绝——因为这是纯 topic（没有 service/action 那种失败返回通道），拒绝只能表现成"什么都没发生"，比警告更难诊断；而 `max_effort=0` 在一些 `control_msgs` 使用惯例里本身就是"不限制"的哨兵值，不能无脑当成用户明确要求限力后再拒绝。真要支持力限制需要换成 action 逐步斜坡加压，见 [9.3](#93-为什么不直接用-grippercommand-action)。
 
 ## 6. 悬挂问题（本周新增）
@@ -247,10 +255,10 @@
 - **`close_settle_s`/`lift_settle_grace_s`（Stage I，各 2.0s）是"改到实测稳定通过为止"定的，不是从物理量推出来的**（[10.12](#1012-你没问但值得注意的) 第1条）——**缺参照系**：第3周把 `KeyframeWaypointSource` 换成 IK 驱动的连续轨迹后，这两个常数背后的物理场景（"发一个离散目标、等伺服收敛"）整体改变，现在的数值大概率不能直接照搬。解锁条件：第3周接入 diff-IK 的 `WaypointSource` 之后重新测。
 - **`RECOVER` 目前不区分 `ExitReason`，所有失败原因都统一回 `kHome` 重试**（Stage I，[10.8](#108-task_executor-的可扩展性后续步骤会替换哪些部分) 第5点）——`ExitReason` 枚举已经区分了 `kTimeout`/`kSlipped`/`kPlaceMissed` 等，但 `kRecover` 分支目前对所有原因一视同仁。**缺参照系**：现在只有一次真实失败模式的实测（人为制造的 `PLACE_MISSED`），不知道不同失败码是否真的需要不同恢复策略。解锁条件：Stage J 的失败码分布统计出来后，看是否有某类失败"重试无效"，值得针对性设计。
 - **`task_executor` 的 `CMakeLists.txt`/`package.xml` 硬依赖 `mujoco_bridge` 这个具体包名，只为了拿 `grasp_criteria` 一段纯函数**（Stage I，[10.7.1](#1071-graspsignalsclassifygrasp-为什么物理上放在-mujoco_bridge-包里不是-task_executor)）——仓库里其实已经有一个空的 `manipulation_interfaces` 占位包，当初若把这段代码放进去，`task_executor` 就不用直接依赖 `mujoco_bridge`。**缺参照系**：现在没有真的换驱动/换包名的场景来验证这条依赖会不会真的咬人。解锁条件：第6周真正把 `mujoco_bridge` 换成真机驱动、或者需要决定 `grasp_criteria` 要不要搬进 `manipulation_interfaces` 时。
-- **`task_executor_node` 到达 `kDone`/`kFailed` 后没有任何自动重新开始的机制，只能重启整个进程**（Stage I，[10.3.1](#1031-recover-完整机制从触发到重试到力竭此前散落在各处没有整体讲过) 第四步）——`onTimer()` 在这两个终态直接 `return`，`phase_` 不会被任何代码再改动。**这不是缺参照系，是 Stage J 马上就要撞上的真实空白**：episode runner 要"连续跑 N 次"，现在的节点一次只能跑一个 episode。解锁条件：Stage J 设计 episode runner 时必须先决定——每次重启整个节点，还是给 `task_executor` 加一个"重新开始"的话题/服务。
+- ~~**`task_executor_node` 到达 `kDone`/`kFailed` 后没有任何自动重新开始的机制，只能重启整个进程**（Stage I，[10.3.1](#1031-recover-完整机制从触发到重试到力竭此前散落在各处没有整体讲过) 第四步）——`onTimer()` 在这两个终态直接 `return`，`phase_` 不会被任何代码再改动。**这不是缺参照系，是 Stage J 马上就要撞上的真实空白**：episode runner 要"连续跑 N 次"，现在的节点一次只能跑一个 episode。解锁条件：Stage J 设计 episode runner 时必须先决定——每次重启整个节点，还是给 `task_executor` 加一个"重新开始"的话题/服务。~~ **已在 Stage J 解决**：选了后者——新增 `~/start_episode`（订阅）+ `~/episode_outcome`（发布）两个话题，节点常驻不重启，`onStartEpisode()` 把内部状态强制拉回 `kHome`。见 [11.1](#111-改动清单与验证结果)/[11.3](#113-为什么用-topic-而不是-serviceaction-做-episode-边界与-requestreset-是同一种死锁机制)。
 - **`kRecover` 的异步 `~/reset` 请求和 `phase_` 切到 `kHome` 之间没有显式同步，只靠 `min_settle_s` 的余量兜底**（Stage I，[10.3.1](#1031-recover-完整机制从触发到重试到力竭此前散落在各处没有整体讲过) 第三步）——`async_send_request` 发出去立刻返回，下一行就把 `phase_` 切了，没有等复位真正完成的确认。实测多次重试没出过问题，但这只是"跑过没翻车"，不是"验证过不会翻车"。**缺一次推演**：故意让 `~/reset` 服务响应延迟（或者让 `mujoco_bridge` 短暂不可用），观察这条竞态会不会真的被 `min_settle_s` 挡住，还是只是运气好。
 - **`kOpen` 分支的开口阈值（`kOpenWidthM`/`kOpenEpsilonM`）锁死在 `fsm.cpp` 源码里的局部 `constexpr`，不像其它阈值那样是 `FsmParams`/ROS 参数**（Stage I，[10.3.2](#1032-fsmparams-完整设计这些参数怎么编码了整个抓取过程的阶段设计) 末尾）——系统里其它每一个阈值都能不改代码、不重新编译地在运行时调，唯独这两个数字不行，破坏了"可调参数都在 `FsmParams` 里"这条一致性。**缺一次推演**：现在没有真实场景需要调这两个数字，值得先想清楚要不要现在就补齐一致性，还是等真的需要调它时才动手。
-- **`task_executor_node` 快速重启后，`~/reset` 客户端可能在和 `mujoco_bridge` 完成 DDS 发现之前就发出第一次复位请求，静默失败**（Stage I，[10.10.2](#10102-第二个-bug接触检测闪烁撞上到位检查根因已查清含一次被推翻的旧结论) 排查过程中意外撞见）——现象是 `~/reset not available yet` 警告，box 停在上一轮遗留的位置，后续动作全部建立在错误的初始状态上，且没有任何机制会重试或报错升级。**这不是缺参照系，是 Stage J 的 episode runner 会直接撞上的真实问题**：如果 runner 靠"重启进程"的方式开始新一轮 episode，第一个 episode 大概率会因为这个竞态跑错。解锁条件：Stage J 设计 episode runner 时要么改成不重启进程只调 `~/reset`（[10.3.4](#1034-requestreset-是节点调-service-的一般写法吗和命令行-ros2-service-call-有什么关系) 已经讲过节点内异步调用的写法），要么在 `requestReset()` 里给 `service_is_ready()` 失败的情况加真正的重试，不能只是打个警告就放弃。
+- ~~**`task_executor_node` 快速重启后，`~/reset` 客户端可能在和 `mujoco_bridge` 完成 DDS 发现之前就发出第一次复位请求，静默失败**（Stage I，[10.10.2](#10102-第二个-bug接触检测闪烁撞上到位检查根因已查清含一次被推翻的旧结论) 排查过程中意外撞见）——现象是 `~/reset not available yet` 警告，box 停在上一轮遗留的位置，后续动作全部建立在错误的初始状态上，且没有任何机制会重试或报错升级。**这不是缺参照系，是 Stage J 的 episode runner 会直接撞上的真实问题**：如果 runner 靠"重启进程"的方式开始新一轮 episode，第一个 episode 大概率会因为这个竞态跑错。解锁条件：Stage J 设计 episode runner 时要么改成不重启进程只调 `~/reset`（[10.3.4](#1034-requestreset-是节点调-service-的一般写法吗和命令行-ros2-service-call-有什么关系) 已经讲过节点内异步调用的写法），要么在 `requestReset()` 里给 `service_is_ready()` 失败的情况加真正的重试，不能只是打个警告就放弃。~~ **已在 Stage J 部分解决，且同一类 bug 换了个位置重新证实**：选了"不重启进程"，所以这条描述的具体场景（进程重启和 `mujoco_bridge` 竞态）不会再发生。但同一类 DDS 发现竞态换了个边立刻重现——这次是 `episode_runner.py` 新起的 `~/start_episode` publisher 和 `task_executor_node` 的 subscription 之间，第一次跑 3-episode smoke test 就实测撞见。教训不是"process 重启"这一种触发条件专属的，是"任何新引入的 pub/sub 边都要重新假设一次这个竞态会发生"。见 [11.4](#114-排查记录episode_runnerpy-发布-start_episode-时撞上的-dds-发现竞态)。
 - **`classifyGrasp` 没有"宽度-only"的降级判据，完全依赖接触信号——但接触信号在真机上不存在**（Stage I，[10.10.2](#10102-第二个-bug接触检测闪烁撞上到位检查根因已查清含一次被推翻的旧结论) 排查过程中确认：接触检测的逐 tick 抖动窗口长短取决于夹爪力度，是这次 `kLift` bug 的确认根因）——真机 Franka Hand 没有触觉阵列，标准做法（`franka_gripper` 的 `Grasp` action）是只看稳态宽度误差（[week2.md 9.7](#97-oracle-数据的分类哪些会随项目推进消失哪些需要学习方法)）。**这不是缺参照系**：现在就可以实现一份宽度-only 版本的判据去验证抓取流程在没有接触信号时是否还站得住，这份投入不管以后买不买得起真机都有意义，而且顺带绕开了接触信号抖动这整类问题。解锁条件：现在就可以做，没有前置依赖。
 
 ### 6.2 反向清单：现在就该做的
@@ -267,6 +275,7 @@
 - **`bodiesInContact` 没有检查 `mjContact::exclude`**（Stage H，[grasp_state.cpp](../../src/mujoco_bridge/src/grasp_state.cpp)）——`mjContact` 有 `margin`/`gap` 相关的 `exclude` 字段（0=计入求解，非0=因各种原因被排除，包括"在 gap 区间内但还没真正接触"），当前实现只要这对 body 出现在 `mjData::contact` 数组里就算 `true`，不看这个字段。现在 box/桌面/手指的 geom 都没配非零 `margin`（默认 0），大概率不会被触发，但没有测试验证过这个假设。缺一次推演：给某个 geom 配一个非零 `margin`，观察 `exclude!=0` 的接触是否真的会被现在的实现误判为"接触"。
 - **`task_executor_node.cpp` 的 `extractArmState()`/`extractGripperWidth()` 没有剥成纯函数、没有单测**（Stage I，[10.12](#1012-你没问但值得注意的) 第3条）——两者已经是"输入一个 `JointState`、输出一个结构体"的形状，逻辑上很接近 Stage F 剥 `frame_math`/`state_ops` 时用的判据，但比 `mujoco_bridge_node.cpp` 通常的胶水层更厚。缺一次推演：按 [2.1.1](#211-这类系统该怎么测四层本周只取前两层) 的判据（"写错了人眼看 RViz 能不能发现"）评估要不要现在就剥。
 - **`fsm.cpp` 的连续量判据（`box_height_m`）本身的噪声幅度没有量化过**（Stage I，[10.12](#1012-你没问但值得注意的) 第2条）——只有直觉上"连续量比逐 tick 重新生成的接触布尔值稳"，没有像 `frame_math`/`state_ops` 那样写 gtest 量化这条连续量在更剧烈运动下会不会也开始在阈值附近抖动。
+- **`~/start_episode` 收到时如果上一个 episode 还没到终态就再次被调用，会无条件把 `phase_` 拽回 `kHome`，正在进行的那次尝试被静默覆盖，没有任何警告或错误**（Stage J，[11.3](#113-为什么用-topic-而不是-serviceaction-做-episode-边界与-requestreset-是同一种死锁机制)）——当前 `episode_runner.py` 严格串行、等到上一个 `~/episode_outcome` 才发下一条 `~/start_episode`，不会触发这条路径，这次决定先不修。缺一次推演：手动在 episode 中途发一条 `~/start_episode`，确认现象确实是"静默覆盖、无报错"，再决定要不要在 `onStartEpisode()` 里加一个"忙碌中拒绝并 WARN"的检查——这本质上是 [11.3](#113-为什么用-topic-而不是-serviceaction-做-episode-边界与-requestreset-是同一种死锁机制) 里讨论过的"action 会免费提供的并发目标拒绝"，topic 版本没有对应机制。
 
 ## 7. Stage F：测试地基与胶水层收口
 
@@ -1476,3 +1485,138 @@ if (in.grasp_signals.box_height_m < params.grasp_criteria.lift_height_threshold_
 2. **`box_height_m < lift_height_threshold_m` 这条判据本身也是瞬时读数，为什么就不会像接触布尔值一样抖动？**（E/C 类，值得追问但本 stage 没有专门验证）——理由在 [10.10.4](#10104-第四个独立问题kpreplacekplace-的掉落判据看瞬时接触布尔值被接触检测噪声误判) 里给了直觉解释（连续量 vs 逐 tick 重新生成的离散量），但没有像 `frame_math`/`state_ops` 那样写一个 gtest 去量化"这条连续量的物理噪声幅度到底有多大，会不会在更剧烈的运动下也开始抖动到跨过阈值"。
 3. **`task_executor_node.cpp` 完全没有单测**（E 类，延续 Stage F 定的纪律）——`fsm.cpp`/`keyframe_waypoint_source.hpp` 该测的都测了，节点胶水本身（读话题、拼 `FsmInputs`、发命令）刻意留白，理由和 [2.1.1](#211-这类系统该怎么测四层本周只取前两层) 第3条一致（"不给 `onTimer` 造 mock"），但这次它比 `mujoco_bridge_node.cpp` 的胶水层更厚——`extractArmState()`/`extractGripperWidth()` 这两个从 `sensor_msgs::msg::JointState` 里按名字找索引的函数，逻辑上已经接近可以剥成纯函数（输入一个 `JointState`，输出 `optional<ArmState>`），目前没有剥，是否值得剥值得下次讨论。
 4. **`WaypointSource` 只有一个实现时，这层抽象的"多一层间接"的代价现在体现在哪？**（B 类，权衡类问题，尚未展开）——`task_executor_node.cpp` 每个 tick 都要构造一次 `ObjectPose` 结构体传给 `jointTargetFor()`，即使 `KeyframeWaypointSource` 完全不看它；这是为第3周预留接口付的一点点运行时和代码复杂度成本，值不值得，要等第3周真的换实现时才能回答。
+
+## 11. Stage J：episode 边界重构与 episode runner
+
+> 本节覆盖 Stage J 计划（[2.5](#25-stage-j--episode-runner20-次连跑与第一段-demo)）里"episode runner + 连续20次"这部分。RViz `robot_state_publisher` 集成、launch 参数暴露、rosbag 录制仍待做，完成后会继续扩写这一节。
+
+### 11.0 一句话总结
+
+给 `task_executor_node` 加了 episode 边界的话题接口——`~/start_episode`（订阅）和 `~/episode_outcome`（发布，新包 [manipulation_interfaces](../../src/manipulation_interfaces/) 的 `EpisodeOutcome.msg`），替换掉 Stage I 遗留的"episode 边界=进程边界"假设：节点常驻不重启，`onStartEpisode()` 把 `phase_`/`retry_count_`/阶段日志强制拉回 `kHome` 并触发一次 `~/reset`。新增 [scripts/episode_runner.py](../../scripts/episode_runner.py) 连续跑 N 个 episode，写 CSV 到 `results/`。开工前讨论了"为什么要连续跑20次"（此前一直是悬挂问题），开工中先设计成 service/action 被证伪，改回 topic；跑起来后第一次就撞见一个真实的 DDS 发现竞态（`episode_runner.py` 的 `~/start_episode` 发布早于被 `task_executor_node` 发现），修完后 20/20 episode 连续成功，另用不可达放置目标验证了失败路径正确上报真实失败原因。
+
+### 11.1 改动清单与验证结果
+
+**改动**：
+
+- [manipulation_interfaces](../../src/manipulation_interfaces/)（新包）：`msg/EpisodeOutcome.msg`（`success`/`failure_code`/`retries`/`phase_names[]`/`phase_durations_s[]`）
+- [task_executor_node.cpp](../../src/task_executor/src/task_executor_node.cpp)：新增 `~/start_episode`（`std_msgs/Empty`）订阅、`~/episode_outcome` 发布；新增 `onStartEpisode()`、`publishEpisodeOutcome()`；新增 `last_failure_reason_`（区分"真实失败原因"和"重试耗尽"）、`phase_names_log_`/`phase_durations_log_`（每 episode 的阶段轨迹）；`onTimer()` 的空闲判据从"永久终态"改成"等下一条 `~/start_episode`"
+- [phase.hpp](../../src/task_executor/include/task_executor/phase.hpp)：更新过期注释——"episode 边界=进程边界"这条 Stage I 的假设已被替换
+- [task_executor/CMakeLists.txt](../../src/task_executor/CMakeLists.txt) / [package.xml](../../src/task_executor/package.xml)：新增 `manipulation_interfaces` 依赖
+- [scripts/episode_runner.py](../../scripts/episode_runner.py)（新）：连续跑 N 个 episode，写 `results/*.csv`
+
+**编译**（`colcon build --packages-select robot_description mujoco_bridge manipulation_interfaces task_executor --symlink-install`）：
+
+```
+Starting >>> manipulation_interfaces
+Finished <<< manipulation_interfaces [2.56s]
+Starting >>> task_executor
+Finished <<< task_executor [9.65s]
+
+Summary: 4 packages finished [12.4s]
+```
+
+**测试**（直接跑各 gtest 二进制，确认这次改动没有破坏既有单测）：
+
+```
+test_frame_math:               3/3 PASSED
+test_state_ops:                6/6 PASSED
+test_grasp_criteria:          10/10 PASSED
+test_grasp_state:               6/6 PASSED
+test_fsm:                      19/19 PASSED
+test_keyframe_waypoint_source:  3/3 PASSED
+```
+
+lint 部分沿用 [6.2](#62-反向清单现在就该做的) 已记录的 96 处历史债务（`copyright`/`cpplint`/`uncrustify` 三类），本 stage 没有引入新的失败类别。
+
+**行为验证：20 次连续跑**（环境卫生按 [STUDY_NOTES_GUIDE 3.1](../../STUDY_NOTES_GUIDE.md) 确认后，`mujoco_bridge_node`/`task_executor_node` 都直接跑可执行文件，不经 `ros2 run`）：
+
+```
+$ /usr/bin/python3 scripts/episode_runner.py --episodes 20 --out results/pick_place_run.csv --timeout 60
+...
+episode 20: success=True failure_code=NONE retries=0 total_duration_s=6.75
+wrote 20 rows to results/pick_place_run.csv
+20/20 episodes succeeded (see results/pick_place_run.csv)
+
+real	2m15.180s
+```
+
+CSV 摘录（20 行全绿，`total_duration_s` 全部落在 6.71~6.75s，`final_box_{x,y,z}_m` 只在小数点第5~6位有差异——这次实测直接证实了这套系统在固定输入下产出几乎完全相同的轨迹，[11.2](#112-为什么是连续-20-次这个数字真正验证的是什么) 详细讨论这个事实对"20次到底验证了什么"的影响）：
+
+```
+episode,seed,success,failure_code,retries,total_duration_s,...,final_box_x_m,final_box_y_m,final_box_z_m
+1,0,True,NONE,0,6.714,...,0.43372460994601975,0.3096637670047532,0.23987759686370508
+2,0,True,NONE,0,6.748,...,0.43372643534256605,0.30965411773162366,0.23987759686371185
+```
+
+**行为验证：强制失败路径**（[10.1](#101-改动清单与验证结果) 用过的同一手法——把 `verify.place_x_m`/`place_y_m` 改成 `(99.0, 99.0)`，缩短 `fsm.phase_timeout_s` 加速复现）：
+
+```
+episode 1: success=False failure_code=PLACE_MISSED retries=3 total_duration_s=37.23
+```
+
+`phase_names` 列显示完整 4 轮尝试（每轮 `HOME|PREGRASP|...|VERIFY|RECOVER`），`failure_code` 报告的是真实失败原因 `PLACE_MISSED`，不是更表层的"重试耗尽"信息——这正是 `last_failure_reason_` 存在的理由。
+
+**过程中撞见并修复一个真实 bug**（不是编出来验收的，是第一次跑 3-episode smoke test 就实测到）：见 [11.4](#114-排查记录episode_runnerpy-发布-start_episode-时撞上的-dds-发现竞态)。
+
+### 11.2 为什么是连续 20 次：这个数字真正验证的是什么
+
+> Q: 先告诉我，我们为什么需要重复20轮？如果没必要应该砍掉。
+
+**第一层答案**：这是外部交付物的硬性要求——[项目计划书 5.3 第4条](../5.%20视觉机械臂%20Pick-and-Place%20项目计划书.md)写的是"固定物体位姿下连续成功20次，无非预期碰撞"，不是我们自己定的，不能单方面砍掉。
+
+**但"20次没有信息量"这个质疑本身抓住了真问题**：固定物体位姿 + 固定 waypoint（`KeyframeWaypointSource` 完全忽略 `object_pose`）+ MuJoCo 物理确定性 → 如果把整个系统看成一个纯函数，20次应该输出完全相同的轨迹——这次实测（[11.1](#111-改动清单与验证结果) 的CSV）证实了这个直觉：`total_duration_s` 全部落在 6.71~6.75s，box 终点坐标只在小数点第5~6位不同,20次几乎是同一条轨迹。
+
+**这个直觉在"20次没有信息量"这一步是错的**：`mujoco_bridge` 和 `task_executor` 是**两个独立进程、各自独立的定时器**（bridge 的物理步进定时器 + executor 的20Hz决策定时器），中间靠 DDS 传消息。物理本身确定，但**两个进程的相对调度时序不确定**——[10.10.2](#10102-第二个-bug接触检测闪烁撞上到位检查根因已查清含一次被推翻的旧结论) 已经实测到一个真实案例：同样的夹爪力度、同样的轨迹，接触检测抖动窗口恰好撞上 `armReached()` 变真的那个精确 tick，50次里撞上了1次（约2%概率）。这不是"物理不确定"，是"跨进程/跨定时器的时序抖动"——这恰恰是**只有反复跑很多次才能被观测到**的一类 bug，单次跑或读代码都看不出来。
+
+**所以20次真正验证的是什么**：不是"系统能应对多样场景"（那需要域随机化，计划书本身也推到后面），而是**"这套多进程、DDS 中介的系统，在名义上确定性的输入下，会不会因为进程间时序抖动而产生不该有的失败"**——一种回归/抗抖检测,而且我们已经知道抖动确实存在（2%量级的历史数据）。
+
+**诚实的结论**：20次本身**不是**从"这个概率量级需要多少样本"反推出来的——1/50 的真实概率下,20次只有约33%机会撞见它（[10.10.2](#10102-第二个-bug接触检测闪烁撞上到位检查根因已查清含一次被推翻的旧结论) 那次是靠50次样本才抓到的）。计划书要的20次更像一个"最低限度的冒烟测试"，不是严谨的统计验证。这次实测的20/20全绿，**不能**倒推"那个2%的bug已经不在了"——这次样本量本来就撞不上2%的事件。**结论：20次保留，但定位成"冒烟回归测试"而不是"鲁棒性证明"**——这也是为什么 [11.1](#111-改动清单与验证结果) 的 CSV 记的不只是成功/失败布尔值，还有每个阶段的耗时（`phase_durations_s`），这样"20次里有没有出现过一次异常耗时/异常路径"本身就是有信息量的观察，不是单纯验收打勾。
+
+### 11.3 为什么用 topic 而不是 service/action 做 episode 边界：与 `requestReset()` 是同一种死锁机制
+
+> Q: 有一点想问的是：为什么不用service或者action？
+
+**先说 service 行不通的直接原因**——和 [10.3.4](#1034-requestreset-是节点调-service-的一般写法吗和命令行-ros2-service-call-有什么关系) 讲 `requestReset()` 时的死锁陷阱是**同一个坑**：如果 service handler 想同步跑完一整个 episode（~7秒）才返回，它必须在自己的回调内部继续等待仿真进展，但仿真进展本身要靠同一个单线程 executor 继续 spin 才能推进——回调卡在这里，executor 就动不了，死锁。所以哪怕换成 service，handler 也只能"收到就立刻返回一个'已接受'，真正完成还是要另开一个通道汇报"——这意味着 service 版本本质上还是要拆成"触发"+"结果"两条通道，跟现在的 topic+topic 结构没有本质区别，只是多了一次"确认收到"的往返。
+
+> Q: 我不是特别理解你对service的解释。我想象中：episode_runner呼叫阻塞等待结果，然后task_executor_node执行，执行完成后回复service，episode_runner开始下一个循环继续呼叫。指出我的错误。
+
+client 端阻塞等结果这件事本身没有问题——[10.3.4](#1034-requestreset-是节点调-service-的一般写法吗和命令行-ros2-service-call-有什么关系) 那张表里"一次性脚本，阻塞等结果没有代价"说的就是这种场景。**问题出在"task_executor_node 执行"这四个字，具体是谁在执行、在哪个线程上执行**：
+
+`task_executor_node` 内部没有一个独立于 ROS 的"执行引擎"在后台自己跑完整个 episode。让 FSM 真正往前走的是 `onTimer()`——这个20Hz的定时器回调和节点里**其它所有回调**（包括假想中的 service handler）默认共享**同一个线程**（单线程 executor）。如果 service handler 写成"收到请求 → 一直等到 `phase_` 变成 `kDone`/`kFailed` → 才返回"：
+
+- handler 一旦开始等，就**占着这个线程不放**，直到它自己返回。
+- 但"`phase_` 什么时候变成 `kDone`"这件事，只有 `onTimer()` 被调用才会发生。
+- `onTimer()` 和这个 service handler 是**同一线程上的两个不同回调**——executor 不可能一边在跑 handler（还没返回），一边又去跑 `onTimer()`（handler 还没让出线程）。
+
+结果是 handler 在等 `onTimer()` 把 `phase_` 变成终态，`onTimer()` 却永远排不上号——因为线程被 handler 自己占着。这是死锁，不是"变慢"，这个 service 调用永远不会返回。这正是 `requestReset()` 那个坑的**同一个机制**，只是时间尺度从"等一次 reset 响应"放大到"等一整个 episode（~7秒、上百次 tick）"。
+
+**要让"呼叫—执行—回复"这个想法真的成立，节点必须换成多线程 executor**：把 service 回调和 `onTimer()` 分到不同的 callback group/线程，handler 线程用条件变量或 `std::promise`/`future` 等着 `onTimer()` 线程在某次 tick 里把 episode 跑完后通知它。这是可以做的，但要新引入"两个线程共享 `phase_`/`retry_count_` 等状态，需要加锁或原子量"这类真实的并发复杂度——topic 版本（`onTimer()` 自己异步地、不阻塞任何人地跑完episode,跑完后**主动**发一条 `~/episode_outcome`）刚好绕开了这整个问题,因为它从不要求"有一个回调一直等到别的回调把活干完"。
+
+**action 会比 topic+topic 更"正确"，但目前性价比不够**：`~/start_episode`+`~/episode_outcome` 本质上是在用两条独立话题手搭一个"目标—结果"配对，这正是 action 的标准形状（goal/result，`EpisodeOutcome` 可以直接做 result，不用单开一条话题），而且 action 会**免费**提供两个当前缺失的能力：① 拒绝并发目标（第二个 goal 进来、上一个还没完成时可以直接拒绝或抢占，不会像现在这样静默覆盖）；② feedback（阶段转移可以实时推给调用方）。这次的设计选择和 [9.3](#93-为什么不直接用-grippercommand-action)（为什么不直接用 `GripperCommand` action）是同一个判断逻辑——只有一个消费者、不需要 cancel/feedback，做 action server 的复杂度现在没人驱动。但这次的性价比没那么干净：action 会顺手补上一个真实存在的缺口——如果 `~/start_episode` 在上一个 episode 还没到终态时又被调用一次，`onStartEpisode()` 会无条件把 `phase_` 拽回 `kHome`，正在进行的那次尝试被静默覆盖，没有任何警告。当前 `episode_runner.py` 严格串行不会触发这条路径，这个缺口已经记进 [6.2 反向清单](#62-反向清单现在就该做的)，没有在这次决定修。
+
+### 11.4 排查记录：`episode_runner.py` 发布 `~/start_episode` 时撞上的 DDS 发现竞态
+
+**现象**：第一次跑 3-episode smoke test，episode 1 直接超时（60秒），`task_executor_node` 的日志里**完全没有**对应的 "episode start requested" 那一行——不是"处理了但没反应"，是这条消息从没被这个节点看到过。episode 2 的 `~/start_episode` 正常触发,日志从这里才第一次出现。
+
+**根因**：`episode_runner.py` 的 publisher 在 DDS 还没发现 `task_executor_node` 那个订阅者之前就发了第一条消息，ROS2 的话题（这里没配置任何 durability）默认不给未发现的订阅者补发消息——这和 [10.10.2](#10102-第二个-bug接触检测闪烁撞上到位检查根因已查清含一次被推翻的旧结论) 记录过的"新进程 `~/reset` 客户端抢跑 DDS 发现"是**同一类**竞态，只是这次发生在一个新写的发布者/订阅者对上，而不是 client/service 对上——[6.1](#61-清单) 那条悬挂项预测的是"进程重启"这个具体触发条件，这次实际触发条件是"新建一条 pub/sub 连接"，说明这条经验比原来写的更通用。
+
+**修复**：`episode_runner.py` 加一个等价于 `wait_for_service()` 的手写等待——`rclpy.spin_once` 轮询 `publisher.get_subscription_count() > 0`，带15秒超时。这不是巧合：[11.3](#113-为什么用-topic-而不是-serviceaction-做-episode-边界与-requestreset-是同一种死锁机制) 已经指出 service 客户端自带 `service_is_ready()`/`wait_for_service()` 专门解决这个问题，topic 的 publisher 没有对应的现成机制，只能自己手写一个更简陋的等价物。
+
+**验证**：修完后重跑同样的 3-episode smoke test，3/3 成功；随后跑满 20 episode，20/20 成功（[11.1](#111-改动清单与验证结果)）。
+
+**留下的经验**：这条竞态第三次出现了（第一次是 Stage I 的 `~/reset` 客户端 vs `mujoco_bridge`，[10.10.2](#10102-第二个-bug接触检测闪烁撞上到位检查根因已查清含一次被推翻的旧结论) 排查中意外撞见；第二次是这次），说明"任何两个独立 ROS2 进程之间新建的第一条通信连接，都要假设对方还没被发现"这条规律不是某个具体场景的特例，是这套多进程系统的通用性质——以后再加新的 pub/sub 边（比如 Stage J 剩下的 `robot_state_publisher`/rosbag），应该默认先检查一次这个问题，而不是等它自己炸出来。
+
+### 11.5 失败模式与验证手段
+
+| 失败模式 | 现象 | 怎么发现/防住 |
+|---|---|---|
+| `~/start_episode` 发布早于订阅被 DDS 发现 | 第一条消息静默丢弃，episode 超时，server 端无任何对应日志 | 实测撞见（[11.4](#114-排查记录episode_runnerpy-发布-start_episode-时撞上的-dds-发现竞态)）；修法是手写等价于 `wait_for_service()` 的订阅计数轮询，已用 3/3 与 20/20 验证 |
+| 用 service 做"阻塞到完成"的 episode 边界 | 未实现（设计阶段被证伪）——单线程 executor 下，service handler 和 `onTimer()` 抢同一线程，handler 等 `onTimer()` 推进 phase，`onTimer()` 却因 handler 未让出线程而排不上号，死锁 | 与 `requestReset()`（[10.3.4](#1034-requestreset-是节点调-service-的一般写法吗和命令行-ros2-service-call-有什么关系)）同一机制，选择前先用这条已知教训排除 |
+| `~/start_episode` 在上一个 episode 未到终态时被再次调用 | `onStartEpisode()` 无条件把 `phase_` 拽回 `kHome`，正在进行的尝试被静默覆盖，无警告 | 当前 `episode_runner.py` 严格串行不触发；已知缺口记入 [6.2](#62-反向清单现在就该做的)，决定先不修 |
+| 20 次连续成功被当成鲁棒性证明 | 固定输入下 20 次几乎是同一条轨迹，容易误读成"系统很稳" | 已定位成冒烟回归测试而非鲁棒性证明（[11.2](#112-为什么是连续-20-次这个数字真正验证的是什么)）；CSV 记录每阶段耗时而不只是成功/失败布尔值，为将来对比留信息 |
+
+### 11.6 你没问但值得注意的
+
+1. **`last_failure_reason_` 的赋值逻辑没有剥成纯函数**（E 类）——"只在转移进 `kRecover` 时才更新这个字段"这条判断目前直接写在 `onTimer()` 里，逻辑很简单（一个 if），但和 Stage F/I 定的"决策逻辑该剥出去"的纪律不完全一致；值不值得剥、剥出去能不能用手搭结构体测,可以讨论。
+2. **`~/start_episode` 中途重复调用的静默覆盖缺口，本质上是 topic 相对 action 缺失的"并发目标拒绝"能力**（C 类，已记入 [6.2](#62-反向清单现在就该做的)）——[11.3](#113-为什么用-topic-而不是-serviceaction-做-episode-边界与-requestreset-是同一种死锁机制) 已经讨论过这是选择的代价而不是实现疏漏，但值得在这里再点一次：这类"选了更简单的接口，隐性放弃了某个具体保护"的取舍，容易在几周后被忘记选择时权衡过什么。
+3. **`episode_runner.py` 本身完全没有测试**（E 类，延续 Stage F/I 定的纪律）——它是纯粹的胶水脚本（发消息、等结果、写CSV），按 [2.1.1](#211-这类系统该怎么测四层本周只取前两层) 的四层判据属于"任务层"，不该进 `colcon test`，但目前也没有任何脚本级的自检（比如"CSV 行数应该等于 episodes 参数"这种断言）。

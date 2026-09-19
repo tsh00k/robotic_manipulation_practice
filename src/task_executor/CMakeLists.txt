@@ -16,6 +16,7 @@ find_package(std_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(mujoco_bridge REQUIRED)
+find_package(manipulation_interfaces REQUIRED)
 
 add_executable(task_executor_node
   src/task_executor_node.cpp
@@ -35,6 +36,7 @@ ament_target_dependencies(task_executor_node
   std_msgs
   std_srvs
   tf2_ros
+  manipulation_interfaces
 )
 
 install(TARGETS task_executor_node

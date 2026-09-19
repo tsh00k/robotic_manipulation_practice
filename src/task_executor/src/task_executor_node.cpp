@@ -1,8 +1,10 @@
 #include <control_msgs/msg/gripper_command.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <manipulation_interfaces/msg/episode_outcome.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <std_msgs/msg/bool.hpp>
+#include <std_msgs/msg/empty.hpp>
 #include <std_srvs/srv/trigger.hpp>
 #include <tf2/exceptions.h>
 #include <tf2_ros/buffer.h>
@@ -16,6 +18,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "task_executor/fsm.hpp"
 #include "task_executor/keyframe_waypoint_source.hpp"
@@ -98,6 +101,16 @@ public:
     right_contact_sub_ = create_subscription<std_msgs::msg::Bool>(
       "/mujoco_bridge/ground_truth/right_finger_contact", rclcpp::QoS(10),
       std::bind(&TaskExecutorNode::onRightContact, this, std::placeholders::_1));
+
+    // Private names, same reasoning as mujoco_bridge's ~/reset (architecture.md
+    // 2.2): a capability of *this* node instance, not a system-wide singleton.
+    // week2.md Stage J: the episode runner is the intended (only expected) caller
+    // of ~/start_episode, and the only expected subscriber of ~/episode_outcome.
+    start_episode_sub_ = create_subscription<std_msgs::msg::Empty>(
+      "~/start_episode", rclcpp::QoS(10),
+      std::bind(&TaskExecutorNode::onStartEpisode, this, std::placeholders::_1));
+    episode_outcome_pub_ = create_publisher<manipulation_interfaces::msg::EpisodeOutcome>(
+      "~/episode_outcome", rclcpp::QoS(10));
 
     tf_buffer_ = std::make_unique<tf2_ros::Buffer>(get_clock());
     tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_);
@@ -212,10 +225,45 @@ private:
       });
   }
 
+  // Episode boundary (week2.md Stage J): resets this node's own bookkeeping and
+  // asks mujoco_bridge to reset the scene, WITHOUT restarting the process -- see
+  // phase.hpp's comment on why that used to be the assumption. Idempotent by
+  // design: always jumps straight to kHome regardless of current phase_, because
+  // the only expected caller is the episode runner, and it only calls this between
+  // episodes (after observing a ~/episode_outcome), never mid-episode.
+  void onStartEpisode(const std_msgs::msg::Empty::SharedPtr)
+  {
+    phase_ = Phase::kHome;
+    retry_count_ = 0;
+    last_failure_reason_ = ExitReason::kNone;
+    phase_names_log_.clear();
+    phase_durations_log_.clear();
+    phase_start_time_ = get_clock()->now();
+    requestReset();
+    RCLCPP_INFO(get_logger(), "episode start requested");
+  }
+
+  void publishEpisodeOutcome(bool success)
+  {
+    manipulation_interfaces::msg::EpisodeOutcome outcome;
+    outcome.success = success;
+    outcome.failure_code = success ? "NONE" : exitReasonName(last_failure_reason_);
+    outcome.retries = retry_count_;
+    outcome.phase_names = phase_names_log_;
+    outcome.phase_durations_s = phase_durations_log_;
+    episode_outcome_pub_->publish(outcome);
+    RCLCPP_INFO(
+      get_logger(), "episode outcome published: success=%d failure_code=%s retries=%u",
+      outcome.success, outcome.failure_code.c_str(), outcome.retries);
+  }
+
   void onTimer()
   {
+    if (phase_start_time_.nanoseconds() == 0) {
+      return;  // Idle: no ~/start_episode received yet this run.
+    }
     if (phase_ == Phase::kDone || phase_ == Phase::kFailed) {
-      return;  // Terminal: stop publishing/deciding, node stays up for inspection.
+      return;  // Terminal: stop publishing/deciding until the next ~/start_episode.
     }
 
     const auto arm = extractArmState();
@@ -230,11 +278,6 @@ private:
     } catch (const tf2::TransformException & e) {
       RCLCPP_WARN_ONCE(get_logger(), "world->hand_tcp not available yet: %s", e.what());
       return;
-    }
-
-    if (phase_start_time_.nanoseconds() == 0) {
-      phase_start_time_ = get_clock()->now();
-      requestReset();  // First tick of the whole episode: start from a known state.
     }
 
     const ObjectPose object_pose{
@@ -282,6 +325,18 @@ private:
       maxAbsError(arm->positions, target.arm_positions), in.elapsed_in_phase_s,
       exitReasonName(decision.exit_reason));
 
+    phase_names_log_.push_back(phaseName(phase_));
+    phase_durations_log_.push_back(in.elapsed_in_phase_s);
+    if (decision.next_phase == Phase::kRecover) {
+      // The four-shape design (week2.md 10.3.3): a transition INTO kRecover
+      // always carries the real failure ExitReason (kTimeout/kSlipped/...), never
+      // kNone -- kNone is reserved for kRecover's own kHome retry redirect, which
+      // lands in the branch below instead. Kept separately from that redirect's
+      // kNone so a later kFailed can report *why* it kept failing, not just that
+      // retries ran out.
+      last_failure_reason_ = decision.exit_reason;
+    }
+
     if (decision.is_retry) {
       ++retry_count_;
       RCLCPP_WARN(
@@ -290,9 +345,11 @@ private:
     }
     if (decision.next_phase == Phase::kFailed) {
       RCLCPP_ERROR(get_logger(), "episode FAILED after %d retries", retry_count_);
+      publishEpisodeOutcome(false);
     }
     if (decision.next_phase == Phase::kDone) {
       RCLCPP_INFO(get_logger(), "episode DONE");
+      publishEpisodeOutcome(true);
     }
     phase_ = decision.next_phase;
     phase_start_time_ = get_clock()->now();
@@ -301,17 +358,35 @@ private:
   KeyframeWaypointSource waypoint_source_;
   FsmParams params_;
   Phase phase_ = Phase::kHome;
+  // Zero (RCL_ROS_TIME's default-constructed value) doubles as "no episode has
+  // been started yet" -- onTimer()'s idle check and onStartEpisode() both rely on
+  // this sentinel, see phase.hpp's comment on why there is no dedicated Phase for
+  // it instead.
   rclcpp::Time phase_start_time_{0, 0, RCL_ROS_TIME};
   int retry_count_ = 0;
+  // Per-episode bookkeeping for ~/episode_outcome (week2.md Stage J), reset in
+  // onStartEpisode(): which phases this episode visited, in order, and how long
+  // elapsed_in_phase_s was when it left each one.
+  std::vector<std::string> phase_names_log_;
+  std::vector<double> phase_durations_log_;
+  // The most recent real failure classification (kTimeout/kSlipped/...), i.e. the
+  // exit_reason of the most recent transition INTO kRecover -- kept separately
+  // from ExitReason::kRetryLimitExceeded (kRecover's own exit reason when it gives
+  // up) so a failed episode's outcome reports what actually kept failing, not
+  // just that retries ran out.
+  ExitReason last_failure_reason_ = ExitReason::kNone;
 
   rclcpp::TimerBase::SharedPtr timer_;
   rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr joint_command_pub_;
   rclcpp::Publisher<control_msgs::msg::GripperCommand>::SharedPtr gripper_command_pub_;
+  rclcpp::Publisher<manipulation_interfaces::msg::EpisodeOutcome>::SharedPtr
+    episode_outcome_pub_;
   rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr reset_client_;
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_sub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr object_pose_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr left_contact_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr right_contact_sub_;
+  rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr start_episode_sub_;
   std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
   std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
 

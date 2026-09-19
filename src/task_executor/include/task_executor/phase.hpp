@@ -6,9 +6,15 @@ namespace task_executor
 // week2.md Stage I's fixed sequence: HOME -> PREGRASP -> GRASP -> CLOSE -> LIFT ->
 // PREPLACE -> PLACE -> OPEN -> RETRACT -> VERIFY -> DONE, with RECOVER as the only
 // off-ramp (from any phase, on timeout/failure) and FAILED as the terminal giving-up
-// state after too many RECOVER round-trips. There is deliberately no "back to HOME
-// to idle" phase after DONE/FAILED -- an episode boundary is the process boundary
-// this week (Stage J's episode runner, not this node, owns "start a new attempt").
+// state after too many RECOVER round-trips. There is deliberately no explicit
+// "idle" phase in this enum: task_executor_node.cpp's onTimer() treats kDone/kFailed
+// as terminal (stops publishing/deciding) until it receives ~/start_episode, which
+// jumps phase_ straight back to kHome without needing a phase of its own here.
+// (Stage I originally said the *process* boundary was the episode boundary -- that
+// assumption was replaced in Stage J once the episode runner needed to drive many
+// consecutive episodes against the same long-lived node instead of restarting it
+// each time, which would have reintroduced the DDS-discovery-race class of bug
+// week2.md 10.10.2's first (discarded) reproduction attempt ran into.)
 enum class Phase
 {
   kHome,
