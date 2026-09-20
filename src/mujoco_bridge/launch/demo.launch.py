@@ -13,6 +13,21 @@ def generate_launch_description():
         ),
     )
 
+    # Defaults below must match mujoco_bridge_node.cpp's declare_parameter() defaults
+    # exactly, so omitting a launch argument reproduces today's behavior unchanged.
+    # Scope is deliberately narrow (these four, not every declare_parameter() in the
+    # node): joint_state_rate_hz/tf_rate_hz is week1.md's reverse-checklist item
+    # 13.2 ("launch 文件目前没有暴露节点自己的 ROS 参数"), and the debug viewer args
+    # are the Stage J feature that just made that item's trigger condition live --
+    # both need to be flippable from the command line to run different demo
+    # configurations without editing source. task_executor's fsm./grasp./verify.
+    # params are measured calibration constants (Stage H/I), not per-run knobs, and
+    # stay un-exposed until something actually needs them overridden at launch time.
+    joint_state_rate_hz_arg = DeclareLaunchArgument('joint_state_rate_hz', default_value='100.0')
+    tf_rate_hz_arg = DeclareLaunchArgument('tf_rate_hz', default_value='100.0')
+    enable_debug_viewer_arg = DeclareLaunchArgument('enable_debug_viewer', default_value='false')
+    debug_viewer_rate_hz_arg = DeclareLaunchArgument('debug_viewer_rate_hz', default_value='30.0')
+
     bridge_node = Node(
         package='mujoco_bridge',
         executable='mujoco_bridge_node',
@@ -23,7 +38,13 @@ def generate_launch_description():
         # Set anyway to establish the pattern: every node added to this launch file
         # going forward (task_executor in Stage I) must set it too, or its timeouts
         # run on wall time instead of sim time.
-        parameters=[{'use_sim_time': True}],
+        parameters=[{
+            'use_sim_time': True,
+            'joint_state_rate_hz': LaunchConfiguration('joint_state_rate_hz'),
+            'tf_rate_hz': LaunchConfiguration('tf_rate_hz'),
+            'enable_debug_viewer': LaunchConfiguration('enable_debug_viewer'),
+            'debug_viewer_rate_hz': LaunchConfiguration('debug_viewer_rate_hz'),
+        }],
     )
 
     task_executor_node = Node(
@@ -53,4 +74,13 @@ def generate_launch_description():
         additional_env={'LIBGL_ALWAYS_SOFTWARE': '1'},
     )
 
-    return LaunchDescription([rviz_config_arg, bridge_node, task_executor_node, rviz_node])
+    return LaunchDescription([
+        rviz_config_arg,
+        joint_state_rate_hz_arg,
+        tf_rate_hz_arg,
+        enable_debug_viewer_arg,
+        debug_viewer_rate_hz_arg,
+        bridge_node,
+        task_executor_node,
+        rviz_node,
+    ])

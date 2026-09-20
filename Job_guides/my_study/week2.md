@@ -100,6 +100,13 @@
     - [11.7.4 排查记录：GLFW 创建 GL 上下文在 distrobox 里卡死](#1174-排查记录glfw-创建-gl-上下文在-distrobox-里卡死)
     - [11.7.5 失败模式与验证手段](#1175-失败模式与验证手段)
     - [11.7.6 你没问但值得注意的](#1176-你没问但值得注意的)
+  - [11.8 launch 层参数暴露与 `record_demo_bag.sh`（收尾 Stage J）](#118-launch-层参数暴露与-record_demo_bagsh收尾-stage-j)
+    - [11.8.1 一句话总结](#1181-一句话总结)
+    - [11.8.2 改动清单与验证结果](#1182-改动清单与验证结果)
+    - [11.8.3 概念讲解：为什么不新建 `pick_place_demo.launch.py`，以及 rosbag 回放里的 sim time 陷阱](#1183-概念讲解为什么不新建-pick_place_demolaunchpy以及-rosbag-回放里的-sim-time-陷阱)
+    - [11.8.4 排查记录：`ros2 launch` 和 `ros2 run` 是同一种假死](#1184-排查记录ros2-launch-和-ros2-run-是同一种假死)
+    - [11.8.5 失败模式与验证手段](#1185-失败模式与验证手段)
+    - [11.8.6 你没问但值得注意的](#1186-你没问但值得注意的)
 
 ---
 
@@ -202,7 +209,7 @@
 
 | | 内容 |
 |---|---|
-| 改动 | ① `scripts/` 或新增 `experiment_runner` 里的 episode runner：调 `~/reset` → 触发一次任务 → 收结果 → 循环 N 次；② 输出 CSV 到 `results/`（每 episode：seed/物体位姿/成功与否/失败码/各阶段耗时）；③ `pick_place_demo.launch.py`（bridge + executor，**不带 rviz**）——原计划这一项是"RViz 网格显示"（`robot_state_publisher` + `RobotModel` Display），实际做过一次又被回退，改成调试专用的 GLFW debug viewer（`enable_debug_viewer` 参数，同进程直连权威 `mjData`，不经任何话题/降采样，详见 [11.7](#117-debug-viewerglfw-原生渲染直连权威-mjdata替代-25-计划里的-rviz-集成)）；debug viewer 直接挂在 `mujoco_bridge_node` 里，靠参数开关，跟 `pick_place_demo.launch.py` 这条 launch 文件本身没有绑定关系，后者仍未创建；④ launch 层暴露节点参数（解锁 week1 反向清单末条）；⑤ 录一段 rosbag |
+| 改动 | ① `scripts/` 或新增 `experiment_runner` 里的 episode runner：调 `~/reset` → 触发一次任务 → 收结果 → 循环 N 次；② 输出 CSV 到 `results/`（每 episode：seed/物体位姿/成功与否/失败码/各阶段耗时）；③ `pick_place_demo.launch.py`——原计划这一项是"RViz 网格显示"（`robot_state_publisher` + `RobotModel` Display），实际做过一次又被回退，改成调试专用的 GLFW debug viewer（`enable_debug_viewer` 参数，同进程直连权威 `mjData`，不经任何话题/降采样，详见 [11.7](#117-debug-viewerglfw-原生渲染直连权威-mjdata替代-25-计划里的-rviz-集成)）；文件名也没有照搬——现有的 `demo.launch.py` 已经在做 bridge+executor+rviz、默认模型就是 `pick_place_scene.xml`，新建一个同名文件只会是同一张图的重复，改成直接在 `demo.launch.py` 上扩展（详见 [11.8](#118-launch-层参数暴露与-record_demo_bagsh收尾-stage-j)）；④ launch 层暴露节点参数（解锁 week1 反向清单末条，[11.8](#118-launch-层参数暴露与-record_demo_bagsh收尾-stage-j)）；⑤ 录一段 rosbag（`scripts/record_demo_bag.sh`，[11.8](#118-launch-层参数暴露与-record_demo_bagsh收尾-stage-j)） |
 | 验收 | **固定物体位姿下连续 20 次成功，无非预期碰撞**（计划书 5.3 第 4 条）；CSV 里 20 行全绿；失败码分布表（哪怕全零也要有这张表的产出路径） |
 | 预期要讲的概念 | `~/reset` 作为 episode 边界的局限（[week1 反向清单](week1.md#132-反向清单现在就该做的属于缺一次推演)：reset 的跳变对下游不可见，而 episode runner 是**第一个真正跨 episode 比较数值的下游**）；rosbag2 记什么话题、sim time 下回放的坑；20 次"连续成功"和"20 次里成功 20 次"的区别 |
 
@@ -1495,7 +1502,7 @@ if (in.grasp_signals.box_height_m < params.grasp_criteria.lift_height_threshold_
 
 ## 11. Stage J：episode 边界重构与 episode runner
 
-> 本节覆盖 Stage J 计划（[2.5](#25-stage-j--episode-runner20-次连跑与第一段-demo)）里"episode runner + 连续20次"这部分（11.1~11.6）和"调试可视化"这部分（[11.7](#117-debug-viewerglfw-原生渲染直连权威-mjdata替代-25-计划里的-rviz-集成)，用 GLFW debug viewer 替代了原计划里的 RViz 网格集成）。`pick_place_demo.launch.py`、launch 参数暴露、rosbag 录制仍待做，完成后会继续扩写这一节。
+> 本节覆盖 Stage J 计划（[2.5](#25-stage-j--episode-runner20-次连跑与第一段-demo)）的全部 5 项：episode runner + 连续20次（11.1~11.6）、调试可视化（[11.7](#117-debug-viewerglfw-原生渲染直连权威-mjdata替代-25-计划里的-rviz-集成)，用 GLFW debug viewer 替代了原计划里的 RViz 网格集成）、launch 层参数暴露 + rosbag 录制（[11.8](#118-launch-层参数暴露与-record_demo_bagsh收尾-stage-j)）。Stage J 到这里收尾。
 
 ### 11.0 一句话总结
 
@@ -1729,3 +1736,111 @@ lint 部分沿用既有历史债务，没有新增失败类别。
 2. **（C类）RTF 掉线目前只能靠人盯日志发现**——开着 debug viewer 时物理会变慢，但没有任何主动告警；如果谁开着它跑 `episode_runner.py` 那种要比较耗时数据的批量实验，数据会被污染却毫无提示。
 3. **（E类）唯一的验证手段是人眼看窗口**——这在"渲染到真实窗口没法脱离显示器自动化"这个约束下是合理的，但这次崩溃模式恰恰是"卡死不报错"而不是"干净失败"，人眼验证本身在这种模式下也容易被误判成"电脑卡了"而不是代码问题；现有 4 个 gtest 只验证了 `dlsym` 层，没有任何调用路径覆盖到 `render()` 本身。
 4. **（F类）`LIBGL_ALWAYS_SOFTWARE=1` 的适用边界没测过**——只有 30Hz 和 2Hz 两个数据点，如果以后想用更高频率看实时接触力这类调试场景，软件渲染开销会不会变得不可接受，不知道。
+
+### 11.8 launch 层参数暴露与 `record_demo_bag.sh`（收尾 Stage J）
+
+覆盖 [2.5](#25-stage-j--episode-runner20-次连跑与第一段-demo) 计划里最后剩下的三项：④ launch 层暴露节点参数（week1.md [13.2](../../STUDY_NOTES_GUIDE.md) 反向清单末条），⑤ 录一段 rosbag，以及③里"要不要新建 `pick_place_demo.launch.py`"这个文件命名问题。Stage J 到这里全部收尾。
+
+#### 11.8.1 一句话总结
+
+在 [demo.launch.py](../../src/mujoco_bridge/launch/demo.launch.py) 里给 `bridge_node` 加了四个 `DeclareLaunchArgument`（`joint_state_rate_hz`/`tf_rate_hz`/`enable_debug_viewer`/`debug_viewer_rate_hz`，默认值跟节点自己 `declare_parameter` 的默认值逐一对齐，不传参数就是今天的行为），不新建 `pick_place_demo.launch.py`——`demo.launch.py` 已经在做同一张图（bridge+executor+rviz，默认模型就是 `pick_place_scene.xml`），新建一个同名文件只是重复。新增 [scripts/record_demo_bag.sh](../../scripts/record_demo_bag.sh)，假设 demo 已经在跑（不负责启动它，理由见 [11.8.3](#1183-概念讲解为什么不新建-pick_place_demolaunchpy以及-rosbag-回放里的-sim-time-陷阱)），录制期间跑 N 个 episode，`-a` 录全部话题。过程中实测撞见一个之前没写全的假死变体——`ros2 launch` 和 `ros2 run` 是同一种"单发 `kill -INT` 打不醒 wrapper"的坑，已经补进 [STUDY_NOTES_GUIDE.md 3.1](../../STUDY_NOTES_GUIDE.md)，原来那条只写了 `ros2 run`，范围写窄了。
+
+#### 11.8.2 改动清单与验证结果
+
+**改动**：
+
+- [demo.launch.py](../../src/mujoco_bridge/launch/demo.launch.py)：四个新 `DeclareLaunchArgument`，`bridge_node` 的 `parameters=[...]` 从只有 `use_sim_time` 扩成带四个 `LaunchConfiguration(...)`。
+- [scripts/record_demo_bag.sh](../../scripts/record_demo_bag.sh)（新，可执行）：环境卫生检查（`ps -eo pid,comm` 确认 `mujoco_bridge_node`/`task_executor_node` 各恰好一个实例，`ros2 topic info /clock` 确认 `Publisher count: 1`，双重权威判据，仿照 [STUDY_NOTES_GUIDE.md 3.1](../../STUDY_NOTES_GUIDE.md)）→ 后台起 `ros2 bag record -a --use-sim-time -o results/bags/pick_place_<timestamp>`，记下 `$!` → 等 3 秒 → 跑 `episode_runner.py --episodes N` → `kill -INT` 录制进程的真实 PID、`wait` 它退出 → 检查 `metadata.yaml` 是否生成。
+- [.gitignore](../../.gitignore)：`results/*.bag`/`results/*.mcap` → `results/bags/`（这两条规则本来就没对过——见 [11.8.2](#1182-改动清单与验证结果) 下面这段实测）。
+
+**实测发现并修正的一个规则错误**：`ros2 bag record` 的默认存储是 `sqlite3`（一个目录，里面是 `<name>_0.db3` + `metadata.yaml`），容器里也没装 `rosbag2_storage_mcap` 插件——原来 `.gitignore` 写的 `results/*.bag`/`results/*.mcap` 从来没匹配过这里实际产出的文件格式。这条不是这次引入的新坑，是写计划时顺手发现的历史遗留错误，按 [STUDY_NOTES_GUIDE.md 2.3](../../STUDY_NOTES_GUIDE.md) 的"结论被推翻时留档"原则记在这里，不是静默改掉。
+
+**编译**（launch 文件是纯 Python，`colcon build --packages-select mujoco_bridge --symlink-install` 只是确认它装得进去，没有 C++ 改动）：
+
+```
+Starting >>> mujoco_bridge
+Finished <<< mujoco_bridge [0.10s]
+```
+
+**行为验证：launch 参数确实到达节点**（这正是 week1 13.2 那条反向清单当初没验证过的事情）：
+
+```
+$ ros2 launch mujoco_bridge demo.launch.py \
+    joint_state_rate_hz:=50.0 tf_rate_hz:=50.0 \
+    enable_debug_viewer:=true debug_viewer_rate_hz:=5.0
+
+[mujoco_bridge_node-1] /joint_states every 10 steps (50.0 Hz requested, 50.0 Hz actual)
+[mujoco_bridge_node-1] /tf every 10 steps (50.0 Hz requested, 50.0 Hz actual)
+[mujoco_bridge_node-1] debug viewer every 100 steps (5.0 Hz requested, 5.0 Hz actual)
+[mujoco_bridge_node-1] Debug viewer enabled (GLFW window)
+```
+
+四个覆盖值全部生效，不传参数时（默认值）日志跟改动前逐字节一致（`100.0 Hz`/`false`/无 debug viewer 相关行）。
+
+**行为验证：`record_demo_bag.sh --episodes 3`**（demo 已经跑起来的前提下）：
+
+```
+recording to results/bags/pick_place_20260920T060919Z
+...
+episode 1: success=True failure_code=NONE retries=0 total_duration_s=6.74
+episode 2: success=True failure_code=NONE retries=0 total_duration_s=6.75
+episode 3: success=True failure_code=NONE retries=0 total_duration_s=6.75
+wrote 3 rows to results/bags/pick_place_20260920T060919Z/episodes.csv
+stopping recorder (pid 193479)
+[rosbag2_recorder]: Recording stopped
+done: results/bags/pick_place_20260920T060919Z
+```
+
+`ros2 bag info` 确认产物：
+
+```
+Duration:          23.510000000s
+Messages:          24465
+Topic: /clock ... Count: 11757
+Topic: /joint_states ... Count: 2351
+Topic: /tf ... Count: 2352
+Topic: /tf_static ... Count: 1
+Topic: /mujoco_bridge/ground_truth/object_pose ... Count: 2351
+Topic: /task_executor/episode_outcome ... Count: 3
+Topic: /task_executor/start_episode ... Count: 2   # 见 11.8.3，已知限制不是 bug
+```
+
+`metadata.yaml`、`<name>_0.db3`、`episodes.csv` 三个文件都在，`git status` 确认 `results/bags/` 整个目录不出现在待提交列表里（`.gitignore` 修复生效）。
+
+#### 11.8.3 概念讲解：为什么不新建 `pick_place_demo.launch.py`，以及 rosbag 回放里的 sim time 陷阱
+
+**为什么直接扩展 `demo.launch.py`，不新建同名文件**：[2.5](#25-stage-j--episode-runner20-次连跑与第一段-demo) 原计划写的文件名是 `pick_place_demo.launch.py`，但那时候 `demo.launch.py` 还没写。现在 `demo.launch.py` 已经存在，而且做的就是同一件事——bridge + executor + rviz，默认模型是 `pick_place_scene.xml`。按计划字面意思新建一个文件，结果会是两个几乎一样的 launch 文件长期并存、以后改一个另一个忘了改。这是"结论被推翻时留档"的又一个例子：原计划写下时没有预见到 `demo.launch.py` 会先把这件事做了，现在补上说明，不是悄悄改掉原计划文字。
+
+**为什么 `record_demo_bag.sh` 不负责启动 demo 本身**：如果脚本自己 `ros2 launch` 起 demo，再负责干净关掉它，等于把两类进程生命周期问题叠在一起——`ros2 launch` 本身就是个会吞掉裸 `kill -INT` 的 wrapper（[11.8.4](#1184-排查记录ros2-launch-和-ros2-run-是同一种假死)），录制器是否干净退出是另一个要单独验证的问题。让脚本假设 demo 已经在跑（`episode_runner.py` 对 bridge/executor 节点本来就是同样的假设），这次改动就只需要解决"录制器怎么干净停"这一个新问题，不用重新解一遍 `ros2 run` 那两个 session 才啃下来的旧问题。
+
+**rosbag 回放里的 sim time 陷阱**（[2.5](#25-stage-j--episode-runner20-次连跑与第一段-demo) 计划里点名要讲的概念）：`/clock` 本身就是被录进这个 bag 的一个普通话题（`mujoco_bridge_node` 一直在发布它）。普通 `ros2 bag play` 默认按录制时的相对时间戳重放所有话题，`/clock` 也不例外，所以下游一个 `use_sim_time=true` 的节点直接订阅重放出来的 `/clock` 就能拿到正确的 sim time，不需要额外配置。**陷阱在于额外加 `--clock` 参数**：那个参数会让 `ros2 bag play` 自己根据消息时间戳再合成一份 `/clock` 发布出去——这个 bag 里已经有一个真实的 `/clock` 话题在重放，`--clock` 会造出第二个发布者，变成这个项目已经反复踩过的"同一个话题两个发布者，订阅者拿到哪个不确定"这一类问题（[STUDY_NOTES_GUIDE.md 3.2](../../STUDY_NOTES_GUIDE.md)），只是这次是在回放场景第一次撞见，不是在两个实时节点之间。
+
+#### 11.8.4 排查记录：`ros2 launch` 和 `ros2 run` 是同一种假死
+
+**现象**：`nohup ros2 launch mujoco_bridge demo.launch.py ... &` 后台起了 demo，`kill -INT <launch_pid>` 之后日志纹丝不动——没有任何 shutdown 相关的行，`ps` 显示 `mujoco_bridge_node`/`task_executor_node`/`rviz2`/`ros2` 四个进程原样继续跑，等了几秒依然如此。
+
+**线索**：这跟 [STUDY_NOTES_GUIDE.md 3.1](../../STUDY_NOTES_GUIDE.md) 已经记录过的 `ros2 run` 假死现象一模一样——那条笔记当时只验证过 `ros2 run`，没验证 `ros2 launch`，因为 `ros2 launch` 那时候还没被这样用过。
+
+**根因**：跟 `ros2 run` 是同一个机制：`ros2 launch` 也是个 Python wrapper，它的信号处理假设 SIGINT 来自终端（发给整个前台进程组，wrapper 和它启动的所有子进程一起收到），脚本/工具单独对 wrapper 这一个 PID 发 `kill -INT` 时，它的处理逻辑什么都不做——不是"处理慢"，是根本没触发对应的分支，等多久都一样。
+
+**修复**：不指望单发信号能停掉整棵进程树。从启动日志里的 `process started with pid [N]` 行拿到每个子进程（`mujoco_bridge_node`/`task_executor_node`/`rviz2`）的真实 PID，连同 `ros2 launch` 自己的 PID 一起逐个 `kill`。
+
+**验证**：按这个方法清理后，`ps -eo pid,comm` 确认四个进程全部消失，之后重新起 demo、跑 `record_demo_bag.sh`，行为符合预期（[11.8.2](#1182-改动清单与验证结果)）。
+
+**留下的经验**：`ros2` 系的命令行工具（`run`、`launch`，大概率还有其他没试过的子命令）**默认都不能假设"给包装进程发一个信号就能让它和它管理的子进程一起干净退出"**——这次不是重新踩一个新坑，是发现已经写下的经验范围划窄了。已经把 [STUDY_NOTES_GUIDE.md 3.1](../../STUDY_NOTES_GUIDE.md) 那条从"`ros2 run` 是这样"改成"`ros2 run`/`ros2 launch` 都是这样"，这样以后碰到 `ros2 bag record`（已验证**不是**这样，见 [11.8.2](#1182-改动清单与验证结果)——它对裸 `kill -INT` 反应正常）之类新工具时，默认姿势是"先实测这个工具对裸信号的反应，不要预设它和 `ros2 run` 一样，也不要预设它不一样"。
+
+#### 11.8.5 失败模式与验证手段
+
+| 失败模式 | 现象 | 怎么发现/防住 |
+|---|---|---|
+| `ros2 launch` 对裸 `kill -INT` 假死 | 子进程全部继续跑，日志无任何 shutdown 行 | 实测撞见，见 [11.8.4](#1184-排查记录ros2-launch-和-ros2-run-是同一种假死)；修法是按 PID 逐个 kill，不依赖 wrapper 转发信号 |
+| `.gitignore` 的 `*.bag`/`*.mcap` 规则不匹配实际产出 | `ros2 bag record` 默认输出 `.db3` 目录，两条旧规则都不生效——第一次录制就会让 `git status` 里出现几 MB 的二进制文件 | 写计划阶段实测 `ros2 bag record --help` + 确认 `rosbag2_storage_mcap` 未安装时发现；已修，见 [11.8.2](#1182-改动清单与验证结果) |
+| `-a` 录制下，episode 1 的 `~/start_episode` 触发消息可能未被录进 bag | `ros2 bag info` 显示 `/task_executor/start_episode` Count 比实际 episode 数少 1（实测：3 个 episode 只录到 2 条） | 已知限制，未修——见 [11.8.3](#1183-概念讲解为什么不新建-pick_place_demolaunchpy以及-rosbag-回放里的-sim-time-陷阱)、[record_demo_bag.sh](../../scripts/record_demo_bag.sh) 里的对应注释。该消息的*后果*（对应的 episode_outcome、物体轨迹）仍然完整录到 |
+| 误加 `ros2 bag play --clock` 回放这个 bag | `/clock` 出现两个发布者，下游 `use_sim_time` 节点收到不确定是哪一个 | 概念已记录，见 [11.8.3](#1183-概念讲解为什么不新建-pick_place_demolaunchpy以及-rosbag-回放里的-sim-time-陷阱)；没有代码层面的防护，纯粹是"回放这个 bag 不要加 `--clock`"这条使用约定 |
+
+#### 11.8.6 你没问但值得注意的
+
+1. **（C类）`record_demo_bag.sh` 的环境卫生检查只挡"demo 没在跑"和"demo 跑了不止一份"，挡不住"demo 跑的是错的模型/参数"**——比如有人用 `model_path` 覆盖成了别的场景再录制，脚本不会发现，录出来的 bag 会显得像是 pick-and-place 演示、实际不是。
+2. **（C类）`-a` 录全部话题这个决定，意味着以后新增任何话题都会自动被录进去，没有人会因为"话题变多了"收到通知**——这是选择 `-a` 而不是白名单时接受的代价（换取不用维护话题列表），但如果以后加了一个高频、大消息的调试话题（比如相机图像），第一次用这个脚本录制的人会在毫无预警的情况下得到一个远比预期大的 bag。
+3. **（E类）`record_demo_bag.sh` 本身完全没有测试**——跟 `episode_runner.py` 一样是纯胶水脚本，按 [2.1.1](#211-这类系统该怎么测四层本周只取前两层) 的四层判据属于"任务层"，不该进 `colcon test`；这次的验证方式是我手动跑了两次、检查了输出结果，不是自动化断言。
+4. **（F类）"`ros2 launch`/`ros2 run` 都不能信裸信号"这条经验目前只验证了 SIGINT，没测 SIGTERM**——`kill` 默认发的是 SIGTERM，这次踩坑用的是显式 `kill -INT`；两者会不会有不同表现（比如 SIGTERM 被 Python 的默认处理器直接终止、不像 SIGINT 那样被 `except KeyboardInterrupt` 特殊处理）没有验证过，是个没测的分支。

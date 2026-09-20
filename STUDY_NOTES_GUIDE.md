@@ -157,7 +157,7 @@ ros2 node list                                              # 仅辅助，见下
 >
 > 同理，`ps -eo pid,args | grep 'lib/mujoco_bridg[e]'` 也不可靠：`-o args` 会匹配到自己所在的那条 `bash -c` 命令行，报假警报（`pkill -f` 自匹配那个坑的 grep 版本）。用 `-o comm` 按可执行文件名匹配。
 
-起后台节点**直接跑可执行文件**，不要经过 `ros2 run`：
+起后台节点**直接跑可执行文件**，不要经过 `ros2 run`（这条对 `ros2 launch` 同样成立，见下）：
 
 ```bash
 ./install/mujoco_bridge/lib/mujoco_bridge/mujoco_bridge_node > /tmp/n.log 2>&1 &
@@ -169,6 +169,7 @@ kill $PID; wait $PID 2>/dev/null
 原因和踩过的坑（Stage E 新增了两条，六种变体的完整清单见 [week1.md 11.13](Job_guides/my_study/week1.md#1113-排查记录-链式后台化产生的孤儿进程第六种变体)）：
 - `ros2 run` 是 Python wrapper，`fork`/`exec` 出真正的 C++ 子进程。`kill` wrapper 的 PID（默认 SIGTERM）只杀 Python 那层，子进程被 init 收养后继续发话题。`timeout N ros2 run ...` 同理。
 - **只给 wrapper 一个 PID 发 SIGINT 是"假死"，不是杀不掉**：wrapper 的 `except KeyboardInterrupt: pass` 假设信号是发给整个前台进程组的（终端 Ctrl+C 确实是），只打 wrapper 单个 PID 时它什么都不做，两边都不会退出，等多久都一样。终端里 Ctrl+C 能退出，是因为它同时杀了 child；脚本/工具单独 `kill -INT <wrapper_pid>` 不会有同样效果。
+- **`ros2 launch` 是同一类 wrapper，同一个坑**（week2.md Stage J [11.8](Job_guides/my_study/week2.md) 实测撞见，之前这条只写了 `ros2 run`，范围写窄了）：`nohup ros2 launch mujoco_bridge demo.launch.py & ... kill -INT <launch_pid>` 打了之后，日志里没有任何 shutdown 相关的行，`bridge`/`executor`/`rviz2` 三个子进程原样继续跑，等多久都一样——跟 `ros2 run` 的假死机制一样：wrapper 的信号处理假设信号来自终端（发给整个前台进程组），脚本单独 `kill -INT` 一个 PID 时它什么都不做。清理办法一样：从启动日志里的 `process started with pid [N]` 拿到每个子进程的真实 PID，逐个 `kill`，不能只打 launch 自己的 PID。
 - **`setsid ... &` + `kill -- -$!` 也不可靠**（`setsid` 会先 fork，`$!` 不是新进程组的 PGID）——这曾是笔记里写下的"正确做法"，第二次栽在它上面。
 - **`cmd1 && cmd2 && cmd3 &` 这种链式命令背景化同样留孤儿**：`$!` 拿到的是执行这条串联列表的 bash 子 shell 的 PID，真正的最后一条命令是这个子 shell 的子进程，`kill $!` 只杀了子 shell。
 - **`pkill -f <名字>` 会杀掉自己所在的 shell**（`-f` 全行匹配，命令行自匹配）。要按数字 PID 杀：

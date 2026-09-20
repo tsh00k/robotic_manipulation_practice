@@ -6,5 +6,8 @@ CMakeFiles/
 CMakeCache.txt
 
 # large model/experiment assets that shouldn't live in git history
-results/*.bag
-results/*.mcap
+# `ros2 bag record`'s default storage is sqlite3 (a directory of *_0.db3 +
+# metadata.yaml), not a single .bag/.mcap file -- rosbag2_storage_mcap isn't even
+# installed in this container. The old *.bag/*.mcap rules never matched what
+# record_demo_bag.sh actually produces; see week2.md Stage J 11.8.
+results/bags/
