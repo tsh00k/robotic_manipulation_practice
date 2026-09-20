@@ -45,6 +45,16 @@ def generate_launch_description():
             'enable_debug_viewer': LaunchConfiguration('enable_debug_viewer'),
             'debug_viewer_rate_hz': LaunchConfiguration('debug_viewer_rate_hz'),
         }],
+        # Same fix, same reason as rviz_node's additional_env below: with
+        # enable_debug_viewer:=true, this process also creates a GLFW/GL window
+        # (DebugViewer, week2.md Stage J 11.7), and hardware-accelerated context
+        # creation hangs indefinitely in this container -- see 11.7.4. Unlike
+        # rviz2 that hang is fatal to the whole node, not just the view: it
+        # happens synchronously inside the constructor, before rclcpp::spin()
+        # ever starts, so /joint_states and /tf never come up either. Harmless
+        # to set unconditionally: with enable_debug_viewer:=false (default) this
+        # process never calls into GLFW/GL at all.
+        additional_env={'LIBGL_ALWAYS_SOFTWARE': '1'},
     )
 
     task_executor_node = Node(
