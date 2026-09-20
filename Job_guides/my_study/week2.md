@@ -1703,6 +1703,10 @@ lint 部分沿用既有历史债务，没有新增失败类别。
 
 **根因**：这个容器（distrobox + 主机 X server 转发）下，NVIDIA 专有驱动的硬件加速 GLX 路径协商失败——具体卡在驱动的哪一步（direct rendering 权限、DRI 设备节点访问、还是嵌套 Xorg 会话本身不支持这条路径）没有查清，只确认了"软件渲染能绕过，硬件加速走不通"这个事实边界。这不是"沙盒工具环境独有"的问题——在真实终端里交互式跑同样卡死，因为两边其实共享同一个 `DISPLAY`/同一个容器。
 
+**后续追查（收尾结论）**：上面这段写下时还没查清具体卡在哪一层，后来继续深挖，锁定了确切分层：① 不设 `__GLX_VENDOR_LIBRARY_NAME` 时，GLVND 的厂商自动探测本身卡死（`strace` 显示卡在对 X 连接 fd 的 `poll`，等一个永远不会来的应答）；② 强制 `__GLX_VENDOR_LIBRARY_NAME=nvidia` 后不再卡死，但改成立即报 `GLXBadFBConfig`——NVIDIA 驱动在这条嵌套 X 会话上拿不到能用的 FBConfig；③ 用 `eglQueryDevicesEXT`/`eglGetPlatformDisplayEXT(EGL_PLATFORM_DEVICE_EXT, ...)` 完全绕开 X11/GLX、直连 NVIDIA 的 EGL device 做了一次离屏渲染，`GL_RENDERER` 真实显示 `NVIDIA GeForce RTX 4060 Laptop GPU`、`GL_VERSION 4.6.0 NVIDIA 595.91.07`——GPU 和驱动本身完全正常，问题精确定位在"这条嵌套/转发的 X 会话上，NVIDIA 驱动的 DRI3 路径协商不出可用的 FBConfig"这一点，跟①②的现象互相印证。外部佐证：[TigerVNC#1773](https://github.com/TigerVNC/tigervnc/issues/1773) 上有人用同款 RTX 4060 在 Xvnc（另一种嵌套/虚拟 X 服务器）上撞到几乎一样的现象，且明确记录"强制 `__GLX_VENDOR_LIBRARY_NAME=nvidia` 之后 DRI3 仍然拿不到真正的硬件加速"——说明这是 NVIDIA 专有驱动在嵌套/虚拟 X 会话下的已知限制类别，不是这次这个容器独有的配置错误。
+
+**决定**：真正的硬件加速路径存在，但要走通得装 VirtualGL（拦截 GLX 调用，用真实 GPU 离屏渲染后转发画面给这个 2D X 会话），需要新装软件、且很可能要在 X server 侧配置 VGL 相关扩展/权限，属于会改动系统级配置的操作。权衡下来选择接受软件渲染收尾——debug viewer 本来就是低频调试工具（[11.7.2](#1172-改动清单与验证结果) 实测 2Hz 时 RTF 能回到 ~0.87~0.94，够用），不为这个引入新的系统级依赖和配置风险。VirtualGL 这条路径记在这里，以后如果真的需要更高频率的硬件加速再回头看。
+
 **修复（规避，不是根治）**：运行时加 `LIBGL_ALWAYS_SOFTWARE=1` 环境变量，强制 Mesa 软件光栅化。代价是渲染本身有真实开销（见 [11.7.2](#1172-改动清单与验证结果) 的 RTF 数据）。真正修好 NVIDIA/GLX 配置留作悬挂项。
 
 **留下的经验**：
