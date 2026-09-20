@@ -43,6 +43,17 @@ MujocoApi & loadMujocoApi()
     resolve(handle, "mju_negQuat", api.negQuat);
     resolve(handle, "mju_mulQuat", api.mulQuat);
     resolve(handle, "mju_rotVecQuat", api.rotVecQuat);
+    resolve(handle, "mjv_defaultCamera", api.defaultCamera);
+    resolve(handle, "mjv_defaultOption", api.defaultOption);
+    resolve(handle, "mjv_defaultScene", api.defaultScene);
+    resolve(handle, "mjr_defaultContext", api.defaultContext);
+    resolve(handle, "mjv_makeScene", api.makeScene);
+    resolve(handle, "mjr_makeContext", api.makeContext);
+    resolve(handle, "mjv_updateScene", api.updateScene);
+    resolve(handle, "mjr_render", api.render);
+    resolve(handle, "mjv_freeScene", api.freeScene);
+    resolve(handle, "mjr_freeContext", api.freeContext);
+    resolve(handle, "mjv_moveCamera", api.moveCamera);
     return api;
   }();
   return api;

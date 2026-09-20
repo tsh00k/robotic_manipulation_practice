@@ -18,6 +18,12 @@ find_package(tf2_ros REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(ament_index_cpp REQUIRED)
 find_package(mujoco REQUIRED)
+# For the optional debug viewer (debug_viewer.cpp) only. Unlike mujoco::mujoco,
+# glfw3 does not bundle a conflicting tinyxml2, so there is no dlopen-isolation
+# reason to avoid linking it normally. Provided by apt (libglfw3-dev); not listed
+# in package.xml for the same reason mujoco isn't -- it's a manually-installed
+# system library, not a rosdep-resolvable ROS package.
+find_package(glfw3 REQUIRED)
 
 # Exported as its own target (not just compiled into mujoco_bridge_node) because
 # grasp_criteria.hpp/cpp has zero rclcpp/mjModel dependencies by design (Stage F's
@@ -39,11 +45,12 @@ add_executable(mujoco_bridge_node
   src/frame_math.cpp
   src/state_ops.cpp
   src/grasp_state.cpp
+  src/debug_viewer.cpp
 )
 target_include_directories(mujoco_bridge_node PRIVATE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
-target_link_libraries(mujoco_bridge_node grasp_criteria)
+target_link_libraries(mujoco_bridge_node grasp_criteria glfw)
 ament_target_dependencies(mujoco_bridge_node
   rclcpp
   sensor_msgs

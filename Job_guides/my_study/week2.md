@@ -93,6 +93,13 @@
   - [11.4 排查记录：`episode_runner.py` 发布 `~/start_episode` 时撞上的 DDS 发现竞态](#114-排查记录episode_runnerpy-发布-start_episode-时撞上的-dds-发现竞态)
   - [11.5 失败模式与验证手段](#115-失败模式与验证手段)
   - [11.6 你没问但值得注意的](#116-你没问但值得注意的)
+  - [11.7 Debug viewer：GLFW 原生渲染，直连权威 `mjData`（替代 2.5 计划里的 RViz 集成）](#117-debug-viewerglfw-原生渲染直连权威-mjdata替代-25-计划里的-rviz-集成)
+    - [11.7.1 一句话总结](#1171-一句话总结)
+    - [11.7.2 改动清单与验证结果](#1172-改动清单与验证结果)
+    - [11.7.3 概念讲解：可视化架构选型——RViz / GLFW 原生渲染 / 三层"离权威物理源距离"梯子](#1173-概念讲解可视化架构选型rviz--glfw-原生渲染--三层离权威物理源距离梯子)
+    - [11.7.4 排查记录：GLFW 创建 GL 上下文在 distrobox 里卡死](#1174-排查记录glfw-创建-gl-上下文在-distrobox-里卡死)
+    - [11.7.5 失败模式与验证手段](#1175-失败模式与验证手段)
+    - [11.7.6 你没问但值得注意的](#1176-你没问但值得注意的)
 
 ---
 
@@ -195,7 +202,7 @@
 
 | | 内容 |
 |---|---|
-| 改动 | ① `scripts/` 或新增 `experiment_runner` 里的 episode runner：调 `~/reset` → 触发一次任务 → 收结果 → 循环 N 次；② 输出 CSV 到 `results/`（每 episode：seed/物体位姿/成功与否/失败码/各阶段耗时）；③ `pick_place_demo.launch.py`（bridge + executor + rviz，`LIBGL_ALWAYS_SOFTWARE=1` 照旧）——**这次顺带把 Stage I 收尾时讨论过、当时只存进 memory 没落地的 RViz 网格显示计划接进来**：加 `robot_state_publisher`（喂 `franka_description` 的 `fer.urdf.xacro`，`no_prefix:=true` 展开，链接名对齐 MJCF，remap 掉它自己的 `/tf`/`/tf_static` 避免和 `mujoco_bridge_node` 打架）+ `RobotModel` Display，让手臂在 RViz 里显示真实网格、跟着仿真动，不再只是坐标轴——已知局限：两个指尖网格因为 URDF 侧固定叫 `leftfinger`/`rightfinger`（无下划线），`no_prefix` 管不到，不会渲染/不会动，接受这个缺口不追；box/桌子仍然没有网格（另开一个 Marker 发布脚本才能做，本次不做）；④ launch 层暴露节点参数（解锁 week1 反向清单末条）；⑤ 录一段 rosbag |
+| 改动 | ① `scripts/` 或新增 `experiment_runner` 里的 episode runner：调 `~/reset` → 触发一次任务 → 收结果 → 循环 N 次；② 输出 CSV 到 `results/`（每 episode：seed/物体位姿/成功与否/失败码/各阶段耗时）；③ `pick_place_demo.launch.py`（bridge + executor，**不带 rviz**）——原计划这一项是"RViz 网格显示"（`robot_state_publisher` + `RobotModel` Display），实际做过一次又被回退，改成调试专用的 GLFW debug viewer（`enable_debug_viewer` 参数，同进程直连权威 `mjData`，不经任何话题/降采样，详见 [11.7](#117-debug-viewerglfw-原生渲染直连权威-mjdata替代-25-计划里的-rviz-集成)）；debug viewer 直接挂在 `mujoco_bridge_node` 里，靠参数开关，跟 `pick_place_demo.launch.py` 这条 launch 文件本身没有绑定关系，后者仍未创建；④ launch 层暴露节点参数（解锁 week1 反向清单末条）；⑤ 录一段 rosbag |
 | 验收 | **固定物体位姿下连续 20 次成功，无非预期碰撞**（计划书 5.3 第 4 条）；CSV 里 20 行全绿；失败码分布表（哪怕全零也要有这张表的产出路径） |
 | 预期要讲的概念 | `~/reset` 作为 episode 边界的局限（[week1 反向清单](week1.md#132-反向清单现在就该做的属于缺一次推演)：reset 的跳变对下游不可见，而 episode runner 是**第一个真正跨 episode 比较数值的下游**）；rosbag2 记什么话题、sim time 下回放的坑；20 次"连续成功"和"20 次里成功 20 次"的区别 |
 
@@ -1488,7 +1495,7 @@ if (in.grasp_signals.box_height_m < params.grasp_criteria.lift_height_threshold_
 
 ## 11. Stage J：episode 边界重构与 episode runner
 
-> 本节覆盖 Stage J 计划（[2.5](#25-stage-j--episode-runner20-次连跑与第一段-demo)）里"episode runner + 连续20次"这部分。RViz `robot_state_publisher` 集成、launch 参数暴露、rosbag 录制仍待做，完成后会继续扩写这一节。
+> 本节覆盖 Stage J 计划（[2.5](#25-stage-j--episode-runner20-次连跑与第一段-demo)）里"episode runner + 连续20次"这部分（11.1~11.6）和"调试可视化"这部分（[11.7](#117-debug-viewerglfw-原生渲染直连权威-mjdata替代-25-计划里的-rviz-集成)，用 GLFW debug viewer 替代了原计划里的 RViz 网格集成）。`pick_place_demo.launch.py`、launch 参数暴露、rosbag 录制仍待做，完成后会继续扩写这一节。
 
 ### 11.0 一句话总结
 
@@ -1620,3 +1627,101 @@ client 端阻塞等结果这件事本身没有问题——[10.3.4](#1034-request
 1. **`last_failure_reason_` 的赋值逻辑没有剥成纯函数**（E 类）——"只在转移进 `kRecover` 时才更新这个字段"这条判断目前直接写在 `onTimer()` 里，逻辑很简单（一个 if），但和 Stage F/I 定的"决策逻辑该剥出去"的纪律不完全一致；值不值得剥、剥出去能不能用手搭结构体测,可以讨论。
 2. **`~/start_episode` 中途重复调用的静默覆盖缺口，本质上是 topic 相对 action 缺失的"并发目标拒绝"能力**（C 类，已记入 [6.2](#62-反向清单现在就该做的)）——[11.3](#113-为什么用-topic-而不是-serviceaction-做-episode-边界与-requestreset-是同一种死锁机制) 已经讨论过这是选择的代价而不是实现疏漏，但值得在这里再点一次：这类"选了更简单的接口，隐性放弃了某个具体保护"的取舍，容易在几周后被忘记选择时权衡过什么。
 3. **`episode_runner.py` 本身完全没有测试**（E 类，延续 Stage F/I 定的纪律）——它是纯粹的胶水脚本（发消息、等结果、写CSV），按 [2.1.1](#211-这类系统该怎么测四层本周只取前两层) 的四层判据属于"任务层"，不该进 `colcon test`，但目前也没有任何脚本级的自检（比如"CSV 行数应该等于 episodes 参数"这种断言）。
+
+### 11.7 Debug viewer：GLFW 原生渲染，直连权威 `mjData`（替代 2.5 计划里的 RViz 集成）
+
+覆盖 [2.5](#25-stage-j--episode-runner20-次连跑与第一段-demo) 计划里原本的第③项（RViz `robot_state_publisher` 集成）。这部分先按计划实现过一次 RViz 网格显示，之后又被回退，过程和原因见 [11.7.3](#1173-概念讲解可视化架构选型rviz--glfw-原生渲染--三层离权威物理源距离梯子)，最终决定换成本节记录的 GLFW debug viewer。
+
+#### 11.7.1 一句话总结
+
+给 `mujoco_bridge_node` 加了一个默认关闭的调试专用可视化窗口——`DebugViewer`（[debug_viewer.hpp](../../src/mujoco_bridge/include/mujoco_bridge/debug_viewer.hpp)/[.cpp](../../src/mujoco_bridge/src/debug_viewer.cpp)），走 MuJoCo 自带的 `mjv_*`/`mjr_*` 渲染管线 + GLFW 建窗，同进程、同线程、直接读节点自己正在步进的那份权威 `mjData`，不经过任何 ROS 话题或降采样。`enable_debug_viewer` 参数控制开关（默认 `false`），渲染频率用独立的 `debug_viewer_rate_hz`（默认 30Hz）通过既有的 `decimationFor()` 降采样，不跟物理步进频率绑定，也不用 vsync 卡住物理线程。这条路径替代了 [2.5](#25-stage-j--episode-runner20-次连跑与第一段-demo) 原计划里"RViz 网格显示"那部分——RViz 版本先做过一次又被回退，原因和过程见 [11.7.3](#1173-概念讲解可视化架构选型rviz--glfw-原生渲染--三层离权威物理源距离梯子)。过程中撞见一个真实的环境级故障——这个容器里硬件加速 GL 上下文创建会卡死，绕过手段和排查过程见 [11.7.4](#1174-排查记录glfw-创建-gl-上下文在-distrobox-里卡死)。
+
+#### 11.7.2 改动清单与验证结果
+
+**改动**：
+
+- [mujoco_dl.hpp](../../src/mujoco_bridge/include/mujoco_bridge/mujoco_dl.hpp)：`MujocoApi` 新增 11 个 `mjv_*`/`mjr_*` 字段（`defaultCamera`/`defaultOption`/`defaultScene`/`defaultContext`/`makeScene`/`makeContext`/`updateScene`/`render`/`freeScene`/`freeContext`/`moveCamera`），同既有的 `decltype(&mj_xxx)` 写法
+- [mujoco_dl.cpp](../../src/mujoco_bridge/src/mujoco_dl.cpp)：对应的 11 行 `resolve()` 调用，走同一个已有的 `dlopen(RTLD_LOCAL|RTLD_DEEPBIND)` handle——渲染符号和物理符号在同一个 `libmujoco.so` 里，不需要第二次 `dlopen`
+- [debug_viewer.hpp](../../src/mujoco_bridge/include/mujoco_bridge/debug_viewer.hpp)/[debug_viewer.cpp](../../src/mujoco_bridge/src/debug_viewer.cpp)（新）：`DebugViewer` 类，封装 GLFW 窗口 + `mjvCamera`/`mjvOption`/`mjvScene`/`mjrContext`；鼠标拖拽相机旋转/平移/缩放（改自 MuJoCo 官方 `simulate` 示例的全局回调写法，换成 `glfwSetWindowUserPointer` 挂在实例上，不引入新的全局状态）
+- [mujoco_bridge_node.cpp](../../src/mujoco_bridge/src/mujoco_bridge_node.cpp)：`decimationFor()` 加一个可选的 `default_rate_hz` 参数（不改两个既有调用点的行为）；构造函数里 `declare_parameter("enable_debug_viewer", false)` + 条件构造 `viewer_`；析构函数里 `viewer_.reset()` 排在 `deleteData`/`deleteModel` 之前；`onTimer()` 里物理步进和既有的 `/joint_states`/`/tf` 发布之后，加 `pollEvents()`/`shouldClose()`/降采样 `render()`
+- [CMakeLists.txt](../../src/mujoco_bridge/CMakeLists.txt)：`find_package(glfw3 REQUIRED)`；`debug_viewer.cpp` 加入 `mujoco_bridge_node` 的源文件；`target_link_libraries` 加 `glfw`——这里和 `mujoco::mujoco` 不一样，`glfw3` 不带冲突的 `tinyxml2`，没有必须 dlopen 隔离的理由，直接链接
+
+**编译**（`colcon build --packages-select mujoco_bridge --symlink-install`）：
+
+```
+Starting >>> mujoco_bridge
+Finished <<< mujoco_bridge [8.52s]
+```
+
+**测试**（`colcon test --packages-select mujoco_bridge`，确认扩展 `MujocoApi` 没有破坏既有单测——这四个 gtest 都会调 `loadMujocoApi()`，是"新符号能不能被 `dlsym` 解析到"这件事的真实回归检查）：
+
+```
+FrameMath:       3/3 PASSED
+StateOps:        6/6 PASSED
+ClassifyGrasp:  10/10 PASSED
+GraspState:      6/6 PASSED
+```
+
+lint 部分沿用既有历史债务，没有新增失败类别。
+
+**行为验证**（环境卫生按 [STUDY_NOTES_GUIDE 3.1](../../STUDY_NOTES_GUIDE.md) 确认，直接跑可执行文件，不经 `ros2 run`）：
+
+| 场景 | 参数 | 观察到的 RTF | 备注 |
+|---|---|---|---|
+| 默认（关闭） | `enable_debug_viewer:=false` | 稳定 1.00 | 日志里没有任何 `mjv_*`/`mjr_*`/"Debug viewer enabled" 相关行——确认关闭时零影响 |
+| 开启，30Hz（默认），软件渲染 | `enable_debug_viewer:=true`（硬件加速卡死，见 [11.7.4](#1174-排查记录glfw-创建-gl-上下文在-distrobox-里卡死)，加了 `LIBGL_ALWAYS_SOFTWARE=1`） | ~0.33 | 窗口真的弹出（`xwininfo` 确认标题 "mujoco_bridge debug viewer"，1200x900），鼠标拖拽能转相机 |
+| 开启，2Hz | 同上 + `debug_viewer_rate_hz:=2.0` | ~0.87~0.94 | 降频后 RTF 回升但没回到 1.00——软件光栅化本身有开销，不是纯粹被 30Hz 拖慢 |
+
+#### 11.7.3 概念讲解：可视化架构选型——RViz / GLFW 原生渲染 / 三层"离权威物理源距离"梯子
+
+> Q: 我不理解，rviz太难看，这套教程的路线更加标准不是吗？你说GLFW原生渲染要转发，但是distrobox不是自带有转发吗？我手头有gpu，不能加快渲染吗？
+
+三点分开答：① distrobox 确实默认转发 X11/Wayland，之前说"要转发更麻烦"是把"调试工具本身没挂桌面"和"distrobox 本身有没有转发能力"搞混了，是判断错误，纠正掉；② GPU 是真实优势，`mjr_render` 走 OpenGL，有硬件加速确实能撑更好的画质/帧率，但"RViz 丑"当时的根因是场景没搭好（只有 Grid+TF+RobotModel，没调光照材质），不是渲染管线算力不够，加 GPU 不解决"素"这个问题；③"更标准"要看标准的是哪一层——纯仿真研究领域 `mjv`/`mjr` + GLFW 是标准；但 ROS 机器人栈领域 RViz + TF + `robot_state_publisher` 才是标准，理由不是好看不好看，是它跟仿真器无关，只订阅 `/joint_states`/`/tf`，换成真机发布的同名话题不用改。这也是这个项目反复强调的 sim2real 可迁移目标的落点。
+
+> Q: 你说我们代码实现的是一个通用backend，那GLFW路线难道不能作为一个解耦的前端吗？我真正好奇的是，它的耦合性到底高不高？我能不能像起一个node那么简单，不对原来代码有多余干扰的情况下实现？
+
+耦合性低，具体靠 [mujoco_dl.hpp](../../src/mujoco_bridge/include/mujoco_bridge/mujoco_dl.hpp) 现成的 dlopen 隔离模式：`mujoco_dl.cpp` 是作为**源文件**编进每个要用 mujoco 的可执行文件的（四个既有 gtest target 各自把它加进自己的 sources），不是一个共享库——这个模式天生就是为"多个独立可执行文件各自安全用 mujoco"设计的。最初讨论时想的是"另起一个独立节点，走 `/joint_states`/`/tf` 做运动学镜像"（跟 `robot_state_publisher` 同构，只是用 MuJoCo 几何体画），这个方案确实可以完全不改 `mujoco_bridge_node`；但后来发现这本质上还是"离权威物理源"梯子的第三层（见下），达不到"直连权威 `mjData`"这个真正目标，所以最终选择直接改 `mujoco_bridge_node` 本身——但改动被限定在"新增一个默认关闭的可选分支"（`enable_debug_viewer` 参数 + 条件构造 `viewer_`），没有改变任何既有话题/参数/行为，这是这次追求的"耦合低"的具体含义：不是"物理上不碰这个文件"，是"逻辑上默认路径零变化"。
+
+> Q: 讲讲和权威物理源仿真的区别，实践中通常使用哪种？
+
+三层梯子，不是两层：① 同进程直连（这次选的）——渲染器和物理同一个循环，直接读同一份 `mjData`，MuJoCo 自己的 `simulate` 就是这样；② 同一仿真器的原生高频通道，跨进程——经典 Gazebo 的 `gzserver`/`gzclient`，通信走仿真器自己的高频 transport；③ 通用机器人消息镜像——RViz 订阅 `/joint_states`+`/tf` 重算 FK，最松耦合、最仿真器无关，代价是只能看到已经被显式发布、且被降采样过的量。实践里纯仿真调试阶段用①（要看清物理引擎到底算了什么，不能有第三方来源的抽样误差干扰判断）；面向要跟真机共用的生产/集成阶段用③（价值就在于跟仿真器解耦）。这次的决定是两条路径分开用，不是二选一：debug viewer 是①，专门给"调物理本身"用；[mujoco_bridge_node.cpp](../../src/mujoco_bridge/src/mujoco_bridge_node.cpp) 现有的 `/joint_states`/`/tf` 发布保持③，专门给"以后要接真机"这个目标用。
+
+> Q: 你的意思是，真机也是类似第三种吗？
+
+对，而且是结构性必然，不是碰巧一样。第一层（同进程直连 `mjData`）对真机根本没有对应物——真实世界不是一个可查询的数据结构，唯一能拿到的通道就是驱动/控制器按自己的循环频率往外发布的关节状态，这跟 `onTimer()` 里 `decimationFor()` 降采样发布 `/joint_states` 是同一个结构：真机侧"抽样源"是编码器采样+驱动发布周期，仿真侧是这次的降采样参数。所以"RViz/TF 看到的延迟、两次发布之间看不到的东西"不是仿真特有的缺陷，是真机这条路径本来就有的、甩不掉的天花板——用第三层作为生产可视化路径，等于提前让开发过程适应真机最终会有的可视化保真度上限。
+
+#### 11.7.4 排查记录：GLFW 创建 GL 上下文在 distrobox 里卡死
+
+**现象**：`enable_debug_viewer:=true` 跑起来后，日志停在"debug viewer every N steps"那一行，`RCLCPP_INFO("Debug viewer enabled ...")` 那行日志永远不出现，没有任何窗口弹出；进程 CPU 几乎为零，`ps` 显示状态 `S`（sleeping）。终端里连按三次 Ctrl+C 都不能让它退出，`rclcpp` 的 `signal_handler(SIGINT/SIGTERM)` 日志确实打出来了，但进程仍然不退。
+
+**线索**（逐步缩小范围）：
+
+1. 查 `/proc/<pid>/wchan`，显示 `do_poll`——卡在一个阻塞的系统调用里，不是"没收到信号"，是"收到了但主线程没机会检查"：GL 上下文创建这一步还没返回，永远回不到 `rclcpp::spin()` 的事件循环，signal handler 设的标志位没人读。
+2. 写一个不含 MuJoCo/`rclcpp` 的最小复现程序（只有 `glfwInit`→`glfwCreateWindow`→`glfwMakeContextCurrent`→渲染循环），同样卡死在 `glfwInit` 之后——把问题范围从"这次新代码"缩小到"纯 GLFW 建窗+建 GL 上下文，在这个环境里本身就是坏的"。
+3. 加 `glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API)` 跳过 GL 上下文创建，只测纯窗口——立即成功返回。把问题精确定位到"创建 OpenGL 上下文"这一步，不是窗口/X11 连接本身。
+4. 设 `LIBGL_ALWAYS_SOFTWARE=1` 强制走 Mesa 软件渲染路径，同一份代码立刻成功建窗、能跑渲染循环。
+
+**根因**：这个容器（distrobox + 主机 X server 转发）下，NVIDIA 专有驱动的硬件加速 GLX 路径协商失败——具体卡在驱动的哪一步（direct rendering 权限、DRI 设备节点访问、还是嵌套 Xorg 会话本身不支持这条路径）没有查清，只确认了"软件渲染能绕过，硬件加速走不通"这个事实边界。这不是"沙盒工具环境独有"的问题——在真实终端里交互式跑同样卡死，因为两边其实共享同一个 `DISPLAY`/同一个容器。
+
+**修复（规避，不是根治）**：运行时加 `LIBGL_ALWAYS_SOFTWARE=1` 环境变量，强制 Mesa 软件光栅化。代价是渲染本身有真实开销（见 [11.7.2](#1172-改动清单与验证结果) 的 RTF 数据）。真正修好 NVIDIA/GLX 配置留作悬挂项。
+
+**留下的经验**：
+
+- "看起来卡死、Ctrl+C 打不动的进程"要先查 `ps`/`wchan` 确认是不是卡在阻塞系统调用里，而不是假设"进程没收到信号"——这类卡死只有 `kill -9` 是出路，等多久都一样，跟 [STUDY_NOTES_GUIDE 3.1](../../STUDY_NOTES_GUIDE.md) 里 `ros2 run` wrapper 假死是完全不同的机制（那个是"信号发对了地方但没人处理"，这个是"信号处理了但没人读标志位"），但表现出来都是"Ctrl+C 没用"，容易被误判成同一类问题。
+- 写一个剥离掉当前项目全部依赖的最小复现程序，是分辨"是我的代码 vs 是环境"最快的手段——这次几分钟内就把范围从"MuJoCo+rclcpp+GLFW 一起用出问题"缩小到"纯 GLFW 创建 GL 上下文在这个环境里就是坏的"。
+- "有 GPU"不等于"硬件加速一定能用"——这条值得明写，因为最初的直觉（"手头有 GPU，不能加快渲染吗"）默认假设了这一点，而这次实测的故障恰恰发生在"调用硬件加速"这一步本身。
+
+#### 11.7.5 失败模式与验证手段
+
+| 失败模式 | 现象 | 怎么发现/防住 |
+|---|---|---|
+| distrobox 里硬件加速 GL 上下文创建卡死 | `glfwCreateWindow`/上下文创建永久不返回，构造函数卡住，`rclcpp::spin()` 进不去，`/joint_states`/`/tf` 等生产话题跟着一起停摆；Ctrl+C 不能退出 | 最小复现程序缩小范围；`LIBGL_ALWAYS_SOFTWARE=1` 规避；见 [11.7.4](#1174-排查记录glfw-创建-gl-上下文在-distrobox-里卡死) |
+| 软件渲染拖慢物理步进 | RTF 从 1.00 掉到 0.33（30Hz）/ 0.87~0.94（2Hz），不报任何错，只是仿真变慢 | 既有的 RTF 日志（Stage F 为"变慢不报错"这类问题装的监控，这次直接派上用场）；没有主动告警，只能靠人盯日志 |
+| `enable_debug_viewer` 构造阶段的故障会拖死整个节点 | 不止调试功能受影响，生产话题一起停——跟"默认关闭时零影响、开启时只影响调试路径"的设计预期不完全一致 | 目前没有防住，只是认识到了这个边界，见 [11.7.6](#1176-你没问但值得注意的) 第1条 |
+
+#### 11.7.6 你没问但值得注意的
+
+1. **（C类）构造阶段卡死会拖死整个节点，不只是"debug 视图卡住"**——`viewer_` 是在节点构造函数里**同步**构造的，这次实测的卡死模式下 `rclcpp::spin()` 根本进不去，`/joint_states`、`/tf`、ground-truth 话题这些生产路径会跟着一起停摆。跟"debug 工具默认关闭时零影响、开启时只影响调试路径"这个设计预期有一个没兑现的边界情况。
+2. **（C类）RTF 掉线目前只能靠人盯日志发现**——开着 debug viewer 时物理会变慢，但没有任何主动告警；如果谁开着它跑 `episode_runner.py` 那种要比较耗时数据的批量实验，数据会被污染却毫无提示。
+3. **（E类）唯一的验证手段是人眼看窗口**——这在"渲染到真实窗口没法脱离显示器自动化"这个约束下是合理的，但这次崩溃模式恰恰是"卡死不报错"而不是"干净失败"，人眼验证本身在这种模式下也容易被误判成"电脑卡了"而不是代码问题；现有 4 个 gtest 只验证了 `dlsym` 层，没有任何调用路径覆盖到 `render()` 本身。
+4. **（F类）`LIBGL_ALWAYS_SOFTWARE=1` 的适用边界没测过**——只有 30Hz 和 2Hz 两个数据点，如果以后想用更高频率看实时接触力这类调试场景，软件渲染开销会不会变得不可接受，不知道。

@@ -23,6 +23,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "mujoco_bridge/debug_viewer.hpp"
 #include "mujoco_bridge/frame_math.hpp"
 #include "mujoco_bridge/grasp_criteria.hpp"
 #include "mujoco_bridge/grasp_state.hpp"
@@ -143,6 +144,17 @@ public:
         joint_state_decimation_, tf_decimation_);
     }
 
+    // Debug-only visualization, directly on this node's own mjData -- no topic, no
+    // decimated republish. Off by default: disabled, this costs nothing (no
+    // glfwInit, no window). See debug_viewer.hpp for why render() itself must stay
+    // decimated rather than running every physics step.
+    debug_viewer_decimation_ =
+      decimationFor("debug_viewer_rate_hz", "debug viewer", timestep_s, 30.0);
+    if (declare_parameter("enable_debug_viewer", false)) {
+      viewer_ = std::make_unique<DebugViewer>(api_, model_);
+      RCLCPP_INFO(get_logger(), "Debug viewer enabled (GLFW window)");
+    }
+
     // ClockQoS: best-effort, keep-last depth 1, volatile. Deliberately NOT reliable:
     // a /clock sample that needs retransmitting is already stale by the time it
     // arrives, and at 500 Hz a reliable queue would just build backpressure.
@@ -209,6 +221,9 @@ public:
 
   ~MujocoBridgeNode() override
   {
+    // Freed before model_/data_ (in reverse of the order they're needed) so no GL
+    // teardown code runs against an already-deleted mjModel.
+    viewer_.reset();
     if (data_) {
       api_.deleteData(data_);
     }
@@ -485,9 +500,11 @@ private:
   }
 
   // Rounds a requested publish rate down to a whole number of physics steps.
-  int decimationFor(const std::string & param, const char * topic, double timestep_s)
+  int decimationFor(
+    const std::string & param, const char * topic, double timestep_s,
+    double default_rate_hz = 100.0)
   {
-    const double rate_hz = declare_parameter(param, 100.0);
+    const double rate_hz = declare_parameter(param, default_rate_hz);
     const int decimation =
       std::max(1, static_cast<int>(std::lround(1.0 / (rate_hz * timestep_s))));
     RCLCPP_INFO(
@@ -683,6 +700,17 @@ private:
       publishObjectPose();
       publishGripperContact();
     }
+
+    if (viewer_) {
+      viewer_->pollEvents();
+      if (viewer_->shouldClose()) {
+        // Closing the debug window is not a stop control: drop it and keep
+        // stepping/publishing exactly as if it had never been enabled.
+        viewer_.reset();
+      } else if (step_count_ % debug_viewer_decimation_ == 0) {
+        viewer_->render(data_);
+      }
+    }
   }
 
   // Absolute (world-frame) pose, unlike publishTransforms() which composes
@@ -867,6 +895,8 @@ private:
   uint64_t step_count_ = 0;
   std::chrono::steady_clock::time_point rtf_window_wall_start_ = std::chrono::steady_clock::now();
   double rtf_window_sim_start_ = 0.0;
+  int debug_viewer_decimation_ = 1;
+  std::unique_ptr<DebugViewer> viewer_;
 };
 
 }  // namespace mujoco_bridge

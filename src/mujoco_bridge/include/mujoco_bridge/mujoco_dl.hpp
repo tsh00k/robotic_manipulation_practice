@@ -50,6 +50,21 @@ struct MujocoApi
   decltype(&mju_negQuat) negQuat;
   decltype(&mju_mulQuat) mulQuat;
   decltype(&mju_rotVecQuat) rotVecQuat;
+  // Visualization/render entry points, used only by the optional DebugViewer
+  // (debug_viewer.hpp). Exported by the same libmujoco.so as the mj_*/mju_* symbols
+  // above -- MuJoCo has no separate render library -- so they go through this same
+  // dlopen-isolated struct rather than being linked directly.
+  decltype(&mjv_defaultCamera) defaultCamera;
+  decltype(&mjv_defaultOption) defaultOption;
+  decltype(&mjv_defaultScene) defaultScene;
+  decltype(&mjr_defaultContext) defaultContext;
+  decltype(&mjv_makeScene) makeScene;
+  decltype(&mjr_makeContext) makeContext;
+  decltype(&mjv_updateScene) updateScene;
+  decltype(&mjr_render) render;
+  decltype(&mjv_freeScene) freeScene;
+  decltype(&mjr_freeContext) freeContext;
+  decltype(&mjv_moveCamera) moveCamera;
 };
 
 // Loads libmujoco.so in isolated (RTLD_LOCAL | RTLD_DEEPBIND) mode and resolves all
