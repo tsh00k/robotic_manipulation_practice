@@ -1,3 +1,17 @@
+// Copyright 2026 anby
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 #include "task_executor/fsm.hpp"
 
 #include <algorithm>
@@ -71,7 +85,7 @@ FsmDecision motionStep(
   double position_epsilon_rad)
 {
   if (armReached(
-        in.arm, target.arm_positions, position_epsilon_rad, params.velocity_epsilon_rad_s) &&
+      in.arm, target.arm_positions, position_epsilon_rad, params.velocity_epsilon_rad_s) &&
     pastMinSettle(in, params))
   {
     return {nextPhase(in.phase), ExitReason::kReached, false};
@@ -100,99 +114,99 @@ FsmDecision step(const FsmInputs & in, const JointTarget & target, const FsmPara
 
     case Phase::kPreplace:
     case Phase::kPlace: {
-      // Holding the object across the whole transport leg (kPreplace, kPlace), so
-      // a drop mid-transit must be caught even though each phase's own criterion
-      // is otherwise a plain motion check.
-      //
-      // Deliberately box_height_m, NOT bothFingersHolding() -- caught live
-      // (week2.md Stage I): mujoco_bridge's own grasp outcome log shows
-      // left/right finger contact flickering SUCCESS<->UNEXPECTED_CONTACT every
-      // single tick even during a hold that is, by every other measure (box
-      // height staying near its lifted value), completely stable. That flicker
-      // is mjContact regenerating from scratch every mj_forward (grasp_state.hpp)
-      // catching one finger geom out of contact for a single physics step's
-      // worth of jitter, not a real drop. Height changes continuously and only
-      // actually falls when the object is really let go, which is exactly the
-      // physical event this check needs to catch.
-      if (in.grasp_signals.box_height_m < params.grasp_criteria.lift_height_threshold_m) {
-        return {Phase::kRecover, ExitReason::kSlipped, false};
+        // Holding the object across the whole transport leg (kPreplace, kPlace), so
+        // a drop mid-transit must be caught even though each phase's own criterion
+        // is otherwise a plain motion check.
+        //
+        // Deliberately box_height_m, NOT bothFingersHolding() -- caught live
+        // (week2.md Stage I): mujoco_bridge's own grasp outcome log shows
+        // left/right finger contact flickering SUCCESS<->UNEXPECTED_CONTACT every
+        // single tick even during a hold that is, by every other measure (box
+        // height staying near its lifted value), completely stable. That flicker
+        // is mjContact regenerating from scratch every mj_forward (grasp_state.hpp)
+        // catching one finger geom out of contact for a single physics step's
+        // worth of jitter, not a real drop. Height changes continuously and only
+        // actually falls when the object is really let go, which is exactly the
+        // physical event this check needs to catch.
+        if (in.grasp_signals.box_height_m < params.grasp_criteria.lift_height_threshold_m) {
+          return {Phase::kRecover, ExitReason::kSlipped, false};
+        }
+        return motionStep(in, target, params, params.grasp_position_epsilon_rad);
       }
-      return motionStep(in, target, params, params.grasp_position_epsilon_rad);
-    }
 
     case Phase::kClose: {
-      const GraspOutcome outcome = classifyGrasp(in.grasp_signals, params.grasp_criteria);
-      // kSuccess or kSlip both mean "width+contact already look like a grip" --
-      // classifyGrasp() cannot tell "grasped" from "grasped, not yet lifted" apart
-      // on its own (grasp_criteria.hpp's own docstring), and kClose is exactly the
-      // phase supplying that missing context: we have not attempted to lift yet,
-      // so kSlip here reads as success, not failure.
-      if ((outcome == GraspOutcome::kSuccess || outcome == GraspOutcome::kSlip) &&
-        in.elapsed_in_phase_s >= params.close_settle_s)
-      {
-        return {nextPhase(in.phase), ExitReason::kReached, false};
+        const GraspOutcome outcome = classifyGrasp(in.grasp_signals, params.grasp_criteria);
+        // kSuccess or kSlip both mean "width+contact already look like a grip" --
+        // classifyGrasp() cannot tell "grasped" from "grasped, not yet lifted" apart
+        // on its own (grasp_criteria.hpp's own docstring), and kClose is exactly the
+        // phase supplying that missing context: we have not attempted to lift yet,
+        // so kSlip here reads as success, not failure.
+        if ((outcome == GraspOutcome::kSuccess || outcome == GraspOutcome::kSlip) &&
+          in.elapsed_in_phase_s >= params.close_settle_s)
+        {
+          return {nextPhase(in.phase), ExitReason::kReached, false};
+        }
+        if (in.elapsed_in_phase_s > params.phase_timeout_s) {
+          const ExitReason reason = outcome == GraspOutcome::kUnexpectedContact ?
+            ExitReason::kUnexpectedContact :
+            ExitReason::kGraspEmpty;
+          return {Phase::kRecover, reason, false};
+        }
+        return {in.phase, ExitReason::kNone, false};
       }
-      if (in.elapsed_in_phase_s > params.phase_timeout_s) {
-        const ExitReason reason = outcome == GraspOutcome::kUnexpectedContact
-          ? ExitReason::kUnexpectedContact
-          : ExitReason::kGraspEmpty;
-        return {Phase::kRecover, reason, false};
-      }
-      return {in.phase, ExitReason::kNone, false};
-    }
 
     case Phase::kLift: {
-      const GraspOutcome outcome = classifyGrasp(in.grasp_signals, params.grasp_criteria);
-      if (outcome == GraspOutcome::kSuccess && pastMinSettle(in, params)) {
-        return {nextPhase(in.phase), ExitReason::kReached, false};
+        const GraspOutcome outcome = classifyGrasp(in.grasp_signals, params.grasp_criteria);
+        if (outcome == GraspOutcome::kSuccess && pastMinSettle(in, params)) {
+          return {nextPhase(in.phase), ExitReason::kReached, false};
+        }
+        const bool arm_at_lift_height = armReached(
+          in.arm, target.arm_positions, params.position_epsilon_rad, params.velocity_epsilon_rad_s);
+        if (arm_at_lift_height && in.elapsed_in_phase_s > params.lift_settle_grace_s) {
+          // The arm got where kLift's target says it should be, but classifyGrasp()
+          // still is not reporting kSuccess -- the grip did not survive the lift.
+          // This is the one place in the whole sequence that can genuinely tell
+          // "grasped then slipped" apart from "never got lifted" (grasp_criteria.hpp
+          // flags this as its own blind spot): the arm-reached fact is exactly the
+          // extra information classifyGrasp() does not have.
+          return {Phase::kRecover, ExitReason::kSlipped, false};
+        }
+        if (in.elapsed_in_phase_s > params.phase_timeout_s) {
+          return {Phase::kRecover, ExitReason::kTimeout, false};
+        }
+        return {in.phase, ExitReason::kNone, false};
       }
-      const bool arm_at_lift_height = armReached(
-        in.arm, target.arm_positions, params.position_epsilon_rad, params.velocity_epsilon_rad_s);
-      if (arm_at_lift_height && in.elapsed_in_phase_s > params.lift_settle_grace_s) {
-        // The arm got where kLift's target says it should be, but classifyGrasp()
-        // still is not reporting kSuccess -- the grip did not survive the lift.
-        // This is the one place in the whole sequence that can genuinely tell
-        // "grasped then slipped" apart from "never got lifted" (grasp_criteria.hpp
-        // flags this as its own blind spot): the arm-reached fact is exactly the
-        // extra information classifyGrasp() does not have.
-        return {Phase::kRecover, ExitReason::kSlipped, false};
-      }
-      if (in.elapsed_in_phase_s > params.phase_timeout_s) {
-        return {Phase::kRecover, ExitReason::kTimeout, false};
-      }
-      return {in.phase, ExitReason::kNone, false};
-    }
 
     case Phase::kOpen: {
-      // The one phase where checking the *gripper's* own position (rather than the
-      // arm's) is the right criterion -- releasing has no gravity-sag problem the
-      // way holding a reach-forward arm pose does, so a plain width threshold is
-      // enough, no phase-specific epsilon needed.
-      constexpr double kOpenWidthM = 0.08;
-      constexpr double kOpenEpsilonM = 0.02;
-      if (in.gripper_width_m > kOpenWidthM - kOpenEpsilonM && pastMinSettle(in, params)) {
-        return {nextPhase(in.phase), ExitReason::kReached, false};
+        // The one phase where checking the *gripper's* own position (rather than the
+        // arm's) is the right criterion -- releasing has no gravity-sag problem the
+        // way holding a reach-forward arm pose does, so a plain width threshold is
+        // enough, no phase-specific epsilon needed.
+        constexpr double kOpenWidthM = 0.08;
+        constexpr double kOpenEpsilonM = 0.02;
+        if (in.gripper_width_m > kOpenWidthM - kOpenEpsilonM && pastMinSettle(in, params)) {
+          return {nextPhase(in.phase), ExitReason::kReached, false};
+        }
+        if (in.elapsed_in_phase_s > params.phase_timeout_s) {
+          return {Phase::kRecover, ExitReason::kTimeout, false};
+        }
+        return {in.phase, ExitReason::kNone, false};
       }
-      if (in.elapsed_in_phase_s > params.phase_timeout_s) {
-        return {Phase::kRecover, ExitReason::kTimeout, false};
-      }
-      return {in.phase, ExitReason::kNone, false};
-    }
 
     case Phase::kVerify: {
-      const double dx = in.box_x_m - params.place_x_m;
-      const double dy = in.box_y_m - params.place_y_m;
-      const bool released = !bothFingersHolding(in.grasp_signals);
-      if (std::hypot(dx, dy) < params.place_region_radius_m && released &&
-        pastMinSettle(in, params))
-      {
-        return {Phase::kDone, ExitReason::kReached, false};
+        const double dx = in.box_x_m - params.place_x_m;
+        const double dy = in.box_y_m - params.place_y_m;
+        const bool released = !bothFingersHolding(in.grasp_signals);
+        if (std::hypot(dx, dy) < params.place_region_radius_m && released &&
+          pastMinSettle(in, params))
+        {
+          return {Phase::kDone, ExitReason::kReached, false};
+        }
+        if (in.elapsed_in_phase_s > params.phase_timeout_s) {
+          return {Phase::kRecover, ExitReason::kPlaceMissed, false};
+        }
+        return {in.phase, ExitReason::kNone, false};
       }
-      if (in.elapsed_in_phase_s > params.phase_timeout_s) {
-        return {Phase::kRecover, ExitReason::kPlaceMissed, false};
-      }
-      return {in.phase, ExitReason::kNone, false};
-    }
 
     case Phase::kRecover:
       if (in.retry_count < params.max_retries) {

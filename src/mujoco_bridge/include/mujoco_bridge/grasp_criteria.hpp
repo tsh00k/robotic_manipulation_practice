@@ -1,3 +1,17 @@
+// Copyright 2026 anby
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 #pragma once
 
 namespace mujoco_bridge
@@ -27,7 +41,7 @@ struct GraspSignals
 {
   double gripper_width_m;       // finger_joint1 + finger_joint2, meters of opening
   double box_height_m;          // box world z (compare against an absolute threshold,
-                                 // not a table-relative one -- see GraspCriteria)
+                                // not a table-relative one -- see GraspCriteria)
   double box_to_tcp_horizontal_m;  // |box.xy - hand_tcp.xy|
   bool left_finger_contact;
   bool right_finger_contact;

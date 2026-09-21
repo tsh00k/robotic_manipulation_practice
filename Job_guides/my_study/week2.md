@@ -281,7 +281,7 @@
 
 > 待填（缺一次推演 → 这里）。第1周遗留、本周不打算做的条目**不要**复制过来，仍以 [week1.md 13.2](week1.md#132-反向清单现在就该做的属于缺一次推演) 为权威，本节只放本周新产生的。
 
-- **`ament_lint_auto` 从未通过过，涉及 `mujoco_bridge` 全部源文件**——Stage F 第一次跑 `colcon test`（本仓库此前一次都没跑过），暴露出 `cpplint`（版权头缺失、include 顺序）、`uncrustify`（`mujoco_bridge_node.cpp` 9 行、`mujoco_dl.cpp` 44 行格式差异）全部不过。gtest 部分（`test_frame_math`、`test_state_ops`）已全绿，这批是独立的风格债务，不是逻辑 bug，本周决定不修（`uncrustify --fix` 会改动 week1 笔记里逐行引用过的代码，需要专门一次处理并核对笔记引用是否还对得上行号）。
+- **`ament_lint_auto` 的历史债务**——Stage F 第一次跑 `colcon test`（本仓库此前一次都没跑过）时，`mujoco_bridge` 暴露出版权头缺失、include 顺序和 `uncrustify` 格式差异；gtest 部分（`test_frame_math`、`test_state_ops`）当时已全绿。这是独立的源码规范债务，不是逻辑 bug。此前以“格式化会影响 Week 1 的逐行引用”为由暂缓，但复核后确认 Week 1 使用的是代码摘录，不依赖源文件行号。2026-09-21 已补齐两包（`mujoco_bridge`、`task_executor`）的许可证头、include 顺序和格式，并通过 `colcon test`：180 项测试、0 失败、26 项因环境中的 cppcheck 慢版本跳过。
 - **RTF 监控目前只打日志，没有阈值告警**（[7.6](#76-rtf-是什么为什么要常驻监控为什么-tf_rate_hz-要和-joint_state_rate_hz-一致)、[7.7](#77-失败模式与验证手段)）——FSM/episode runner 要知道"RTF 掉到多少算异常"必须人眼盯日志。解锁条件：Stage I 给 FSM 超时判据接入 RTF 时，评估要不要把这个做成可查询的话题或参数化阈值。
 - **`tf_rate_hz != joint_state_rate_hz` 的告警本周加了代码但从没被真实触发过**（[7.6](#76-rtf-是什么为什么要常驻监控为什么-tf_rate_hz-要和-joint_state_rate_hz-一致)、[7.7](#77-失败模式与验证手段)）——两者目前都还是默认的 100Hz。解锁条件：以后真的把 `tf_rate_hz` 调开（比如给 FSM 提供更高频姿态反馈）时，第一次触发也是第一次验证这段代码本身是对的。
 - **keyframe 长度不匹配会被 MuJoCo 静默补零，没有任何测试防住**（[8.8](#88-排查记录keyframe-名字冲突与长度不匹配是两件独立的事结论被推翻)）——现在完全靠人记得"改了 nq 就要检查所有 keyframe 长度"。缺一次推演：写一个 gtest fixture，加载一个长度不匹配的 keyframe，断言补零后的 qpos 确实是 `(0,0,0,1,0,0,0)` 而不是别的值，把这条隐藏行为钉死成一个会报警的断言。

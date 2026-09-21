@@ -1,16 +1,20 @@
-#include <ament_index_cpp/get_package_share_directory.hpp>
-#include <control_msgs/msg/gripper_command.hpp>
-#include <geometry_msgs/msg/pose_stamped.hpp>
-#include <geometry_msgs/msg/transform_stamped.hpp>
+// Copyright 2026 anby
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 #include <mujoco/mujoco.h>
-#include <rclcpp/rclcpp.hpp>
-#include <rosgraph_msgs/msg/clock.hpp>
-#include <sensor_msgs/msg/joint_state.hpp>
-#include <std_msgs/msg/bool.hpp>
-#include <std_srvs/srv/trigger.hpp>
 #include <tf2_ros/static_transform_broadcaster.h>
 #include <tf2_ros/transform_broadcaster.h>
-#include <trajectory_msgs/msg/joint_trajectory.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -22,6 +26,17 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
+#include <ament_index_cpp/get_package_share_directory.hpp>
+#include <control_msgs/msg/gripper_command.hpp>
+#include <geometry_msgs/msg/pose_stamped.hpp>
+#include <geometry_msgs/msg/transform_stamped.hpp>
+#include <rclcpp/rclcpp.hpp>
+#include <rosgraph_msgs/msg/clock.hpp>
+#include <sensor_msgs/msg/joint_state.hpp>
+#include <std_msgs/msg/bool.hpp>
+#include <std_srvs/srv/trigger.hpp>
+#include <trajectory_msgs/msg/joint_trajectory.hpp>
 
 #include "mujoco_bridge/debug_viewer.hpp"
 #include "mujoco_bridge/frame_math.hpp"
@@ -66,7 +81,8 @@ namespace mujoco_bridge
 //     success -- verified by actually doing this (week2.md 8.8). There is no
 //     "fail loudly" here at all.
 // The lesson is not "always fails safe" but "know which direction you're switching in".
-constexpr const char * kDefaultModelRelativePath = "/mujoco/franka_emika_panda/pick_place_scene.xml";
+constexpr const char * kDefaultModelRelativePath =
+  "/mujoco/franka_emika_panda/pick_place_scene.xml";
 constexpr const char * kDefaultResetKeyframeName = "pick_place_home";
 
 constexpr const char * kHandBodyName = "hand";
@@ -440,7 +456,9 @@ private:
       return;
     }
     object_pose_pub_ =
-      create_publisher<geometry_msgs::msg::PoseStamped>("~/ground_truth/object_pose", rclcpp::QoS(10));
+      create_publisher<geometry_msgs::msg::PoseStamped>(
+      "~/ground_truth/object_pose", rclcpp::QoS(
+        10));
     RCLCPP_INFO(
       get_logger(), "ground-truth object `%s` found; publishing ~/ground_truth/object_pose",
       kObjectBodyName);
@@ -537,7 +555,7 @@ private:
   // either one to a separate callback group, or switching to a MultiThreadedExecutor,
   // would make this a data race on mjData with no compiler or runtime complaint.
   void onReset(
-    const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
+    const std::shared_ptr<std_srvs::srv::Trigger::Request>/*request*/,
     std::shared_ptr<std_srvs::srv::Trigger::Response> response)
   {
     // mj_resetDataKeyframe restores qpos, qvel, act, ctrl and mocap from the keyframe
@@ -557,7 +575,8 @@ private:
 
     response->success = true;
     response->message = "reset to keyframe `" + reset_keyframe_name_ + "`";
-    RCLCPP_INFO(get_logger(), "%s (sim time preserved at %.3fs)", response->message.c_str(),
+    RCLCPP_INFO(
+      get_logger(), "%s (sim time preserved at %.3fs)", response->message.c_str(),
       data_->time);
   }
 
