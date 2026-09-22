@@ -1,0 +1,7 @@
+# Copyright 2026 anby
+# Licensed under the Apache License, Version 2.0.
+
+joint1:
+  limit:
+    lower: 1.0
+    upper: -1.0

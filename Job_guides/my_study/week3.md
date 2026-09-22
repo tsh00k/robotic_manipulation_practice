@@ -32,6 +32,14 @@
 - [6. 悬挂问题（本周新增）](#6-悬挂问题本周新增)
   - [6.1 清单](#61-清单)
   - [6.2 反向清单：现在就该做的](#62-反向清单现在就该做的)
+- [7. Stage K：自写 FK/Jacobian 纯函数库](#7-stage-k自写-fkjacobian-纯函数库)
+  - [7.0 一句话总结](#70-一句话总结)
+  - [7.1 改动清单与验证结果](#71-改动清单与验证结果)
+  - [7.2 本阶段冻结的数学约定](#72-本阶段冻结的数学约定)
+  - [7.3 JD 写“了解 FK/Jacobian”通常要求到什么程度](#73-jd-写了解-fkjacobian通常要求到什么程度)
+  - [7.4 这组测试证明了什么](#74-这组测试证明了什么)
+  - [7.5 失败模式与验证手段](#75-失败模式与验证手段)
+  - [7.6 本阶段边界与后续](#76-本阶段边界与后续)
 
 ---
 
@@ -151,7 +159,7 @@
 | [architecture.md 第4节](../../docs/architecture.md) URDF/MJCF 碰撞几何是否同一份简化 | Stage L 顺带核对（成本低，此刻正好两边模型都加载着） |
 | [week2 6.1](week2.md#61-清单) `close_settle_s`/`lift_settle_grace_s` 换 diff-IK 后重测 | **本周解锁**（Stage N，解锁条件写的就是这一周） |
 | [week2 6.2](week2.md#62-反向清单现在就该做的) `extractArmState`/`extractGripperWidth` 未剥纯函数 | Stage N 会动这块代码，**顺手评估**是否现在剥（判据用 week2 2.1.1 那条） |
-| [week2 6.2](week2.md#62-反向清单现在就该做的) `ament_lint_auto` 全量债务 | **不还旧账**，但新包 `arm_kinematics` 从第一天起必须绿（Stage K） |
+| [week2 6.2](week2.md#62-反向清单现在就该做的) `ament_lint_auto` 全量债务 | 旧包债务已在 `9951aa7` 收口；新包 `arm_kinematics` 从第一天起保持绿（Stage K） |
 | [week1 13.1 #4](week1.md#131-清单) 100Hz `/joint_states` 够不够 | **部分解锁**：diff-IK 的 (b) 在线伺服形态第一次真正关心反馈频率。本周走 (a)，所以只在讨论 (b) 时记录，不做实验 |
 | [week1 13.1 #5](week1.md#131-清单) TF 由仿真发是否常规 / `robot_state_publisher` 的 remap | **不解锁**：本周只用 `moveit_core` 库，不起 `move_group`、不起 rsp，那条冲突还没发生 |
 | [week1 13.1 #7](week1.md#131-清单) `home` vs `ready` 谁是权威 | **不定权威**（仍推第6/8周），但 Stage L 会把两个构型都作为测试样例，第一次让它们在同一处出现 |
@@ -178,4 +186,174 @@
 > 第1、2周遗留、本周不打算做的条目**不要**复制过来，仍以 [week1.md 13.2](week1.md#132-反向清单现在就该做的属于缺一次推演) 和 [week2.md 6.2](week2.md#62-反向清单现在就该做的) 为权威。本节只放本周新产生的。开周先记两条：
 
 - **`docs/adr/` 至今是空目录**，而 [STUDY_NOTES_GUIDE.md 第6节](../../STUDY_NOTES_GUIDE.md) 的收周清单每周都要求"重大架构决策补一份 ADR"。已经攒了至少三件够格的：keyframe 长度静默补零后定下的同目录 `<include>` 约定、可视化从 RViz 回退到同进程 GLFW viewer、episode 边界从"进程边界"改成话题触发。本周还会再产生至少一件（`hand_tcp` 要不要改 vendor MJCF）。**缺一次推演**：不是不知道怎么写，是没定"够格"的判据——值得先定判据再补写，否则会变成把笔记复制一遍。
-- **新包 `arm_kinematics` 的 lint 从第一天起就要绿**（版权头、include 顺序、uncrustify 格式）。`mujoco_bridge` 的全量 lint 债务之所以难还，是因为 week1 笔记逐行引用过那些代码、`uncrustify --fix` 会让行号全部失配（[week2.md 6.2](week2.md#62-反向清单现在就该做的) 第1条）。**新包还没有任何笔记引用它的行号，现在是唯一零成本的时刻。**
+- **新包 `arm_kinematics` 的 lint 从第一天起就要绿**（版权头、include 顺序、uncrustify 格式）。旧包的 lint 债务已经收口；新包不能再积累同类债务。
+
+## 7. Stage K：自写 FK/Jacobian 纯函数库
+
+### 7.0 一句话总结
+
+建立了独立的 `arm_kinematics` C++17 包：用 `franka_description` 的 `kinematics.yaml` 和 `joint_limits.yaml` 运行时加载模型参数，在不依赖 ROS、MuJoCo 或 MoveIt 的纯 Eigen 核心中计算七轴机械臂的 FK 和 `hand_tcp` 几何 Jacobian。容易混淆的末端链是 `link7 -> link8 -> hand -> hand_tcp`：`link7` 是第七关节后的活动 link，`link8` 是再沿 z 平移 `0.107m` 的固定法兰 frame，`hand` 相对它绕 z 旋转 `-45°`，`hand_tcp` 再沿 hand 的 z 轴平移 `0.1034m` 且不增加旋转；MJCF 把 `link8` 和 `-45°` 折进了 `link7 -> hand`，所以其中没有独立的 `link8`。解析 Jacobian 已通过中心有限差分的步长扫描验证，且新包从第一天起 lint 全绿。
+
+### 7.1 改动清单与验证结果
+
+| 项 | 结果 |
+|---|---|
+| 新包 | `src/arm_kinematics/`，导出 `arm_kinematics` 静态库 |
+| 参数来源 | `/opt/ros/humble/share/franka_description/robots/fer/kinematics.yaml` 与 `joint_limits.yaml`；loader 接收显式路径，不把 ROS package lookup 混进数学核心 |
+| FK 输出 | `link0..link8`、`hand`、`hand_tcp` 的 world-frame `Eigen::Isometry3d` |
+| Jacobian | `6x7` 几何 Jacobian，`[vx, vy, vz, wx, wy, wz]`，world 表达，参考点为 `hand_tcp`，满足 `twist_world = J(q) * qdot` |
+| 固定变换 | `link7 -> link8` 读取 joint8；`link8 -> hand` 使用 URDF 的 `-45°`；`hand -> hand_tcp` 使用 URDF 的 `0.1034m` 纯 z 平移 |
+| 单测 | 8 项 gtest：参数读取及非法 YAML、FK 链复合/求逆、NaN/越界输入策略、Jacobian 中心差分步长扫描、TCP 参考点、关节限位、近奇异构型有限性 |
+| lint | `copyright`、`cpplint`、`uncrustify`、`lint_cmake`、`xmllint` 全部通过；cppcheck 因环境中的已知慢版本跳过 |
+| 实际验证 | `colcon test --packages-select arm_kinematics`：7/7 通过，0 失败 |
+
+### 7.2 本阶段冻结的数学约定
+
+1. `q` 顺序固定为 `joint1..joint7`，单位为 rad；夹爪不进入这套 7-DoF Jacobian。
+2. 所有 FK 输出都是 world-frame 绝对变换；`world` 与 MJCF 的 `link0` 重合，URDF 的 `base` 与 `fer_link0` 通过固定单位边对应。
+3. Jacobian 是 world-frame 几何 Jacobian，行顺序固定为线速度前三行、角速度后三行，参考点固定为 `hand_tcp`。
+4. `hand_tcp` 相对 `hand` 是 `[0, 0, 0.1034]m` 的 identity-rotation 固定变换；`-45°` 属于 `link8 -> hand`，不能重复加到 TCP。
+5. 姿态比较使用旋转矩阵的相对角度，不逐分量比较四元数；后续姿态误差使用轴角/log map，而不是四元数分量差。
+
+### 7.3 JD 写“了解 FK/Jacobian”通常要求到什么程度
+
+> 如果 JD 上要求了解正向运动学和 Jacobian，到底要什么程度？我现在基本知道意思，知道输入输出和怎么使用，但是不清楚具体计算公式、规则和实现细节，这样是否足够？
+
+目前已经达到“会使用”的入门层，但对多数机器人软件、运动规划或控制岗位来说，还差一层可解释、可排错的理解。JD 只写“了解”时，通常不要求背出 Franka 七轴机械臂的完整展开式，也不要求从零实现通用运动学库；合理下限是能说明下面两条公式、在简单机械臂上推导一次，并能看懂项目中的实现。
+
+#### 7.3.1 正向运动学应掌握到的程度
+
+正向运动学的输入是关节位置 $q$，输出是各 link 或末端相对基准坐标系的位姿。核心规则是沿运动链依次复合坐标变换：
+
+$$
+T^0_n=T^0_1T^1_2\cdots T^{n-1}_n
+$$
+
+每一节包含两部分：关节安装位置带来的固定变换，以及当前关节角带来的旋转。当前实现对应：
+
+```cpp
+current = current * model.joints[i].origin *
+  jointRotation(model.joints[i], q(i));
+```
+
+其中 `origin` 是父 link 到关节 frame 的固定变换，`jointRotation(...)` 是绕该关节轴旋转 $q_i$。循环得到 `link1..link7` 后，再依次追加固定的 `link7 -> link8 -> hand -> hand_tcp` 变换。
+
+需要理解矩阵乘法顺序不能交换，并能通过 frame 名判断相邻变换能否相乘；不需要记住 Franka 每个关节的尺寸、角度或手算七轴最终矩阵。面试若给一个二维两连杆机械臂，应当能根据两段长度和两个关节角写出或推导末端位置。
+
+#### 7.3.2 Jacobian 应掌握到的程度
+
+Jacobian 描述当前构型附近，关节速度如何映射为末端瞬时速度：
+
+$$
+\begin{bmatrix}v\\\omega\end{bmatrix}=J(q)\dot q
+$$
+
+七轴机械臂的几何 Jacobian 是 $6\times7$：每一列表示“只让一个关节以单位速度运动时，TCP 会产生什么线速度和角速度”。对旋转关节，第 $i$ 列为：
+
+$$
+J_i=
+\begin{bmatrix}
+a_i\times(p_{tcp}-p_i)\\
+a_i
+\end{bmatrix}
+$$
+
+这里 $a_i$ 是关节轴、$p_i$ 是关节原点、$p_{tcp}$ 是 TCP 位置，并且三者必须表达在同一个 frame。当前代码直接对应这个公式：
+
+```cpp
+const Eigen::Vector3d axis_world =
+  joint_frame.linear() * model.joints[i].axis.normalized();
+result.block<3, 1>(0, i) =
+  axis_world.cross(tcp_position - joint_position);
+result.block<3, 1>(3, i) = axis_world;
+```
+
+还需要知道三个常见约定会改变数值：参考点是 `hand` 还是 `hand_tcp`、结果表达在 world 还是 body frame、六维向量是线速度在前还是角速度在前。当前接口选择 `hand_tcp`、world frame、线速度在前。
+
+面试中的合理下限是：能解释 $\dot x=J\dot q$，看懂上面的叉乘公式，知道 Jacobian 丢秩意味着奇异构型，并知道可以把 FK 对关节角做有限差分来检查 Jacobian。不要求默写 Franka 的完整 $6\times7$ 数值表达式。
+
+#### 7.3.3 最小补足路径
+
+针对 JD，最有效的补足顺序是：
+
+1. 用二维两连杆机械臂手推一次 FK。
+2. 对末端位置分别求 $q_1,q_2$ 的偏导，得到二维 Jacobian。
+3. 理解三维旋转关节的叉乘公式是同一局部导数关系的几何表达。
+4. 回到本项目，能逐行解释 `fk()` 和 `jacobian()` 中每个量属于哪个 frame。
+5. 能说明有限差分能验证实现自洽，但不能证明共享的模型参数正确。
+
+达到这一步，可以合理地说“了解 FK/Jacobian”。若 JD 写的是“熟悉运动学”“实现 IK/控制器”或“掌握机器人建模与控制”，才需要继续深入伪逆、阻尼最小二乘、奇异值、冗余与关节限位等内容；这些属于本周 Stage M，而不是 Stage K 必须一次学完的前置条件。
+
+#### 7.3.4 二维、三维旋转与一般位姿矩阵
+
+二维绕原点旋转 $\theta$ 的矩阵是：
+
+$$
+R(\theta)=
+\begin{bmatrix}
+\cos\theta&-\sin\theta\\
+\sin\theta&\cos\theta
+\end{bmatrix}
+$$
+
+三维旋转需要说明绕哪条轴。绕 $x,y,z$ 轴旋转时分别为：
+
+$$
+R_x=\begin{bmatrix}1&0&0\\0&c&-s\\0&s&c\end{bmatrix},\quad
+R_y=\begin{bmatrix}c&0&s\\0&1&0\\-s&0&c\end{bmatrix},\quad
+R_z=\begin{bmatrix}c&-s&0\\s&c&0\\0&0&1\end{bmatrix}
+$$
+
+其中 $c=\cos\theta,s=\sin\theta$。一般三维姿态可由多个轴旋转复合；本项目读取 URDF RPY 时使用 $R=R_z(yaw)R_y(pitch)R_x(roll)$，顺序不能交换。
+
+加入平移后，用齐次矩阵把旋转和平移统一表示。二维位姿是 $3\times3$：
+
+$$
+T=\begin{bmatrix}R_{2\times2}&p_{2\times1}\\0\;0&1\end{bmatrix}
+=\begin{bmatrix}c&-s&x\\s&c&y\\0&0&1\end{bmatrix}
+$$
+
+三维位姿是 $4\times4$：
+
+$$
+T=\begin{bmatrix}R_{3\times3}&p_{3\times1}\\0\;0\;0&1\end{bmatrix}
+$$
+
+它作用于齐次坐标时得到 $p'=Rp+t$。代码中的 `Eigen::Isometry3d` 就是这种三维刚体位姿；`linear()` 取 $R$，`translation()` 取 $t$。
+
+#### 7.3.5 从物理意义理解 Jacobian 的一列
+
+旋转关节第 $i$ 列为：
+
+$$
+J_i=\begin{bmatrix}a_i\times(p_{tcp}-p_i)\\a_i\end{bmatrix}
+$$
+
+前三项是 TCP 的线速度。叉积 $a_i\times(p_{tcp}-p_i)$ 的方向同时垂直于旋转轴和“关节到 TCP”的半径，因此正好沿圆周切线；它的大小是轴角速度乘以 TCP 到旋转轴的垂直距离，距离轴越远，线速度越大。
+
+后三项是 TCP 的角速度。只让该关节以单位角速度旋转时，所有下游刚体都绕同一根轴转，所以末端角速度方向就是 world frame 中的关节轴 $a_i$。乘上实际 $\dot q_i$ 后，该关节贡献的角速度为 $a_i\dot q_i$。
+
+#### 7.3.6 `model_loader` 的定位与测试路径
+
+`model_loader.cpp` 不是 MJCF 或通用 URDF 解析器，而是针对 Franka FER 的轻量适配器：它读取 `kinematics.yaml` 中 `joint1..joint8` 的固定变换和 `joint_limits.yaml` 中 `joint1..joint7` 的限位，再补上 YAML 没有表达的模型假设。需要注意的假设包括：`joint1..7` 都绕自身 z 轴旋转、world 与 `link0` 重合，以及手写的 `link8 -> hand` 的 $-45^\circ$ 和 `hand -> hand_tcp` 的 `0.1034m`。RPY 按 $R_z(yaw)R_y(pitch)R_x(roll)$ 组合，顺序写错不会产生类型错误。
+
+测试中的 `KINEMATICS_YAML_PATH` 和 `JOINT_LIMITS_YAML_PATH` 不是头文件变量，而是 `CMakeLists.txt` 通过 `target_compile_definitions(test_arm_kinematics PRIVATE ...)` 只注入测试目标的字符串宏。CMake 先从 `franka_description_DIR` 得到包的 share 目录，再生成实际编译参数；当前环境展开后分别指向 `/opt/ros/humble/share/franka_description/robots/fer/kinematics.yaml` 和 `joint_limits.yaml`。库接口本身仍要求调用者显式传路径，因此数学库不依赖 ROS package lookup。
+
+输入策略在本阶段明确为：`fk()` 和 `jacobian()` 对 NaN/Inf 抛出 `std::invalid_argument`，避免坏数静默传播；对有限但超出关节限位的角度仍然计算，因为运动学公式本身有定义，物理上能否执行由 `withinJointLimits()` 单独判断。YAML 缺字段、包含 NaN/Inf 或出现下限大于上限时，loader 立即抛异常；三类情况均有负向测试。
+
+### 7.4 这组测试证明了什么
+
+当前测试证明的是自写实现内部自洽，以及解析 Jacobian 与自身 FK 的数值导数一致。有限差分扫描使用 `h=1e-2、5e-3、2.5e-3`，误差随 `h^2` 下降；这能抓住关节轴、参考点、线/角速度块等实现错误。
+
+它还没有证明 URDF/MJCF 两套模型一致，也没有证明 `kinematics.yaml` 的物理参数正确。因为自写实现和未来的 MoveIt `RobotState` 都会间接使用同一份 URDF/YAML 参数，二者对上只说明实现不同但解释一致。模型来源的独立验证留给 Stage L 的 MuJoCo 三方对照。
+
+### 7.5 失败模式与验证手段
+
+- 把某个 joint origin 的 roll 符号改反：有限差分仍可能和错误解析式一致，因此需要 Stage L 的 MuJoCo 对照抓住“参数错但实现自洽”的情况。
+- 把 Jacobian 参考点改成 `hand`：`hand_tcp` 的有限差分测试会失败，因为固定 TCP 偏移会改变线速度块。
+- 交换线速度和角速度块：有限差分的 6 维逐块比较会失败。
+- 把 position servo 的实际稳态关节角拿来做 FK 对照：会把控制误差误判成模型误差；Stage L 必须直接写 `mjData::qpos` 后调用 `mj_forward`。
+
+### 7.6 本阶段边界与后续
+
+Stage K 至此结束，本阶段不加入 MoveIt、MuJoCo API 或 diff-IK。下一阶段需要构造 `moveit::core::RobotModel/RobotState`，明确 `fer_*` 与 MJCF 原生 frame 的映射，并用至少五组固定 `q` 做 FK/Jacobian 三方对照；届时还要决定 MuJoCo 侧用 `mj_jac` 手动传 TCP 点，还是给模型增加 `hand_tcp` site。

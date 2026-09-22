@@ -1,5 +1,9 @@
 {
     "cmake.ignoreCMakeListsMissing": true,
     "C_Cpp.default.compileCommands": "${workspaceFolder}/build/compile_commands.json",
+    "C_Cpp.default.includePath": [
+        "${workspaceFolder}/src/**",
+        "/usr/include/eigen3"
+    ],
     "python.defaultInterpreterPath": "/usr/bin/python3"
 }
