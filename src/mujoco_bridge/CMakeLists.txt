@@ -133,6 +133,47 @@ if(BUILD_TESTING)
   target_compile_definitions(test_grasp_state PRIVATE
     TEST_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures")
 
+  # Stage L integration test: keep MoveIt and arm_kinematics as test-only
+  # dependencies so neither the bridge node nor the pure math library acquires
+  # an unnecessary production dependency.
+  find_package(arm_kinematics REQUIRED)
+  find_package(franka_description REQUIRED)
+  find_package(moveit_core REQUIRED)
+  find_package(xacro REQUIRED)
+
+  get_filename_component(FRANKA_DESCRIPTION_SHARE_DIR
+    "${franka_description_DIR}/.." ABSOLUTE)
+  get_filename_component(PANDA_MJCF_PATH
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../robot_description/mujoco/franka_emika_panda/panda.xml"
+    ABSOLUTE)
+
+  xacro_add_xacro_file(
+    "${FRANKA_DESCRIPTION_SHARE_DIR}/robots/fer/fer.urdf.xacro"
+    "${CMAKE_CURRENT_BINARY_DIR}/fer.urdf"
+    OUTPUT FER_URDF_PATH)
+  xacro_add_xacro_file(
+    "${FRANKA_DESCRIPTION_SHARE_DIR}/robots/fer/fer.srdf.xacro"
+    "${CMAKE_CURRENT_BINARY_DIR}/fer.srdf"
+    OUTPUT FER_SRDF_PATH)
+  add_custom_target(stage_l_robot_descriptions
+    DEPENDS "${FER_URDF_PATH}" "${FER_SRDF_PATH}")
+
+  ament_add_gtest(test_model_consistency
+    test/test_model_consistency.cpp
+    src/mujoco_dl.cpp
+  )
+  add_dependencies(test_model_consistency stage_l_robot_descriptions)
+  target_include_directories(test_model_consistency PRIVATE include ${MUJOCO_INCLUDE_DIRS})
+  target_link_libraries(test_model_consistency arm_kinematics::arm_kinematics dl)
+  ament_target_dependencies(test_model_consistency moveit_core)
+  target_compile_definitions(test_model_consistency PRIVATE
+    FER_URDF_PATH="${FER_URDF_PATH}"
+    FER_SRDF_PATH="${FER_SRDF_PATH}"
+    KINEMATICS_YAML_PATH="${FRANKA_DESCRIPTION_SHARE_DIR}/robots/fer/kinematics.yaml"
+    JOINT_LIMITS_YAML_PATH="${FRANKA_DESCRIPTION_SHARE_DIR}/robots/fer/joint_limits.yaml"
+    PANDA_MJCF_PATH="${PANDA_MJCF_PATH}"
+  )
+
   find_package(ament_lint_auto REQUIRED)
   ament_lint_auto_find_test_dependencies()
 endif()

@@ -58,7 +58,7 @@
 xacro $(ros2 pkg prefix franka_description)/share/franka_description/robots/fer/fer.urdf.xacro
 ```
 
-计划中的根治方案：给 vendor 的 MJCF 的 `hand` body 加 `<site name="hand_tcp" pos="0 0 0.1034"/>`，让数值住在描述层、代码从模型读。
+**Stage L 决定不修改 vendor MJCF**：模型一致性测试用 `mj_jac` 对 `hand` body 上的任意 world-space 点求 Jacobian，TCP 点由 `hand` 位姿和局部 `[0, 0, 0.1034]` 合成；运行时 TF 继续沿用同一合成方式。这样保留 vendor 文件可直接和上游比较，代价是 `0.1034` 仍有代码副本。自动三方测试会在该副本漂移时失败，因此风险从“无人发现”降为“测试门禁可见”。若以后有 MuJoCo 原生 site 的运行时消费者，再用项目自有 overlay MJCF 增加 site，而不是直接修改 vendor 文件。
 
 **URDF 侧命名差异（已知上游差异，不是 bug）**：展开 `fer.urdf.xacro` 后，URDF 侧和 MJCF/TF 侧的对应关系是：
 
@@ -128,13 +128,16 @@ xacro $(ros2 pkg prefix franka_description)/share/franka_description/robots/fer/
 
 ## 3. MuJoCo 与 MoveIt 模型一致性
 
-对应第3.2节要求：对至少5组固定关节构型比较 MuJoCo 与 MoveIt 2 的末端 FK，位置与姿态误差超过阈值即禁止继续集成。
+Stage L 已在 [test_model_consistency.cpp](../src/mujoco_bridge/test/test_model_consistency.cpp) 建立自动三方门禁。测试展开官方 `fer.urdf.xacro`/`fer.srdf.xacro`，直接构造 `moveit::core::RobotModel`/`RobotState`；MuJoCo 侧自行加载 `panda.xml`，把同一组 `q` 直接写入各关节的 `jnt_qposadr`，再调用 `mj_forward`。它不启动仿真节点、不经过 actuator 或 position servo，因此只测模型和运动学实现。
 
-- 阈值：TBD（建议初始位置误差 < 5mm，姿态误差 < 1°，后续按实测调整）
-- 测试位置：`test/`（第一个自动测试，对应第15节任务5）
-- **已有的一次手工交叉验证（Stage D）**：用 `robot_state_publisher` + `franka_description` URDF（KDL FK，独立于 MuJoCo 的实现和描述）对 `home` 位姿做了对照，`link4` 差 2mm / 0.3°，`hand_tcp` 差 7mm。**差值来源是 position servo 的稳态误差，不是模型不一致**——伺服靠位置误差产生力矩对抗重力，误差为零就没有力矩。方法和完整数据见 [week1.md 10.7](../Job_guides/my_study/week1.md#107-怎么快速做一次独立的-fk-验证)。
-  - 对自动测试的两条约束：**(1) 断言输入必须用实际读到的 `qpos`，不能用 keyframe 标称值**，否则容差得放宽到厘米级；**(2) 四元数不能逐分量比**——`q` 和 `−q` 是同一个旋转，必须比 `|q1·q2| ≈ 1` 或转成角度差。
-- 碰撞几何简化记录：TBD——`franka_description` 的 collision geometry 与 MJCF 的 `*_c` collision mesh 都是简化过的凸包/近似几何，两者是否用同一份简化尚待确认，第3周对照测试时一并核对。
+- 固定样例：全零、MJCF `home`、SRDF `ready`、近伸直、贴近限位，以及两组固定随机构型，共 7 组。
+- FK 覆盖：逐构型比较 `link0..link7`、URDF 独有的 `link8`、`hand` 和合成 `hand_tcp`；三个可用数据源之间逐对比较。姿态比较使用相对旋转角，不逐分量比较四元数。
+- Jacobian 约定：`hand_tcp` 参考点、world 表达、`[vx, vy, vz, wx, wy, wz]`；MuJoCo 侧按 `jnt_dofadr` 取 7 个臂关节列，而不是假设列号等于 `qpos` 地址。
+- 门禁阈值：位置误差 `< 1e-6 m`，姿态误差 `< 1e-6 rad`，Jacobian 任一元素绝对误差 `< 1e-8`。
+- 首次实测最大值：位置 `6.87e-16 m`，姿态 `3.49e-8 rad`，Jacobian 元素 `1.78e-15`。姿态残差集中在 MJCF `hand` 的截断四元数 `0.9238795 ... -0.3826834`；它远低于门槛，但不是严格的机器零。
+- **已有的一次手工交叉验证（Stage D）**：用运行中 position servo 的状态测得 `link4` 差 2mm / 0.3°、`hand_tcp` 差 7mm。Stage L 的直接状态写入结果证明那些差值来自伺服稳态误差，不是模型不一致。运行态验证和模型验证不能共用容差或输入方法。
+
+碰撞几何不是全模型统一的一份简化：`link0..link4`、`link6`、`link7` 和 `hand` 的 collision STL 在 apt `franka_description` 与 vendor MJCF 中逐文件 SHA256 相同；`link5` 在 URDF 中是一份 `link5.stl`，MJCF 中则拆成三个 `link5_collision_*.obj`；手指在 URDF 中由 4 个 box 组成，MJCF 使用 `finger_0` mesh 加 5 个 fingertip box。结论是主臂多数 link 共享同源 mesh，但不能据此假设 MoveIt 与 MuJoCo 的全身碰撞结果完全一致。
 
 ## 4. 待办
 
@@ -142,13 +145,13 @@ xacro $(ros2 pkg prefix franka_description)/share/franka_description/robots/fer/
 - [x] 选定 MJCF 来源：MuJoCo Menagerie `franka_emika_panda/`（vendor 进 `robot_description/mujoco/`）
 - [x] 填写关节命名表、零位、限位（见第2节）
 - [x] 定下 TF frame 命名权威规则（MJCF 原生名 + 合成 `hand_tcp`），并与 `mujoco_bridge` 实现核对一致（Stage C）
-- [ ] 把 `hand_tcp` 的 `0.1034` 搬进 vendor 的 MJCF（`<site>`），消除手抄副本（见第1节）
+- [x] 决定 `hand_tcp` 不直接写进 vendor MJCF；Stage L 用 `mj_jac` 任意点接口并由三方测试监控 `0.1034` 副本漂移（见第1、3节）
 - [ ] 第6周接 MoveIt 时决定 `robot_state_publisher` 的 TF remap 方案，并补一份 `docs/adr/`
 - [ ] **第6周决定"初始位姿"以 MJCF `home` 还是 SRDF `ready` 为权威**（见第 2.1 节），同样需要 ADR
 - [x] 定下 `~/reset` 的语义边界（复位状态不复位时间、仿真专有接口用私有名）——见第 2.2 节（Stage D）
 - [ ] 记录相机外参数值来源与标定方式（相机型号/安装位置尚未选定）
-- [ ] 确认 URDF 与 MJCF 碰撞几何是否为同一份简化（第3节）
-- [ ] 编写第一个自动测试：5组固定 `q`，对比 MuJoCo 与 MoveIt FK（对应第15节任务5，需等 `motion_planner`/MoveIt 配置接入后才能跑）
+- [x] 确认 URDF 与 MJCF 碰撞几何并非全身同一表示；相同与不同部分见第3节
+- [x] 编写自动三方测试：7组固定 `q`，逐 link 对比 MuJoCo、MoveIt 与自写 FK/Jacobian（Stage L）
 - [ ] keyframe 长度不匹配会被静默补零（不报错，见第 0.1 节）——需要至少一个 gtest 防止手滑改错 `qpos` 长度却没人发现（Stage G 实测，见 [week2.md 8.8](../Job_guides/my_study/week2.md#88-排查记录keyframe-名字冲突与长度不匹配是两件独立的事结论被推翻)）
 - [ ] `gripper_actuator_id_`/`kHandBodyName="hand"`（`mujoco_bridge_node.cpp`）目前是隐式单机械臂假设：模型里有第二个夹爪/第二个 `hand` body 会静默覆盖或找不到，不报错。解锁条件：真正引入第二条机械臂（第 2.2 节"暂不进入 MVP"包含双臂，当前不修）
 - [ ] `task_executor` 的 `close_settle_s`/`lift_settle_grace_s`（第7节）是"改到实测通过为止"定的，不是从物理量推出来的；第3周把 `WaypointSource` 换成 diff-IK 实现后，"发离散目标等伺服收敛"这个物理场景整体改变，需要重新测

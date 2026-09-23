@@ -59,6 +59,10 @@ struct MujocoApi
   // only rewrites the state vector, so anything we publish from mjData before the
   // next mj_step would still be the pre-reset derived values.
   decltype(&mj_forward) forward;
+  // Kinematic Jacobians. mj_jac evaluates an arbitrary world-space point fixed
+  // to a body; mj_jacBody evaluates the body-frame origin.
+  decltype(&mj_jac) jac;
+  decltype(&mj_jacBody) jacBody;
   // Quaternion helpers, used to turn absolute body poses (xpos/xquat, relative to
   // world) into the parent-relative transforms TF wants.
   decltype(&mju_negQuat) negQuat;

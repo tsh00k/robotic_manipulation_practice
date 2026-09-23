@@ -70,7 +70,7 @@ distrobox enter robotics-dev -- bash -ic '
   注意：这些变量只在**交互式 shell**里生效（`.bashrc` 开头有非交互式 shell 直接 return 的 guard），用 `distrobox enter robotics-dev -- bash -lc '...'` 跑非交互命令时不会加载，需要用 `bash -ic '...'` 或者先手动 `source ~/.bashrc` / `export MUJOCO_DIR=...`。
 - 容器内网络访问正常（能连 github.com 等），此前判断"无网络"是误判。
 
-- **ROS2 机器人描述/MoveIt 资源已装为系统包**（apt，Humble）：`ros-humble-franka-description`（官方 Panda/`fer` URDF+mesh）、`ros-humble-moveit-resources-panda-moveit-config`（现成 MoveIt SRDF/kinematics/planning 配置）、`ros-humble-control-msgs`（`mujoco_bridge` 编译依赖）、`ros-humble-xacro`、`ros-humble-joint-state-publisher(-gui)`（这两个是上面包的依赖，自动装的）。模型来源和具体路径见 [docs/architecture.md](docs/architecture.md) 第0节。
+- **ROS2 机器人描述/MoveIt 包已装为系统包**（apt，Humble）：`ros-humble-franka-description`（官方 Panda/`fer` URDF+mesh）、`ros-humble-moveit-resources-panda-moveit-config`（现成 MoveIt SRDF/kinematics/planning 配置）、`ros-humble-moveit-core`、`ros-humble-moveit-kinematics`、`ros-humble-control-msgs`（`mujoco_bridge` 编译依赖）、`ros-humble-xacro`、`ros-humble-joint-state-publisher(-gui)`。模型来源和具体路径见 [docs/architecture.md](docs/architecture.md) 第0节。
 - MuJoCo MJCF（Panda + 平行夹爪）已从 [google-deepmind/mujoco_menagerie](https://github.com/google-deepmind/mujoco_menagerie) vendor 进 `robot_description/mujoco/franka_emika_panda/`（约33MB，含 mesh），不走 apt（没有对应包）。
 
 **重要坑：pyenv 会劫持 python3，有两个不同的变体。**

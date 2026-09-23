@@ -27,6 +27,10 @@
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
   <test_depend>ament_cmake_gtest</test_depend>
+  <test_depend>arm_kinematics</test_depend>
+  <test_depend>franka_description</test_depend>
+  <test_depend>moveit_core</test_depend>
+  <test_depend>xacro</test_depend>
 
   <!-- grasp_criteria is an exported ament_cmake library target (CMakeLists.txt),
        so downstream packages (task_executor) can find_package(mujoco_bridge) and

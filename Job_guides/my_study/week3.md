@@ -1,6 +1,6 @@
 # Week 3 学习笔记
 
-> **本文件当前是开周计划稿**，只有第 1~6 节（继承事实、stage 计划、验收标准、要回头解锁的悬挂项、开周提示、本周悬挂清单）是现在写下的。第 7 节起的 stage 节随每个 stage 完成后就地扩写，骨架按 [STUDY_NOTES_GUIDE.md](../../STUDY_NOTES_GUIDE.md) 2.2（`N.0 一句话总结 → N.1 改动清单与验证结果 → N.x 概念讲解 → N.x 失败模式与验证手段 → N.x 排查记录`）。
+> **本文按 stage 完成进度持续扩写**。第 1~6 节是开周计划与清单；第 7 节 Stage K、第 8 节 Stage L 已完成并写入实测结果，后续 stage 仍按 [STUDY_NOTES_GUIDE.md](../../STUDY_NOTES_GUIDE.md) 2.2 的骨架就地追加。
 >
 > Stage 编号延续第1周的 A~E、第2周的 F~J，本周是 **K~N**（四个，[范围选择见 2.0](#20-为什么是四个-stage不是五个)）。
 
@@ -37,9 +37,27 @@
   - [7.1 改动清单与验证结果](#71-改动清单与验证结果)
   - [7.2 本阶段冻结的数学约定](#72-本阶段冻结的数学约定)
   - [7.3 JD 写“了解 FK/Jacobian”通常要求到什么程度](#73-jd-写了解-fkjacobian通常要求到什么程度)
+    - [7.3.1 正向运动学应掌握到的程度](#731-正向运动学应掌握到的程度)
+    - [7.3.2 Jacobian 应掌握到的程度](#732-jacobian-应掌握到的程度)
+    - [7.3.3 最小补足路径](#733-最小补足路径)
+    - [7.3.4 二维、三维旋转与一般位姿矩阵](#734-二维三维旋转与一般位姿矩阵)
+    - [7.3.5 从物理意义理解 Jacobian 的一列](#735-从物理意义理解-jacobian-的一列)
+    - [7.3.6 `model_loader` 的定位与测试路径](#736-model_loader-的定位与测试路径)
   - [7.4 这组测试证明了什么](#74-这组测试证明了什么)
   - [7.5 失败模式与验证手段](#75-失败模式与验证手段)
   - [7.6 本阶段边界与后续](#76-本阶段边界与后续)
+- [8. Stage L：MuJoCo、MoveIt 与自写运动学三方一致性测试](#8-stage-lmujocomoveit-与自写运动学三方一致性测试)
+  - [8.0 一句话总结](#80-一句话总结)
+  - [8.1 改动清单与验证结果](#81-改动清单与验证结果)
+  - [8.2 三方测试是怎样工作的](#82-三方测试是怎样工作的)
+  - [8.3 `RobotModel`、`RobotState` 与 `JointModelGroup`](#83-robotmodelrobotstate-与-jointmodelgroup)
+  - [8.4 测试层为什么没有破坏此前的隔离](#84-测试层为什么没有破坏此前的隔离)
+  - [8.5 `hand_tcp` 不写进 MJCF 时怎样取得 Jacobian](#85-hand_tcp-不写进-mjcf-时怎样取得-jacobian)
+  - [8.6 碰撞几何核对与测试边界](#86-碰撞几何核对与测试边界)
+  - [8.7 失败模式与验证手段](#87-失败模式与验证手段)
+  - [8.8 排查记录：首次编译与 lint 反馈](#88-排查记录首次编译与-lint-反馈)
+  - [8.9 你没问但值得注意的](#89-你没问但值得注意的)
+  - [8.10 本阶段边界与后续](#810-本阶段边界与后续)
 
 ---
 
@@ -179,7 +197,7 @@
 
 ### 6.1 清单
 
-> 待各 stage 结束后按 [4.3 的判据](../../STUDY_NOTES_GUIDE.md) 分流填入（缺参照系 → 这里）。
+- **MoveIt 与 MuJoCo 的碰撞判定是否需要跨引擎一致性测试**：Stage L 已确认两边碰撞几何并非全身同一表示，因此不能把“相同 `q` 必须得到完全相同接触集合”当作普遍断言。当前缺的是规划器真正如何消费 MoveIt 碰撞结果的参照系。解锁条件：进入 MoveIt 运动规划集成时，加入远离接触边界的明确无碰撞/自碰撞/环境碰撞样例，核对 SRDF Allowed Collision Matrix、padding 与 MuJoCo `contype`/`conaffinity` 后，再决定保留哪些跨引擎正负例。Manipulation control 阶段只继续补持续接触、允许接触和抓取接触语义，不重新承担模型一致性。
 
 ### 6.2 反向清单：现在就该做的
 
@@ -357,3 +375,140 @@ $$
 ### 7.6 本阶段边界与后续
 
 Stage K 至此结束，本阶段不加入 MoveIt、MuJoCo API 或 diff-IK。下一阶段需要构造 `moveit::core::RobotModel/RobotState`，明确 `fer_*` 与 MJCF 原生 frame 的映射，并用至少五组固定 `q` 做 FK/Jacobian 三方对照；届时还要决定 MuJoCo 侧用 `mj_jac` 手动传 TCP 点，还是给模型增加 `hand_tcp` site。
+
+## 8. Stage L：MuJoCo、MoveIt 与自写运动学三方一致性测试
+
+### 8.0 一句话总结
+
+安装 MoveIt Core 后，在 `mujoco_bridge` 的测试层建立了不依赖运行中仿真的三方模型门禁：同一组关节位置分别送入自写 `arm_kinematics`、MoveIt `RobotState` 和直接加载 `panda.xml` 的 MuJoCo，再逐 link 比较 FK、逐元素比较 `hand_tcp` Jacobian。测试覆盖 7 组有明确目的的构型，首次实测最大位置误差 `6.87e-16m`、姿态误差 `3.49e-8rad`、Jacobian 元素误差 `1.78e-15`；最终全仓 5 个包构建成功，224 项测试 0 失败。Stage D 曾测到的毫米级差值因此被明确归因于运行中 position servo 的稳态误差，而不是 URDF/MJCF 模型不一致。
+
+### 8.1 改动清单与验证结果
+
+| 项 | 结果 |
+|---|---|
+| 环境依赖 | 安装 `ros-humble-moveit-core`、`ros-humble-moveit-kinematics` 2.5.10；apt 实际新增 36 个包、约 82.5MB；已同步 [CLAUDE.md](../../CLAUDE.md) |
+| 新测试 | [test_model_consistency.cpp](../../src/mujoco_bridge/test/test_model_consistency.cpp)：自行加载三套模型，不启动 `move_group`、ROS 节点或仿真循环 |
+| MuJoCo API | [mujoco_dl.hpp](../../src/mujoco_bridge/include/mujoco_bridge/mujoco_dl.hpp)/[mujoco_dl.cpp](../../src/mujoco_bridge/src/mujoco_dl.cpp) 增加 `mj_jac` 与 `mj_jacBody`，继续走 `RTLD_LOCAL | RTLD_DEEPBIND` 隔离 |
+| 构建接线 | [CMakeLists.txt](../../src/mujoco_bridge/CMakeLists.txt) 在测试配置中展开 `fer.urdf.xacro`/`fer.srdf.xacro`；MoveIt、xacro 和 `arm_kinematics` 都是测试依赖，不进入 bridge 节点的生产依赖 |
+| 依赖声明 | [package.xml](../../src/mujoco_bridge/package.xml) 增加 `arm_kinematics`、`franka_description`、`moveit_core`、`xacro` 的 `test_depend` |
+| 权威事实 | 门槛、实测误差、碰撞几何差异与 `hand_tcp` 决策已同步 [architecture.md 第3节](../../docs/architecture.md) |
+| 最终构建 | `colcon build --symlink-install`：5/5 包成功 |
+| 最终测试 | `colcon test` + `colcon test-result --all --verbose`：224 tests，0 errors，0 failures，32 skipped；skipped 均为环境中已知慢版 cppcheck |
+
+测试构型不是为了凑够 5 组，而是各自覆盖一类风险：
+
+| 构型 | 目的 |
+|---|---|
+| 全零 | 纯代数零位；即使 joint4 超出物理限位，三套 FK 仍应对有限输入给出相同数学结果 |
+| MJCF `home` | 覆盖仿真 reset 使用的 vendor keyframe |
+| SRDF `ready` | 覆盖 Franka/MoveIt 生态的命名状态，并防止把它误当成 `home` |
+| `near_singular` | 覆盖接近伸直的构型，为 Stage M 奇异性处理留基线 |
+| `near_limits` | 七个关节靠近交替限位，扩大角度和姿态覆盖 |
+| `random_a/b` | 两组固定内部样例，扩大一般构型覆盖且保证回归可复现 |
+
+门禁与首次实测：
+
+| 量 | 断言门槛 | 首次最大误差 |
+|---|---:|---:|
+| FK 位置范数 | `< 1e-6m` | `6.866350198e-16m` |
+| FK 相对旋转角 | `< 1e-6rad` | `3.491982864e-8rad` |
+| Jacobian 单元素绝对误差 | `< 1e-8` | `1.776356839e-15` |
+
+姿态残差集中在 MJCF `hand`：其中表示 $-45^\circ$ 的四元数只写到 `0.9238795 ... -0.3826834`，因此不会得到严格机器零，但仍远低于门槛。
+
+### 8.2 三方测试是怎样工作的
+
+测试夹具的 `SetUp()` 为每个 `TEST_F` 建立一套干净实验环境：
+
+1. `arm_kinematics::loadFrankaFerModel()` 从官方 YAML 建自写模型。
+2. 解析构建期展开的 URDF/SRDF，构造 `moveit::core::RobotModel`；`JointModelGroup("fer_arm")` 选出七轴组，`RobotState` 保存当前 `q` 和变换缓存。
+3. `mj_loadXML()` 直接加载 `panda.xml` 并创建 `mjData`，按名字解析每个关节的 `jnt_qposadr` 与 `jnt_dofadr`。
+4. 每组构型同时写入 MoveIt `RobotState` 和 MuJoCo `qpos`；MuJoCo 随后调用 `mj_forward` 刷新 `xpos`、`xmat`、Jacobian 等派生量，不推进时间。
+5. `link0..link7`、`hand`、`hand_tcp` 做三方逐对 FK 比较；URDF 独有的 `link8` 做自写与 MoveIt 比较。最后把三套 `hand_tcp` Jacobian 拉平为 world 表达、线速度在前、`joint1..7` 列顺序后比较。
+
+这里不能经过 actuator 或读取运行中仿真：那样测到的会同时包含 position servo、重力和稳态误差。Stage L 要回答的是“相同精确 `q` 下三套运动学是否一致”，所以必须直接写 `qpos` 后 `mj_forward`。
+
+### 8.3 `RobotModel`、`RobotState` 与 `JointModelGroup`
+
+`RobotModel` 是从 URDF/SRDF 构造出的相对稳定模型：link/joint 拓扑、固定变换、限位以及 SRDF 规划组等语义都住在这里。`JointModelGroup` 是 `RobotModel` 内部的一张只读视图，本阶段的 `fer_arm` 把七个活动关节按 MoveIt 认可的顺序组织起来。`RobotState` 则是一份可变状态：当前关节值以及由它们计算出的全局 link 变换缓存。
+
+因此本阶段只需要链接 `moveit_core`，不需要运行 `move_group`。`move_group` 是提供规划服务、插件和场景管理的进程；这里使用的是底层 C++ 数据结构和运动学函数。
+
+### 8.4 测试层为什么没有破坏此前的隔离
+
+> 我希望知道这个程序为什么这样设计，背后的思想是什么，希望能够讨论变量和函数的作用域、权限、名称空间等等问题，并且讨论一下我们先前做的隔离机制（比如自写FK不依赖mujoco）在这里起到了什么好的作用吗？还有些新东西比如SCOPED_TRACE，为什么cout会在这里的函数中使用（运行测试的时候可以看到它们吗）。
+
+纯 C++ 机制（GoogleTest、fixture、`protected`、匿名 namespace、智能指针所有权、`SCOPED_TRACE` 和 `cout` 捕获规则）的完整讲解分流到 [cpp_concepts.md：GoogleTest fixture、作用域与所有权](cpp_concepts.md#googletest-fixture作用域与所有权以-stage-l-为例)。本节只记录工程边界。
+
+Stage K 把自写 FK/Jacobian 留成只依赖 Eigen/yaml-cpp 的纯库，这次带来四个直接收益：
+
+1. 三方测试可以把它当普通函数调用，不需要构造 ROS 节点、伪造消息或把数据绕一圈话题。
+2. MoveIt 和 MuJoCo 只在测试层汇合；`arm_kinematics` 的生产依赖没有反向长出 MoveIt/MuJoCo。
+3. `BUILD_TESTING=OFF` 时，bridge 节点也不会因为这项验证而依赖 MoveIt。
+4. 三个入口保留不同实现路径，使“比较一致”仍然有证据价值；若把自写 FK 改成内部直接调用 MoveIt，再拿它和 MoveIt 比较就只是在比较同一实现两次。
+
+独立性仍有边界：自写实现和 MoveIt 都从 `franka_description` 的同一份 `kinematics.yaml` 获得参数，所以二者对上只验证实现解释一致；只有与独立 MJCF 的对照能抓住共享参数错误或两份描述漂移。
+
+### 8.5 `hand_tcp` 不写进 MJCF 时怎样取得 Jacobian
+
+> 对于TCP Jacobian偏移，还是不必讲解数学底层原理了。
+
+本阶段保留工程层结论，不展开速度搬移的数学推导：
+
+- MJCF 中没有 `hand_tcp` body/site；它一直由 `hand` 位姿加局部 z 轴 `0.1034m` 合成。
+- 测试先合成 TCP 的 world-space 坐标，然后调用 `mj_jac(model, data, ..., point, hand_id)`。这个 API 能直接计算固定在指定 body 上任意世界点的 Jacobian。
+- 当前实现**不是**先调用 `mj_jacBody(hand)` 再在项目代码中手动变换 Jacobian；参考点搬移由 MuJoCo 内部完成。
+- MoveIt 的 URDF 本来就有 `fer_hand_tcp` link，因此对该 link 原点调用 `getJacobian()`；自写实现则直接以 `p_tcp` 为参考点计算。
+- 第二个 gtest 把 `mj_jac` 的任意点恰好设为 hand 原点，并断言它与 `mj_jacBody(hand)` 相同，用来钉住两个 API 的参考点语义。
+
+最终决定是不直接修改 vendor `panda.xml`。好处是 vendor 文件能继续和上游原样比较；代价是 `0.1034` 仍是手抄副本。三方门禁将它从“漂移后无人发现”变成“漂移后测试失败”。若以后有真实的 MuJoCo site 消费者，再用项目自有 overlay MJCF 增加 site，而不是直接改 vendor 文件。
+
+### 8.6 碰撞几何核对与测试边界
+
+> 碰撞相关的内容是在哪里进行测试的？多讲讲碰撞测试相关的内容。
+>
+> 碰撞测试应该在后面处理manipulation control的week中开展你觉得对吗？还是说没必要做？
+
+Stage L 没有实现 MoveIt 与 MuJoCo 的自动碰撞结果一致性测试。本阶段完成的是**静态资源核对**：对 collision mesh 做 SHA256 和结构检查。结果为 `link0..link4`、`link6`、`link7`、`hand` 两边 STL 完全相同；`link5` 在 URDF 是一份 STL、MJCF 是三个 OBJ；手指在 URDF 是 4 个 box，MJCF 是 `finger_0` mesh 加 5 个 fingertip box。因此不能建立“同一 `q` 下两边完整接触集合必须相同”的普遍断言。
+
+现有 [test_grasp_state.cpp](../../src/mujoco_bridge/test/test_grasp_state.cpp) 使用最小 `contact_probe.xml` 验证 `mj_forward` 后 `mjData::contact` 的 body-pair 提取、参数顺序无关性和单/双指接触。它测的是 **MuJoCo 接触读取代码**，不是跨引擎碰撞等价。
+
+合理的后续分层是：
+
+| 时机 | 应验证什么 |
+|---|---|
+| Stage L | 记录碰撞资源是否同源、明确差异和知识边界；已完成 |
+| MoveIt 规划集成 | 明确无碰撞、自碰撞、桌面/物体碰撞样例；验证 FCL、SRDF Allowed Collision Matrix 和 padding；选少量远离边界的样例与 MuJoCo 对照 |
+| Manipulation control | 持续接触、允许接触、抓取接触、非预期碰撞和接触抖动等任务语义 |
+
+因此不是“没必要做”，也不应全部推到 manipulation control。决定轨迹可执行性的 MoveIt 碰撞门禁应随规划集成完成；control 周只承担接触随时间演化的部分。该事项已写入 [6.1](#61-清单)，解锁条件是 MoveIt 规划真正开始消费碰撞结果。
+
+### 8.7 失败模式与验证手段
+
+| 失败模式 | 现象 | 怎么发现或防住 |
+|---|---|---|
+| 把 `jnt_qposadr` 当成 Jacobian 列号 | 当前纯 hinge Panda 可能碰巧通过；加入 free joint 后列整体错位 | `qpos` 写入只用 `jnt_qposadr`，Jacobian 提取只用 `jnt_dofadr`；既有 `free_body.xml` 单测已证明二者会分离 |
+| TCP 偏移副本漂移 | hand FK 仍一致，但 TCP 位置和 Jacobian 都偏 | 实际把 `0.1034` 注入为 `0.1044`：测试变红，最大位置误差 `1e-3m`、Jacobian 元素误差约 `9.63e-4` |
+| 用 position servo 的稳态状态做模型断言 | 把控制误差误判为模型误差，容差被迫放宽到毫米/厘米级 | 测试直接写 `mjData::qpos` 后调用 `mj_forward`，不启动 actuator 或仿真循环 |
+| 四元数逐元素比较 | 同一旋转的 `q`/`-q` 被误报，或分量误差没有清晰物理单位 | 用相对旋转矩阵的轴角大小比较，单位为 rad |
+| 三套 Jacobian 的参考点、frame 或行顺序不同 | 数值形状相同但内容系统性对不上，没有 API 报错 | 统一为 `hand_tcp`、world、线速度在前；三方逐元素门禁 `<1e-8` |
+| 把自写 ↔ MoveIt 一致误当成参数独立验证 | 两边共享的 YAML 同时写错仍然全绿 | 把 MuJoCo 对照视为跨数据源证据；三对结果不等权解释 |
+| fixture 间共享可变 `RobotState`/`mjData` | 测试顺序改变结果，单跑通过、全跑失败 | 当前每个 `TEST_F` 都重新 `SetUp()`；不为约 0.4s 的测试时间引入 suite 级共享状态 |
+| 碰撞 mesh 部分相同就推断全身碰撞一致 | link5/手指附近出现不同碰撞判定 | 权威文档明确记录差异；规划阶段只选远离边界的跨引擎样例，不要求临界点完全一致 |
+
+### 8.8 排查记录：首次编译与 lint 反馈
+
+首次编译失败在 URDF 指针的静态类型：成员保存为 `urdf::ModelInterfaceSharedPtr`，接口类型没有派生类 `urdf::Model::initString()`。修复不是强转，而是先用 `std::shared_ptr<urdf::Model>` 完成解析，再赋给接口指针供 SRDF/MoveIt 使用。这保留了多态接口，同时把派生类专有初始化限制在局部变量作用域。
+
+功能测试第一次即通过；完整 `colcon test` 随后暴露 4 个 include-order cpplint 报告和 1 个 uncrustify 换行报告。按工具建议调整后，单独 lint 与最终全仓测试均全绿。这个过程再次说明“gtest 通过”只证明行为断言，通过完整 `colcon test` 才包含项目约定的静态质量门禁。
+
+### 8.9 你没问但值得注意的
+
+1. **上游模型版本变化如何归因**（C/E 类）：测试每次构建都展开系统 apt 中的 `franka_description`。未来 apt 升级导致门禁变红时，需要把已安装包版本和模型内容 hash 一起记录，才能区分项目回归与上游数据变化。
+2. **成功测试的逐 link 数值目前只在 stdout/CTest 日志**（C 类）：它足够定位单次失败，但不适合观察多次 CI 之间的缓慢漂移；建立 CI 时应决定是否保存结构化 CSV/JUnit artifact。
+3. **MuJoCo 裸资源尚未使用 RAII 包装**（E 类）：正常 GoogleTest 流程会执行 `TearDown()`，但构造中途发生非致命之外的 C++ 异常时，带自定义 deleter 的 `unique_ptr` 会比手写清理更稳健。是否重构应等第二个生产消费者出现或异常清理成为真实问题，不在本阶段扩范围。
+4. **`moveit_kinematics` 当前没有直接被代码调用**（F 类）：本阶段只需要 `moveit_core`；它是按 Stage M/N 后续插件路径预装的环境依赖，不应误写成 `mujoco_bridge` 当前的直接 `package.xml` 依赖。
+
+### 8.10 本阶段边界与后续
+
+Stage L 至此结束：运动学三方一致性、门槛、`hand_tcp` 方案和碰撞几何事实已经落地。没有新增 MoveIt 碰撞运行测试、没有启动 `move_group`，也没有开始 IK。下一阶段 Stage M 只在 `arm_kinematics` 中实现 DLS differential IK、奇异性观测、限位与零空间处理；Stage L 的三方门禁将作为其模型前提持续回归。

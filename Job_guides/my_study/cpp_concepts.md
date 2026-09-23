@@ -35,13 +35,13 @@
 
 | 标签 | 涉及的问答 |
 |---|---|
-| `#cpp_语言组织机制` | [namespace 与匿名 namespace](#namespace-与匿名-namespace)、[class 基础（以 MujocoBridgeNode 为例）](#class-基础以-mujocobridgenode-为例)、[头文件声明 vs .cpp 定义、无命名空间的 C 类型](#头文件声明-vs-cpp-定义无命名空间的-c-类型)、[单例初始化用匿名 lambda 的原因](#单例初始化用匿名-lambda-的原因)、[resolve 模板与 dlopen/dlsym](#resolve-模板与-dlopendlsym)、[虚函数与多态：以 `WaypointSource` 为例](#虚函数与多态以-waypointsource-为例)、[`static constexpr`：类作用域下的编译期常量](#static-constexpr类作用域下的编译期常量) |
-| `#cpp_更安全的默认写法` | [namespace 与匿名 namespace](#namespace-与匿名-namespace)、[class 基础（以 MujocoBridgeNode 为例）](#class-基础以-mujocobridgenode-为例)、[并发：data race 是 UB，以及为什么不要提前加锁](#并发data-race-是-ub以及为什么不要提前加锁)、[虚函数与多态：以 `WaypointSource` 为例](#虚函数与多态以-waypointsource-为例)、[`static constexpr`：类作用域下的编译期常量](#static-constexpr类作用域下的编译期常量) |
-| `#cpp_所有权明确化` | [class 基础（以 MujocoBridgeNode 为例）](#class-基础以-mujocobridgenode-为例)、[头文件声明 vs .cpp 定义、无命名空间的 C 类型](#头文件声明-vs-cpp-定义无命名空间的-c-类型) |
+| `#cpp_语言组织机制` | [namespace 与匿名 namespace](#namespace-与匿名-namespace)、[class 基础（以 MujocoBridgeNode 为例）](#class-基础以-mujocobridgenode-为例)、[头文件声明 vs .cpp 定义、无命名空间的 C 类型](#头文件声明-vs-cpp-定义无命名空间的-c-类型)、[单例初始化用匿名 lambda 的原因](#单例初始化用匿名-lambda-的原因)、[resolve 模板与 dlopen/dlsym](#resolve-模板与-dlopendlsym)、[虚函数与多态：以 `WaypointSource` 为例](#虚函数与多态以-waypointsource-为例)、[`static constexpr`：类作用域下的编译期常量](#static-constexpr类作用域下的编译期常量)、[GoogleTest fixture、作用域与所有权（以 Stage L 为例）](#googletest-fixture作用域与所有权以-stage-l-为例) |
+| `#cpp_更安全的默认写法` | [namespace 与匿名 namespace](#namespace-与匿名-namespace)、[class 基础（以 MujocoBridgeNode 为例）](#class-基础以-mujocobridgenode-为例)、[并发：data race 是 UB，以及为什么不要提前加锁](#并发data-race-是-ub以及为什么不要提前加锁)、[虚函数与多态：以 `WaypointSource` 为例](#虚函数与多态以-waypointsource-为例)、[`static constexpr`：类作用域下的编译期常量](#static-constexpr类作用域下的编译期常量)、[GoogleTest fixture、作用域与所有权（以 Stage L 为例）](#googletest-fixture作用域与所有权以-stage-l-为例) |
+| `#cpp_所有权明确化` | [class 基础（以 MujocoBridgeNode 为例）](#class-基础以-mujocobridgenode-为例)、[头文件声明 vs .cpp 定义、无命名空间的 C 类型](#头文件声明-vs-cpp-定义无命名空间的-c-类型)、[GoogleTest fixture、作用域与所有权（以 Stage L 为例）](#googletest-fixture作用域与所有权以-stage-l-为例) |
 | `#cpp_设计模式` | [单例初始化用匿名 lambda 的原因](#单例初始化用匿名-lambda-的原因) |
 | `#cpp_泛型与抽象增强` | [resolve 模板与 dlopen/dlsym](#resolve-模板与-dlopendlsym)、[虚函数与多态：以 `WaypointSource` 为例](#虚函数与多态以-waypointsource-为例) |
 | `#cpp_并发与内存模型` | [并发：data race 是 UB，以及为什么不要提前加锁](#并发data-race-是-ub以及为什么不要提前加锁) |
-| `#cpp_资源自动管理` | [并发：data race 是 UB，以及为什么不要提前加锁](#并发data-race-是-ub以及为什么不要提前加锁) |
+| `#cpp_资源自动管理` | [并发：data race 是 UB，以及为什么不要提前加锁](#并发data-race-是-ub以及为什么不要提前加锁)、[GoogleTest fixture、作用域与所有权（以 Stage L 为例）](#googletest-fixture作用域与所有权以-stage-l-为例) |
 
 ## 目录
 
@@ -53,6 +53,7 @@
 - [虚函数与多态：以 `WaypointSource` 为例](#虚函数与多态以-waypointsource-为例)
 - [`static constexpr`：类作用域下的编译期常量](#static-constexpr类作用域下的编译期常量)
 - [并发：data race 是 UB，以及为什么不要提前加锁](#并发data-race-是-ub以及为什么不要提前加锁)
+- [GoogleTest fixture、作用域与所有权（以 Stage L 为例）](#googletest-fixture作用域与所有权以-stage-l-为例)
 - [待补充问答模板](#待补充问答模板)
 
 ---
@@ -576,6 +577,105 @@ void good() {
 反过来说，Python 里**大部分 data race 不会表现成 UB**：GIL 让单个字节码操作原子化，所以 `self.flag = True` 这种简单赋值是安全的。但**复合操作仍然不安全**（`self.counter += 1` 是读-改-写三个字节码，中间可以切换线程），而且不要指望这个保证——它是 CPython 的实现细节，不是语言规范。
 
 ---
+
+### GoogleTest fixture、作用域与所有权（以 Stage L 为例）
+
+`#cpp_语言组织机制` `#cpp_所有权明确化` `#cpp_资源自动管理` `#cpp_更安全的默认写法`
+
+> 我希望针对 `test_model_consistency` 补充一些 C++ 知识。我希望知道这个程序为什么这样设计，背后的思想是什么，希望能够讨论变量和函数的作用域、权限、名称空间等等问题。GoogleTest 是什么，fixture 是什么？`shared_ptr` 可以被不同的 fixture 持有而无需反复初始化吗？“测试不拥有它”，这个是否拥有是如何界定的？还有 `SCOPED_TRACE`，为什么 `cout` 会在这里的函数中使用，运行测试的时候可以看到它们吗？
+
+工程测试的三方数据流见 [week3.md 8.2](week3.md#82-三方测试是怎样工作的)，这里只解释 C++ 与 GoogleTest 机制。
+
+#### GoogleTest、`TEST` 与 `TEST_F`
+
+GoogleTest（gtest）是 C++ 测试框架，负责注册/发现测试、运行测试、提供断言并输出终端与 JUnit XML 结果。无需共享环境的简单测试可以写：
+
+```cpp
+TEST(VectorTest, StartsEmpty)
+{
+  std::vector<int> values;
+  EXPECT_TRUE(values.empty());
+}
+```
+
+多个测试需要相同的复杂准备和清理时，用 fixture（测试夹具）把“实验台”抽出来：
+
+```cpp
+class ModelConsistencyTest : public ::testing::Test
+{
+protected:
+  void SetUp() override;
+  void TearDown() override;
+};
+
+TEST_F(ModelConsistencyTest, FixedConfigurationsMatchAcrossAllThreeModels)
+{
+  // 测试正文
+}
+```
+
+`TEST_F` 中的 `F` 就是 fixture。GoogleTest 为每一个 `TEST_F` 生成一个派生测试类，并按“构造 fixture → `SetUp()` → 测试正文 → `TearDown()` → 析构”执行。**每个 `TEST_F` 都有新的 fixture 实例**；本文件两个测试会各自加载和释放模型，因此第一个测试写过的 `qpos` 不会污染第二个。
+
+fixture 使用 `public ::testing::Test`，表示它在类型关系上是一种 GoogleTest 测试基类。辅助函数和成员放在 `protected`：GoogleTest 生成的派生测试类能访问，普通外部代码不能访问。若改为 `private`，生成的测试正文不能直接调用 `setConfiguration()`；改为 `public` 又会无谓扩大接口。
+
+`SetUp()`/`TearDown()` 后面的 `override` 要求编译器确认它们确实覆盖基类虚函数。名字或参数写错会在编译期报错，而不是静默定义一个永远不会被框架调用的新函数。
+
+#### 文件、类与函数的三层作用域
+
+测试文件使用：
+
+```cpp
+namespace mujoco_bridge
+{
+namespace
+{
+```
+
+外层具名 namespace 表示代码属于项目的 `mujoco_bridge` 名字域。内层匿名 namespace 给常量、`Configuration` 和辅助函数内部链接：它们只在当前 `.cpp` 翻译单元可见，不会成为包的公共 API，也不会与其他 `.cpp` 的同名实现产生链接冲突。
+
+类的 `public/protected/private` 控制“谁能访问成员”，和匿名 namespace 控制的“符号能否跨翻译单元链接”不是同一件事。函数体内的局部变量又是第三层：例如 `jacp`/`jacr` 只活到 `mujocoTcpJacobian()` 返回；模型和索引映射要被多个辅助函数使用，所以保存成 fixture 成员。
+
+成员函数末尾的 `const`，例如 `mujocoBodyTransform(...) const`，承诺不通过该成员函数修改 fixture 的逻辑状态。参数 `const T&` 则表示借用已有对象且不复制、不修改。二者都和所有权不是一回事。
+
+#### `shared_ptr` 不会自动跨 fixture 共享
+
+`shared_ptr` 表示多个智能指针实例可以共同维持**同一个对象**的生命周期，但前提是它们共享同一个 control block，通常来自复制：
+
+```cpp
+auto a = std::make_shared<Model>();
+auto b = a;  // a/b 共同拥有同一个 Model
+```
+
+当前每次 `SetUp()` 都重新调用 `make_shared`，所以每个 fixture 得到不同的 URDF/SRDF/MoveIt 对象。类型写成 `shared_ptr` 不会自动缓存、查找或复用同类型对象。
+
+GoogleTest 可以通过静态 `SetUpTestSuite()` 和静态成员让整个 suite 只加载一次，但当前不采用：测试总耗时只有约 0.4s，而共享可变 `RobotState`/`mjData` 会引入顺序依赖。若以后模型加载成为明显瓶颈，可以只共享只读 `RobotModel`/`mjModel`，每个 fixture 仍创建自己的 `RobotState`/`mjData`。
+
+#### “拥有”由生命周期责任界定，不由指针外观界定
+
+判断所有权的核心问题是：**谁保证对象仍然活着，最后谁负责销毁它？**
+
+| 表达 | 本测试中的例子 | 所有权含义 |
+|---|---|---|
+| `shared_ptr` | `moveit_model_` | 参与共享所有权；最后一份 `shared_ptr` 销毁时释放对象 |
+| `unique_ptr` | `moveit_state_` | fixture 是唯一所有者；不能复制，可移动转交，析构自动释放 |
+| 借用裸指针 | `arm_group_`、`tcp_link_` | 指向 `moveit_model_` 内部对象；不单独删除，必须保证 model 先活着 |
+| 拥有裸指针 | `mujoco_model_`、`mujoco_data_` | MuJoCo C API 返回新资源，调用者必须用对应 `deleteModel/Data` 释放 |
+
+所以“裸指针 = 不拥有”并不成立。C++ 原始指针本身不编码所有权，必须看 API 契约、创建来源和销毁责任。`const JointModelGroup*` 中的 `const` 只表示不能经它修改对象，不表示是否拥有。
+
+当前 MuJoCo 裸资源由 `TearDown()` 释放，正常测试路径正确；更严格的 RAII 做法是用带自定义 deleter 的 `unique_ptr`，使异常退出作用域时也自动清理。当前没有为这一个测试额外引入包装类型，触发重构的条件是出现第二个需要同类所有权代码的消费者，或异常清理成为真实问题。
+
+#### `ASSERT_*`、`EXPECT_*` 与 `SCOPED_TRACE`
+
+`ASSERT_*` 失败会立即终止当前测试函数；`EXPECT_*` 失败会记录错误后继续。因此模型加载和必要指针检查用 `ASSERT_*`，因为失败后没有条件继续；循环里的数值门禁用 `EXPECT_*`，这样一次运行能收集多个 link 的完整失败分布。
+
+`SCOPED_TRACE(message)` 把诊断上下文压入 GoogleTest 的 trace 栈，离开当前 C++ 作用域时自动弹出。成功时它不制造噪声；作用域内断言失败时，仍生效的 trace 会附在报告中。本测试外层记录构型，辅助比较函数再记录模型对和 link，因此同一行 `EXPECT_LT` 失败也能定位到 `random_b:moveit_vs_mujoco:hand_tcp`。
+
+#### 为什么还使用 `std::cout`
+
+断言回答“有没有越过门槛”，逐项输出回答“离门槛多远、误差集中在哪里”。`cout` 输出 CSV-like 行以及最大误差，适合单次诊断，但不是断言本身。
+
+直接运行 gtest 可执行文件时会看到输出；`colcon test` 会捕获到 `build/mujoco_bridge/ament_cmake_gtest/test_model_consistency.txt`，使用合适的 event handler 时也会显示在终端。`SCOPED_TRACE` 只在失败时出现，`cout` 则确实执行并写出，但成功测试的 stdout 是否立即展示取决于 CTest/colcon 的输出策略。若以后要跨 CI 比较历史趋势，应保存结构化 artifact，不应把 stdout 当长期数据库。
 
 ### 待补充问答模板
 
