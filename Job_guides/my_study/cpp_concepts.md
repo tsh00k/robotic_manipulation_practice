@@ -42,19 +42,23 @@
 | `#cpp_泛型与抽象增强` | [resolve 模板与 dlopen/dlsym](#resolve-模板与-dlopendlsym)、[虚函数与多态：以 `WaypointSource` 为例](#虚函数与多态以-waypointsource-为例) |
 | `#cpp_并发与内存模型` | [并发：data race 是 UB，以及为什么不要提前加锁](#并发data-race-是-ub以及为什么不要提前加锁) |
 | `#cpp_资源自动管理` | [并发：data race 是 UB，以及为什么不要提前加锁](#并发data-race-是-ub以及为什么不要提前加锁)、[GoogleTest fixture、作用域与所有权（以 Stage L 为例）](#googletest-fixture作用域与所有权以-stage-l-为例) |
+| `#cpp_更强的类型表达能力` | [`std::optional`、`mutable` 与接口常量性（以 Stage N 为例）](#stdoptionalmutable-与接口常量性以-stage-n-为例) |
 
 ## 目录
 
-- [namespace 与匿名 namespace](#namespace-与匿名-namespace)
-- [class 基础（以 MujocoBridgeNode 为例）](#class-基础以-mujocobridgenode-为例)
-- [头文件声明 vs .cpp 定义、无命名空间的 C 类型](#头文件声明-vs-cpp-定义无命名空间的-c-类型)
-- [单例初始化用匿名 lambda 的原因](#单例初始化用匿名-lambda-的原因)
-- [resolve 模板与 dlopen/dlsym](#resolve-模板与-dlopendlsym)
-- [虚函数与多态：以 `WaypointSource` 为例](#虚函数与多态以-waypointsource-为例)
-- [`static constexpr`：类作用域下的编译期常量](#static-constexpr类作用域下的编译期常量)
-- [并发：data race 是 UB，以及为什么不要提前加锁](#并发data-race-是-ub以及为什么不要提前加锁)
-- [GoogleTest fixture、作用域与所有权（以 Stage L 为例）](#googletest-fixture作用域与所有权以-stage-l-为例)
-- [待补充问答模板](#待补充问答模板)
+  - [namespace 与匿名 namespace](#namespace-与匿名-namespace)
+  - [class 基础（以 MujocoBridgeNode 为例）](#class-基础以-mujocobridgenode-为例)
+  - [头文件声明 vs .cpp 定义、无命名空间的 C 类型](#头文件声明-vs-cpp-定义无命名空间的-c-类型)
+  - [单例初始化用匿名 lambda 的原因](#单例初始化用匿名-lambda-的原因)
+  - [resolve 模板与 dlopen/dlsym](#resolve-模板与-dlopendlsym)
+  - [虚函数与多态：以 `WaypointSource` 为例](#虚函数与多态以-waypointsource-为例)
+  - [`static constexpr`：类作用域下的编译期常量](#static-constexpr类作用域下的编译期常量)
+  - [并发：data race 是 UB，以及为什么不要提前加锁](#并发data-race-是-ub以及为什么不要提前加锁)
+  - [GoogleTest fixture、作用域与所有权（以 Stage L 为例）](#googletest-fixture作用域与所有权以-stage-l-为例)
+    - [GoogleTest、`TEST` 与 `TEST_F`](#googletesttest-与-test_f)
+  - [`std::optional`、`mutable` 与接口常量性（以 Stage N 为例）](#stdoptionalmutable-与接口常量性以-stage-n-为例)
+    - [`std::optional` 是可选值，不是序列容器](#stdoptional-是可选值不是序列容器)
+  - [待补充问答模板](#待补充问答模板)
 
 ---
 
@@ -676,6 +680,88 @@ GoogleTest 可以通过静态 `SetUpTestSuite()` 和静态成员让整个 suite 
 断言回答“有没有越过门槛”，逐项输出回答“离门槛多远、误差集中在哪里”。`cout` 输出 CSV-like 行以及最大误差，适合单次诊断，但不是断言本身。
 
 直接运行 gtest 可执行文件时会看到输出；`colcon test` 会捕获到 `build/mujoco_bridge/ament_cmake_gtest/test_model_consistency.txt`，使用合适的 event handler 时也会显示在终端。`SCOPED_TRACE` 只在失败时出现，`cout` 则确实执行并写出，但成功测试的 stdout 是否立即展示取决于 CTest/colcon 的输出策略。若以后要跨 CI 比较历史趋势，应保存结构化 artifact，不应把 stdout 当长期数据库。
+
+### `std::optional`、`mutable` 与接口常量性（以 Stage N 为例）
+
+`#cpp_更强的类型表达能力` `#cpp_语言组织机制` `#cpp_所有权明确化`
+
+> Q: `optional` 是什么容器？`mutable` 是什么，为什么 `DiffIkWaypointSource` 这里需要它？构造函数在哪里？`const` 是不是只是让编译器检查是否实现了抽象类？
+
+#### `std::optional` 是可选值，不是序列容器
+
+`std::optional<T>` 表示“有一个 `T`”或“没有值”两种状态：
+
+```cpp
+std::optional<int> value;  // empty
+value = 42;                // engaged
+if (value.has_value()) {
+  int answer = *value;
+}
+```
+
+它和 `vector` 的区别是：`optional<T>` 最多容纳一个 `T`，语义是值是否存在，不是元素序列。它通常直接存放对象和一个 engaged 标志，不需要用 `-1`、空字符串或空指针这类魔法值编码“没有结果”。
+
+Stage N 中的几个 `optional` 分别表达：是否已有阶段缓存、是否已经锁定抓取物体位姿、是否已有最近一次 IK 诊断。调用者可以明确区分“没有求解过”和“求解结果的数值恰好为零”。
+
+#### `mutable` 放宽的是成员修改规则
+
+成员函数末尾的 `const` 表示普通成员函数不能修改对象状态；`mutable` 成员是例外：
+
+```cpp
+JointTarget jointTargetFor(...) const;
+mutable std::optional<Phase> cached_phase_;
+```
+
+`WaypointSource` 的接口已经规定 `jointTargetFor()` 是 `const`，但 Stage N 第一次调用时仍要建立阶段缓存、锁定物体位姿并保存诊断结果。因此缓存字段声明为 `mutable`。这表达的是“目标查询的外部语义不变，缓存属于内部实现细节”。严格说它不是数学纯函数；若未来要把接口设计得更诚实，可以把准备缓存拆成非 `const` 的 `preparePhase()`，或去掉方法末尾的 `const`。当前使用 `mutable` 是为了保持已冻结的接口兼容。
+
+#### 构造函数的声明、定义和初始化列表
+
+头文件只声明构造函数：
+
+```cpp
+explicit DiffIkWaypointSource(arm_kinematics::ArmModel model);
+```
+
+`.cpp` 给出定义：
+
+```cpp
+DiffIkWaypointSource::DiffIkWaypointSource(
+  arm_kinematics::ArmModel model)
+: model_(std::move(model))
+{
+}
+```
+
+`DiffIkWaypointSource::` 表示这是该类的成员函数；构造函数没有返回类型；冒号后的初始化列表在构造函数体之前直接初始化成员。这里用初始化列表比在函数体中先默认构造 `model_` 再赋值更直接，也适用于不能默认构造或不能重新绑定的成员。
+
+普通类的接口放 `.hpp`、实现放 `.cpp` 是分离式编译的常规写法。模板通常需要把实现放在头文件；普通非模板成员函数不需要。派生类通过 `jointTargetFor(...) const override` 实现基类的纯虚函数；`override` 专门让编译器检查函数签名是否真的覆写了基类方法，`const` 本身不是这个检查的关键字。
+
+#### 三种 `const` 要分开看
+
+```cpp
+JointTarget jointTargetFor(Phase, const ObjectPose &) const override;
+```
+
+- 参数前的 `const`：通过引用避免拷贝，并承诺不修改传入的 `ObjectPose`。
+- 方法末尾的 `const`：承诺不修改对象的普通成员状态，也允许对 `const DiffIkWaypointSource` 调用。
+- `override`：检查名字、参数、返回类型和方法 `const` 性质是否与基类虚函数匹配。
+
+如果派生类漏写末尾的 `const`，它不会覆写基类函数；有 `override` 时编译器会立刻报错。`const` 表达的是接口和修改权限，`override` 才是覆写检查。
+
+#### 运行时多态和具体类型专属操作
+
+节点同时持有：
+
+```cpp
+WaypointSource * waypoint_source_;
+std::unique_ptr<DiffIkWaypointSource> diff_ik_source_;
+```
+
+前者用于公共操作 `jointTargetFor()`，调用时通过虚函数动态分派到查表或 IK 实现；后者用于 `beginEpisode()`、`setSeed()` 和 `diagnostics()` 这些只有 IK 源才有的操作。当前这样做是为了不把 diff-IK 专属概念塞回所有 waypoint 源的公共接口。若将来有多种 waypoint 源都需要 seed、生命周期钩子和诊断，应重新设计接口，而不是继续增加具体类型分支。
+
+#### 它不是单例
+
+节点只创建一个 `DiffIkWaypointSource`，不等于该类是单例。构造函数是 public，可以同时创建多个独立对象；每个对象拥有自己的模型、seed 和缓存。单例需要私有构造函数、唯一访问入口以及通常删除拷贝/赋值操作。这里使用 `std::unique_ptr` 表示节点拥有这个可选策略对象，并不限制全局只能有一个实例。单例反而会让多个节点或测试共享 episode 缓存，增加状态污染和线程安全问题。
 
 ### 待补充问答模板
 

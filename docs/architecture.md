@@ -154,7 +154,7 @@ Stage L 已在 [test_model_consistency.cpp](../src/mujoco_bridge/test/test_model
 - [x] 编写自动三方测试：7组固定 `q`，逐 link 对比 MuJoCo、MoveIt 与自写 FK/Jacobian（Stage L）
 - [ ] keyframe 长度不匹配会被静默补零（不报错，见第 0.1 节）——需要至少一个 gtest 防止手滑改错 `qpos` 长度却没人发现（Stage G 实测，见 [week2.md 8.8](../Job_guides/my_study/week2.md#88-排查记录keyframe-名字冲突与长度不匹配是两件独立的事结论被推翻)）
 - [ ] `gripper_actuator_id_`/`kHandBodyName="hand"`（`mujoco_bridge_node.cpp`）目前是隐式单机械臂假设：模型里有第二个夹爪/第二个 `hand` body 会静默覆盖或找不到，不报错。解锁条件：真正引入第二条机械臂（第 2.2 节"暂不进入 MVP"包含双臂，当前不修）
-- [ ] `task_executor` 的 `close_settle_s`/`lift_settle_grace_s`（第7节）是"改到实测通过为止"定的，不是从物理量推出来的；第3周把 `WaypointSource` 换成 diff-IK 实现后，"发离散目标等伺服收敛"这个物理场景整体改变，需要重新测
+- [x] Stage N 已用默认 `close_settle_s=2.0s`、`lift_settle_grace_s=2.0s` 和 `grasp_position_epsilon_rad=0.3rad` 重跑 20 次固定场景，20/20 成功、零重试；这只验证了当前组合，没有证明这些阈值是最小可行值或适用于在线伺服
 - [ ] `task_executor` 的 `CMakeLists.txt`/`package.xml` 直接 `find_package(mujoco_bridge REQUIRED)`，只为了拿 `grasp_criteria` 这段纯函数库——历史顺序造成的（`classifyGrasp()` 在 `task_executor` 包存在之前就已经长在 `mujoco_bridge` 里），不是刻意设计。仓库里已有空占位包 `manipulation_interfaces` 可以承载这类两边共享的纯函数，当初没有搬。解锁条件：第6周 `mujoco_bridge` 真的被换/重命名成真机驱动包时，评估要不要把 `grasp_criteria` 挪进 `manipulation_interfaces`
 
 ## 5. Pick-and-place 场景（Stage G）
@@ -216,7 +216,7 @@ Stage L 已在 [test_model_consistency.cpp](../src/mujoco_bridge/test/test_model
 
 **`grasp_criteria` 库的复用**：`mujoco_bridge` 的 `classifyGrasp()` 拆成独立 CMake 库目标 `mujoco_bridge::grasp_criteria` 并导出（`ament_export_targets`），`task_executor` 直接链接、不重新实现。`task_executor_node` 自己从 `/joint_states` + `mujoco_bridge` 已发布的 `~/ground_truth/*` 话题拼一份 `GraspSignals` 再调这个函数——**没有**新增一个 `GraspOutcome` ROS topic：Stage H 结束时留的悬挂项（"不知道 task_executor 想要整个分类结果还是原始信号"）答案是都不需要，谁掌握阶段信息就该拥有计算权。
 
-**`WaypointSource` 抽象**：`jointTargetFor(Phase, ObjectPose) -> JointTarget` 接口，本周唯一实现 `KeyframeWaypointSource` 是手测出来的固定关节空间查表，完全忽略 `object_pose`。第3周计划替换成 diff-IK 实现，`fsm.cpp`/`task_executor_node.cpp` 不需要跟着改。
+**`WaypointSource` 抽象**：`jointTargetFor(Phase, ObjectPose) -> JointTarget` 接口。`KeyframeWaypointSource` 是固定查表并忽略 `object_pose`；Stage N 的默认 `DiffIkWaypointSource` 从实测关节状态作 seed，按阶段调用离线 `solveIk()`，阶段内缓存目标。节点参数 `waypoint_source:=keyframe` 可切回查表；`fsm.cpp` 未修改。节点需要选择源、设置 seed、处理 IK 失败及记录诊断，所以“节点也不需要改”的旧预期并未成立。
 
 **手测出来的关节空间 waypoint**（`KeyframeWaypointSource`，单位 rad，顺序 joint1..joint7；`box` 初始位姿见第5节表格）：
 
@@ -255,3 +255,13 @@ Stage L 已在 [test_model_consistency.cpp](../src/mujoco_bridge/test/test_model
 `IkStatus` 当前只有 `kConverged`、`kMaxIterations` 和 `kStalled`。不可达目标返回最后一个有限关节状态和残差，不返回名义成功或 NaN。当前约束实现是“先求 DLS，再裁剪步长并投影到位置限位”，不是把约束直接放进 QP；因此裁剪后的解不保证仍是约束最小二乘最优解。
 
 **能力边界**：`solveIk()` 的迭代反馈来自自写运动学模型，不读取 MuJoCo/真机实际状态。它是用 differential IK 实现的离线 full-pose IK 求解器，不是在线 Cartesian servo，也不是 MPC；不能修正重力下垂、actuator 饱和、接触扰动或 position servo 稳态误差。Stage N 先用它生成离散 waypoint，以便把运动学求解和执行控制分层验证。
+
+**Stage O 必做但尚未实现**：Stage N 复盘确认，先由 `KeyframeWaypointSource` 的手调关节目标 FK 反推 Cartesian 目标，会把执行端经验补偿混入任务几何，不能作为最终架构。Stage O 必须新增 message-free 的 `CartesianWaypoint`/`CartesianWaypointSource`，表达 world frame 的 `hand_tcp` 目标和夹爪命令；离线 IK、MoveIt motion planning、在线 Cartesian servo 分别作为适配器消费该契约。当前 `DiffIkWaypointSource` 仍直接引用 `KeyframeWaypointSource`，属于待拆分的过渡实现。Stage O 不提前接入 MoveIt，也不把完整 `JointTrajectory` 执行器混入现有 FSM；随机障碍和规划器集成留到后续 stage。Week 3 在 Stage O 完成并重新通过固定场景回归后才算收周。
+
+## 9. Stage N 离线 IK waypoint 与执行验证
+
+`DiffIkWaypointSource` 使用 Stage I 关键帧经自写 FK 得到的 TCP 位姿作为基准；在 `PREGRASP` 首次观测时锁定物体位置，把相对默认 box 中心 `(0.5, 0, 0.241)m` 的平移加到抓取侧 `PREGRASP/GRASP/CLOSE/LIFT` 目标。`PREPLACE/PLACE/OPEN/RETRACT` 保持固定放置侧目标。抓取姿态仍是基准关键帧姿态，当前不随物体偏航角变化；未做碰撞规划。`HOME` 和每次重试重置锁定位置与缓存。每阶段首个命令求解一次，后续 20 Hz tick 重发同一关节目标；不可收敛则不发布解并返回 `IK_FAILED` episode outcome。
+
+阶段日志分别记录 world frame 下 TCP 目标位置/四元数、IK 迭代数、模型内残差、加权 `sigma_min`、实测关节误差及 TF 测得的 TCP 误差。默认场景 20/20 次成功、零重试，最终 box 均值 `(0.43226, 0.30902)m`；向 `+y` 移动 4cm 的场景中 IK 1/1 成功，查表 0/1、三次重试后 `GRASP_EMPTY`。结果见 `results/stage_n_*.csv`；偏移场景在 `stage_n_shifted_scene.xml`。
+
+当前 `close_settle_s=2.0s`、`lift_settle_grace_s=2.0s`、`grasp_position_epsilon_rad=0.3rad` 组合通过 20 次回归，但尚未测最小可行阈值。`GRASP -> CLOSE` 时关节最大误差约 `0.190rad`，实际 TCP 平移误差约 `0.111m`；`PLACE -> OPEN` 时实际 TCP 平移误差约 `0.006m`。以 marker 中心 `(0.5, 0.3)m` 和原有 0.08m 半径验收会通过，但最终 box 约 `(0.4323, 0.3090)m`；半径改为 0.03m 则 `PLACE_MISSED`，三次重试后失败。故默认验收中心仍为实测 `(0.43, 0.31)m`，不能把宽半径成功解释为 marker 中心精确放置。

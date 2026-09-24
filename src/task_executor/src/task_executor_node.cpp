@@ -20,11 +20,14 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
+#include <ament_index_cpp/get_package_share_directory.hpp>
 #include <control_msgs/msg/gripper_command.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <manipulation_interfaces/msg/episode_outcome.hpp>
@@ -36,6 +39,7 @@
 #include <trajectory_msgs/msg/joint_trajectory.hpp>
 
 #include "task_executor/fsm.hpp"
+#include "task_executor/diff_ik_waypoint_source.hpp"
 #include "task_executor/keyframe_waypoint_source.hpp"
 #include "task_executor/phase.hpp"
 #include "task_executor/waypoint_source.hpp"
@@ -54,8 +58,8 @@ constexpr std::array<const char *, 7> kArmJointNames = {
 // tick, and publishes whatever JointTarget the current phase's WaypointSource
 // returns. Deliberately thin and untested -- same "do not mock onTimer" discipline
 // mujoco_bridge_node.cpp follows (week2.md 2.1.1 point 3): all the actual
-// decision-making already lives in fsm.cpp (unit tested) and
-// keyframe_waypoint_source.hpp (a static lookup table).
+// decision-making already lives in fsm.cpp (unit tested) and the selected
+// WaypointSource.
 //
 // use_sim_time is NOT declared here explicitly -- rclcpp::Node auto-declares it,
 // and demo.launch.py sets it via node parameters the same way it does for
@@ -90,13 +94,28 @@ public:
     params_.phase_timeout_s = declare_parameter("fsm.phase_timeout_s", 6.0);
     params_.max_retries = declare_parameter("fsm.max_retries", 3);
 
-    // NOT the visual place_marker geom's (0.5, 0.3) -- see
-    // keyframe_waypoint_source.hpp's docstring on why kPlace's actually-reached xy
-    // falls short of that by several cm, and why closing that gap is deferred to
-    // week3's IK rather than hand-tuned further this week.
+    // Measured release point under the current position servo. Stage N's IK
+    // preserves this value: solving the kinematic target does not remove the
+    // observed displacement from the marker at (0.5, 0.3).
     params_.place_x_m = declare_parameter("verify.place_x_m", 0.43);
     params_.place_y_m = declare_parameter("verify.place_y_m", 0.31);
     params_.place_region_radius_m = declare_parameter("verify.place_region_radius_m", 0.08);
+
+    const std::string waypoint_mode = declare_parameter("waypoint_source", "diff_ik");
+    if (waypoint_mode == "diff_ik") {
+      const std::string share = ament_index_cpp::get_package_share_directory(
+        "franka_description");
+      diff_ik_source_ = std::make_unique<DiffIkWaypointSource>(
+        arm_kinematics::loadFrankaFerModel(
+          share + "/robots/fer/kinematics.yaml",
+          share + "/robots/fer/joint_limits.yaml"));
+      waypoint_source_ = diff_ik_source_.get();
+    } else if (waypoint_mode == "keyframe") {
+      waypoint_source_ = &keyframe_source_;
+    } else {
+      throw std::invalid_argument("waypoint_source must be diff_ik or keyframe");
+    }
+    RCLCPP_INFO(get_logger(), "waypoint source: %s", waypoint_mode.c_str());
 
     joint_command_pub_ = create_publisher<trajectory_msgs::msg::JointTrajectory>(
       "/mujoco_bridge/joint_command", rclcpp::QoS(10));
@@ -248,6 +267,10 @@ private:
   // episodes (after observing a ~/episode_outcome), never mid-episode.
   void onStartEpisode(const std_msgs::msg::Empty::SharedPtr)
   {
+    if (diff_ik_source_) {
+      diff_ik_source_->beginEpisode();
+    }
+    logged_target_phase_.reset();
     phase_ = Phase::kHome;
     retry_count_ = 0;
     last_failure_reason_ = ExitReason::kNone;
@@ -300,7 +323,43 @@ private:
       latest_object_pose_->pose.position.z, latest_object_pose_->pose.orientation.w,
       latest_object_pose_->pose.orientation.x, latest_object_pose_->pose.orientation.y,
       latest_object_pose_->pose.orientation.z};
-    const JointTarget target = waypoint_source_.jointTargetFor(phase_, object_pose);
+    if (diff_ik_source_) {
+      diff_ik_source_->setSeed(arm->positions);
+    }
+    JointTarget target;
+    try {
+      target = waypoint_source_->jointTargetFor(phase_, object_pose);
+    } catch (const std::exception & e) {
+      RCLCPP_ERROR(get_logger(), "phase %s IK_FAILED: %s", phaseName(phase_), e.what());
+      manipulation_interfaces::msg::EpisodeOutcome outcome;
+      outcome.success = false;
+      outcome.failure_code = "IK_FAILED";
+      outcome.retries = retry_count_;
+      outcome.phase_names = phase_names_log_;
+      outcome.phase_names.push_back(phaseName(phase_));
+      outcome.phase_durations_s = phase_durations_log_;
+      outcome.phase_durations_s.push_back((get_clock()->now() - phase_start_time_).seconds());
+      episode_outcome_pub_->publish(outcome);
+      phase_ = Phase::kFailed;
+      return;
+    }
+    if (diff_ik_source_ && diff_ik_source_->diagnostics() &&
+      logged_target_phase_ != phase_)
+    {
+      const auto & data = *diff_ik_source_->diagnostics();
+      const Eigen::Quaterniond target_rotation(data.tcp_target.linear());
+      RCLCPP_INFO(
+        get_logger(),
+        "phase %s target_frame=world tcp_xyz=[%.4f %.4f %.4f] "
+        "tcp_qwxyz=[%.4f %.4f %.4f %.4f] "
+        "ik_iterations=%zu ik_pos_err=%.6fm ik_rot_err=%.6frad sigma_min=%.6f",
+        phaseName(phase_), data.tcp_target.translation().x(),
+        data.tcp_target.translation().y(), data.tcp_target.translation().z(),
+        target_rotation.w(), target_rotation.x(), target_rotation.y(), target_rotation.z(),
+        data.ik.iterations, data.ik.position_error, data.ik.orientation_error,
+        data.ik.minimum_singular_value);
+      logged_target_phase_ = phase_;
+    }
     publishTarget(target);
 
     FsmInputs in;
@@ -330,14 +389,30 @@ private:
       return;  // Still in progress; nothing to log or transition.
     }
 
+    double tcp_position_error_m = std::numeric_limits<double>::quiet_NaN();
+    double tcp_rotation_error_rad = std::numeric_limits<double>::quiet_NaN();
+    if (diff_ik_source_ && diff_ik_source_->diagnostics()) {
+      const auto & desired = diff_ik_source_->diagnostics()->tcp_target;
+      const Eigen::Vector3d actual(
+        hand_tcp_tf.transform.translation.x, hand_tcp_tf.transform.translation.y,
+        hand_tcp_tf.transform.translation.z);
+      tcp_position_error_m = (desired.translation() - actual).norm();
+      const Eigen::Quaterniond actual_rotation(
+        hand_tcp_tf.transform.rotation.w, hand_tcp_tf.transform.rotation.x,
+        hand_tcp_tf.transform.rotation.y, hand_tcp_tf.transform.rotation.z);
+      tcp_rotation_error_rad =
+        Eigen::Quaterniond(desired.linear()).angularDistance(actual_rotation);
+    }
     RCLCPP_INFO(
       get_logger(),
-      "phase %s -> %s: target=[%.3f %.3f %.3f %.3f %.3f %.3f %.3f] pos_err=%.4frad "
+      "phase %s -> %s: target=[%.3f %.3f %.3f %.3f %.3f %.3f %.3f] "
+      "joint_err=%.4frad tcp_pos_err=%.4fm tcp_rot_err=%.4frad "
       "elapsed=%.2fs exit=%s",
       phaseName(phase_), phaseName(decision.next_phase), target.arm_positions[0],
       target.arm_positions[1], target.arm_positions[2], target.arm_positions[3],
       target.arm_positions[4], target.arm_positions[5], target.arm_positions[6],
-      maxAbsError(arm->positions, target.arm_positions), in.elapsed_in_phase_s,
+      maxAbsError(arm->positions, target.arm_positions), tcp_position_error_m,
+      tcp_rotation_error_rad, in.elapsed_in_phase_s,
       exitReasonName(decision.exit_reason));
 
     phase_names_log_.push_back(phaseName(phase_));
@@ -354,6 +429,9 @@ private:
 
     if (decision.is_retry) {
       ++retry_count_;
+      if (diff_ik_source_) {
+        diff_ik_source_->beginEpisode();
+      }
       RCLCPP_WARN(
         get_logger(), "retry %d/%d: recovering to HOME", retry_count_, params_.max_retries);
       requestReset();
@@ -367,10 +445,14 @@ private:
       publishEpisodeOutcome(true);
     }
     phase_ = decision.next_phase;
+    logged_target_phase_.reset();
     phase_start_time_ = get_clock()->now();
   }
 
-  KeyframeWaypointSource waypoint_source_;
+  KeyframeWaypointSource keyframe_source_;
+  std::unique_ptr<DiffIkWaypointSource> diff_ik_source_;
+  WaypointSource * waypoint_source_ = nullptr;
+  std::optional<Phase> logged_target_phase_;
   FsmParams params_;
   Phase phase_ = Phase::kHome;
   // Zero (RCL_ROS_TIME's default-constructed value) doubles as "no episode has

@@ -45,11 +45,9 @@ struct JointTarget
   double gripper_width_m = 0.0;
 };
 
-// Swappable target-lookup abstraction (week2.md Stage I). This week's only
-// implementation, KeyframeWaypointSource, is a fixed lookup table that ignores
-// object_pose entirely -- it exists so the *interface* is already the one week3's
-// diff-IK WaypointSource will implement, and the FSM (fsm.hpp/cpp) that calls
-// jointTargetFor() never needs to change when that swap happens.
+// Swappable target abstraction (week2.md Stage I). KeyframeWaypointSource is a
+// fixed lookup table; DiffIkWaypointSource uses object_pose and offline IK.
+// The FSM consumes JointTarget without knowing which source produced it.
 class WaypointSource
 {
 public:

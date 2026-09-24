@@ -2,11 +2,11 @@
 
 > **本文按 stage 完成进度持续扩写**。第 1~6 节是开周计划与清单；第 7 节 Stage K、第 8 节 Stage L、第 9 节 Stage M 已完成并写入实测结果，后续 stage 仍按 [STUDY_NOTES_GUIDE.md](../../STUDY_NOTES_GUIDE.md) 2.2 的骨架就地追加。
 >
-> Stage 编号延续第1周的 A~E、第2周的 F~J，本周是 **K~N**（四个，[范围选择见 2.0](#20-为什么是四个-stage不是五个)）。
+> Stage 编号延续第1周的 A~E、第2周的 F~J，本周是 **K~O**（五个；Stage O 是 Stage N 复盘后新增的必做收束，[范围选择见 2.0](#20-为什么是五个-stage)）。
 
 ## 学习重点范围
 
-本周对应计划书[第5节 Chap 3 模块](../5.%20视觉机械臂%20Pick-and-Place%20项目计划书.md)里第2周没做完的后半段（5.2 第 4、5 条）与 Roadmap 第3周（"FK/Jacobian/damped diff-IK、模型一致性测试 → 数学单测、奇异性曲线、MoveIt/MuJoCo FK 对照"）。
+本周对应计划书[第5节 Chap 3 模块](../5.%20视觉机械臂%20Pick-and-Place%20项目计划书.md)里第2周没做完的后半段（5.2 第 4、5 条）与 Roadmap 第3周（"FK/Jacobian/damped diff-IK、模型一致性测试 → 数学单测、奇异性曲线、MoveIt/MuJoCo FK 对照"）。本周新增 Stage O 作为必须完成的架构收束，先解耦 Cartesian 任务 waypoint 与关节执行后端，再进入第4周的 RGB-D 感知和随机化评测。Stage N 的代码和回归实验已经完成，但经过复盘确认其目标构造仍依赖手调 Keyframe，不足以作为本周最终交付；本周只有 Stage O 完成后才算收周。
 
 第2周做出来的是一条**能跑但不会算**的流水线：FSM、成功判据、episode 边界都在了，但机械臂去哪儿是[手调查表](#22-stage-l--模型一致性测试mujoco--urdf--自写三方对照)里的九组数字，物体挪 2cm 整条链就废了。本周补的是**"算"的那一半**：从物体位姿算出关节目标。需要重点掌握以下几块：
 
@@ -21,11 +21,12 @@
 - [1. 从 Week 1/2 继承的硬约束与既有事实](#1-从-week-12-继承的硬约束与既有事实)
   - [1.1 开周核对出来的新事实（本周才第一次相关）](#11-开周核对出来的新事实本周才第一次相关)
 - [2. 本周 Stage 计划](#2-本周-stage-计划)
-  - [2.0 为什么是四个 stage，不是五个](#20-为什么是四个-stage不是五个)
+  - [2.0 为什么是五个 stage](#20-为什么是五个-stage)
   - [2.1 Stage K — 自写 FK/Jacobian 纯函数库（新包 `arm_kinematics`）](#21-stage-k--自写-fkjacobian-纯函数库新包-arm_kinematics)
   - [2.2 Stage L — 模型一致性测试：MuJoCo ↔ URDF ↔ 自写三方对照](#22-stage-l--模型一致性测试mujoco--urdf--自写三方对照)
   - [2.3 Stage M — damped least-squares diff-IK 与奇异性观测](#23-stage-m--damped-least-squares-diff-ik-与奇异性观测)
   - [2.4 Stage N — `DiffIkWaypointSource`：FSM 一行不改地换掉查表](#24-stage-n--diffikwaypointsourcefsm-一行不改地换掉查表)
+  - [2.5 Stage O — Cartesian waypoint 与执行后端解耦（本周必做，尚未开始）](#25-stage-o--cartesian-waypoint-与执行后端解耦本周必做尚未开始)
 - [3. 本周验收标准](#3-本周验收标准)
 - [4. 要回头解锁的 Week 1/2 悬挂项](#4-要回头解锁的-week-12-悬挂项)
 - [5. 开周就该注意的（Claude 提示，尚未讨论）](#5-开周就该注意的claude-提示尚未讨论)
@@ -74,6 +75,19 @@
   - [9.8 排查记录：阻尼错误注入与实验路径修正](#98-排查记录阻尼错误注入与实验路径修正)
   - [9.9 你没问但值得注意的](#99-你没问但值得注意的)
   - [9.10 本阶段边界与后续](#910-本阶段边界与后续)
+- [10. Stage N：`DiffIkWaypointSource` 接入 FSM](#10-stage-ndiffikwaypointsource-接入-fsm)
+  - [10.0 一句话总结](#100-一句话总结)
+  - [10.1 改动清单与验证结果](#101-改动清单与验证结果)
+  - [10.2 waypoint 的构造和缓存](#102-waypoint-的构造和缓存)
+  - [10.3 为什么 Stage N 先使用离线 IK](#103-为什么-stage-n-先使用离线-ik)
+  - [10.4 诊断信号：模型残差和执行残差必须分开](#104-诊断信号模型残差和执行残差必须分开)
+  - [10.5 验收结果和失败边界](#105-验收结果和失败边界)
+  - [10.6 失败模式与验证手段](#106-失败模式与验证手段)
+  - [10.7 你没问但值得注意的](#107-你没问但值得注意的)
+  - [10.8 排查记录：构建、运行和严格放置验证](#108-排查记录构建运行和严格放置验证)
+  - [10.9 后续边界](#109-后续边界)
+  - [10.10 Stage N 设计复盘：Keyframe 反推 Cartesian 目标是不合理的过渡](#1010-stage-n-设计复盘keyframe-反推-cartesian-目标是不合理的过渡)
+  - [10.11 用户否定 Stage N 后的正式决策记录](#1011-用户否定-stage-n-后的正式决策记录)
 
 ---
 
@@ -107,13 +121,13 @@
 
 ## 2. 本周 Stage 计划
 
-四个 stage，**每个都按五步走不跳步**（写代码 → build + 实跑验证 → 讲解 → 追问 → 写进本文件），见 [STUDY_NOTES_GUIDE.md 第3节](../../STUDY_NOTES_GUIDE.md)。
+五个 stage，**每个都按五步走不跳步**（写代码 → build + 实跑验证 → 讲解 → 追问 → 写进本文件），见 [STUDY_NOTES_GUIDE.md 第3节](../../STUDY_NOTES_GUIDE.md)。Stage O 是用户在 Stage N 复盘后新增的必做架构 stage，目前只记录计划，尚未开始实现。
 
-### 2.0 为什么是四个 stage，不是五个
+### 2.0 为什么是五个 stage
 
 计划书 Roadmap 第3周只写了"FK/Jacobian/damped diff-IK、模型一致性测试"，没有要求接进任务链。但**只做数学、不换掉 `KeyframeWaypointSource`，第3周结束时系统能力和第2周完全一样**（还是手调查表），而且第2周为这次替换专门留的接口会晾一周，晾着的接口通常会长歪。所以 Stage N 是必做。
 
-砍掉的是**随机物体位姿的批量泛化评测**（原本会是 Stage O）：它才是 IK 真正的价值证明（查表必然失败、IK 能过），但它依赖 Stage N 的物理调参先稳定，而第4条学习重点（运动学解 vs 伺服执行的系统性偏差）大概率会吃掉整块时间。**推到第4周**，和 Chap 4 的 RGB-D 一起——那时物体位姿本来就要随机化，合并做一次比这周赶出来更省。
+随机物体位姿的批量泛化评测仍推到第4周，和 Chap 4 的 RGB-D 一起做。本周新增的 Stage O 不做大规模实验，但必须完成 Cartesian 抓取/放置目标与执行后端的解耦，并用固定场景回归证明新抽象没有退化。
 
 ### 2.1 Stage K — 自写 FK/Jacobian 纯函数库（新包 `arm_kinematics`）
 
@@ -163,6 +177,17 @@
 | 验收 | ① 固定物体位姿下 20 次连跑仍然全绿（**回归**：不是新能力，是证明没弄坏）；② **至少 1 组新的物体位姿**，查表实现必然失败、IK 实现成功——这是本周唯一的"新能力"证据；③ 逐阶段日志新增：TCP 目标位姿、IK 迭代次数、最终残差、$\sigma_{\min}$（补上计划书 5.3 第5条最后那个缺口） |
 | 预期要讲的概念 | 抓取位姿怎么从物体位姿构造（approach 方向、绕 TCP z 轴的自由度怎么定）；IK 有多解时怎么选（离当前构型最近 / 限位裕量最大）；"接口留缝"的收益这次到底兑现了多少——`fsm.cpp` 真改了几行，改的那几行说明当初哪里没想到 |
 
+### 2.5 Stage O — Cartesian waypoint 与执行后端解耦（本周必做，尚未开始）
+
+| | 内容 |
+|---|---|
+| 动机 | Stage N 的 `DiffIkWaypointSource` 仍直接持有 `KeyframeWaypointSource`，用关键帧的关节目标经过 FK 取得 TCP 姿态。这样可以验证离线 IK，但会把“任务几何”和“关节执行”绑在一起，后续接 MoveIt 或 Cartesian servo 时需要重新拆分 |
+| 初步决策 | 新增 message-free 的 `CartesianWaypoint` 和 `CartesianWaypointSource`：输出 world frame 的 `hand_tcp` 目标、阶段和夹爪命令；离线 IK、MoveIt motion planning、在线 Cartesian servo 都作为后端适配器消费它 |
+| 计划的适配器 | `KeyframeCartesianWaypointSource` 从既有阶段几何产生 Cartesian waypoint；`DiffIkWaypointSource` 改成 `Cartesian waypoint -> solveIk() -> JointTarget` 的适配器，不再直接依赖 `KeyframeWaypointSource` |
+| 明确不做 | 本 stage 不接入 MoveIt planner，不把 `JointTrajectory` 执行器提前塞进 FSM，不做随机障碍实验。MoveIt 规划和控制执行留到后续 stage；但必须完成真实 Cartesian waypoint 到离线 IK 的适配，不能只停留在接口草图 |
+| 需要验证 | FSM 行为和 Stage N 的 20 次固定场景回归不变；Cartesian waypoint 的 frame、夹爪时序和 TCP 目标与当前实现一致；旧 `waypoint_source:=keyframe` 对照仍可用 |
+| 预期要讲的概念 | MoveIt 的 pose target、Cartesian path、IK、碰撞检查和全局规划分别负责什么；为什么 MoveIt 最终通常输出 `JointTrajectory`，而不是直接成为 FSM 的单个 `JointTarget`；任务 waypoint、规划结果和控制参考的接口边界 |
+
 ## 3. 本周验收标准
 
 从计划书 [5.3](../5.%20视觉机械臂%20Pick-and-Place%20项目计划书.md) 里挑出本周该收的（第 2、3、5 条是 week2 明确推过来的），加两条自定：
@@ -175,7 +200,8 @@
 | 4 | 实现 damped least-squares differential IK，记录最小奇异值、关节限位裕量、tracking error | 5.2 第5条 | **本周做**（Stage M + N） |
 | 5 | 固定物体位姿下连续成功 20 次，无非预期碰撞 | 5.3 第4条 | **回归**：week2 已达成，本周换了求目标的方式，必须不退化（Stage N） |
 | 6 | 约束 differential IK（速度/位置限制、joint centering、奇异区减速）与"伪逆后裁剪"的路径偏差对照 | 5.4 扩展点1 | **部分**：限制与 centering 做（Stage M），**对照实验列为 stretch** |
-| 7 | 随机物体位姿下的泛化评测 | 2.1 | **推到第4周**（见 [2.0](#20-为什么是四个-stage不是五个)） |
+| 7 | 随机物体位姿下的泛化评测 | 2.1 | **推到第4周**（见 [2.0](#20-为什么是五个-stage)） |
+| 8 | Cartesian waypoint 与离线 IK 后端解耦 | 本周新增 Stage O | **本周必须完成**，先完成接口和回归，不接 MoveIt |
 
 自加两条：
 
@@ -895,4 +921,162 @@ Stage N 先选择离线 `solveIk()`，目的是只替换 waypoint 生成方式�
 
 ### 9.10 本阶段边界与后续
 
-Stage M 完成了加权 DLS differential IK、奇异性观测、误差/步长裁剪、关节限位投影和零空间 joint centering。它仍是独立的纯运动学层，没有接入 ROS topic、position servo 或 FSM。下一阶段 Stage N 将实现 `DiffIkWaypointSource`，把离线求解出的关节目标接入现有 waypoint 接口，并重新测量执行端稳态误差、settle 时间和放置位置。
+Stage M 完成了加权 DLS differential IK、奇异性观测、误差/步长裁剪、关节限位投影和零空间 joint centering。Stage N 已将离线求解出的关节目标接入现有 waypoint 接口，并重新测量执行端稳态误差、settle 时间和放置位置。
+
+## 10. Stage N：`DiffIkWaypointSource` 接入 FSM
+
+### 10.0 一句话总结
+
+Stage N 新增 `DiffIkWaypointSource`，默认把 `task_executor` 的固定关节查表替换成基于 `arm_kinematics::solveIk()` 的离线 waypoint 求解。物体在 `PREGRASP` 首次观测时锁定，抓取侧目标使用相对默认 box 中心的平移偏移；每个阶段只求解一次并缓存目标，FSM 的 `fsm.cpp` 保持不变。默认场景 20 次全部成功，物体沿 `+y` 移动 4cm 时 IK 成功而查表实现失败；实际放置仍受 position servo 重力下垂和接触误差限制。
+
+### 10.1 改动清单与验证结果
+
+| 改动 | 内容 |
+|---|---|
+| waypoint 实现 | [`diff_ik_waypoint_source.hpp`](../../src/task_executor/include/task_executor/diff_ik_waypoint_source.hpp)、[`diff_ik_waypoint_source.cpp`](../../src/task_executor/src/diff_ik_waypoint_source.cpp)：模型 FK、阶段目标构造、离线 IK、阶段缓存和诊断 |
+| 节点接入 | [`task_executor_node.cpp`](../../src/task_executor/src/task_executor_node.cpp)：`waypoint_source` 参数、seed 设置、episode/retry 缓存重置、IK 失败处理和执行误差日志 |
+| 构建依赖 | [`task_executor/CMakeLists.txt`](../../src/task_executor/CMakeLists.txt)、[`package.xml`](../../src/task_executor/package.xml)：链接 `arm_kinematics`，使用 `ament_index_cpp` 和 `franka_description` |
+| 测试 | [`test_diff_ik_waypoint_source.cpp`](../../src/task_executor/test/test_diff_ik_waypoint_source.cpp)：物体平移、阶段缓存、episode 重新锁定和不可达目标 |
+| 对照场景 | [`stage_n_shifted_scene.xml`](../../robot_description/mujoco/franka_emika_panda/stage_n_shifted_scene.xml)：box 的 y 坐标从 0 移到 0.04m |
+| 实验结果 | [`stage_n_fixed_20.csv`](../../results/stage_n_fixed_20.csv)、[`stage_n_shifted_ik.csv`](../../results/stage_n_shifted_ik.csv)、[`stage_n_shifted_keyframe.csv`](../../results/stage_n_shifted_keyframe.csv)、[`stage_n_strict_place.csv`](../../results/stage_n_strict_place.csv) |
+
+实测命令和结果：
+
+| 验证 | 结果 |
+|---|---|
+| `colcon build --symlink-install` | 5 个包成功 |
+| `colcon test` | 265 tests，0 failures，39 skipped（lint/测试框架的 skipped 项保留） |
+| 默认固定场景，`DiffIkWaypointSource` | 20/20 成功，0 重试；episode 时长约 6.65--6.75s |
+| box y=0.04m，IK | 1/1 成功，6.68s |
+| 同一偏移场景，`waypoint_source:=keyframe` | 0/1；重试 3 次后 `GRASP_EMPTY` |
+| marker 中心 `(0.5, 0.3)`，验收半径 0.03m | 0/1；重试 3 次后 `PLACE_MISSED` |
+
+### 10.2 waypoint 的构造和缓存
+
+`DiffIkWaypointSource` 没有直接把 object pose 当作完整抓取姿态。它先使用 `KeyframeWaypointSource` 的阶段关节构型作为姿态参考，通过自写 FK 得到对应 `hand_tcp` 位姿，再把抓取侧阶段相对默认 box 中心 `(0.5, 0, 0.241)m` 的平移偏移加入 TCP 目标。当前受支持的是物体平移；物体偏航角没有改变夹爪旋转，也没有做候选抓取或碰撞规划。
+
+`PREGRASP` 第一次调用时保存 `grasp_object_pose_`。`PREGRASP`、`GRASP`、`CLOSE`、`LIFT` 使用这个锁定值；`PREPLACE`、`PLACE`、`OPEN`、`RETRACT` 使用固定放置侧参考目标。阶段第一次调用 `solveIk()`，结果写入 `cached_target_`；同一阶段后续 tick 返回缓存。episode 开始或恢复重试时清除缓存并重新设置 seed，避免上一轮的物体位置或关节目标泄漏。
+
+这个缓存不是为了优化而优化。若每个 20Hz tick 都使用最新观测重新求解，接触造成的 box 微动和观测噪声会让关节命令持续变化，FSM 的“发目标、等待到位”语义也会变成追逐移动目标。另一方面，锁定物体位姿意味着物体在抓取后发生较大滑移时不会自动纠正；这正是后续在线反馈控制需要解决的边界。
+
+### 10.3 为什么 Stage N 先使用离线 IK
+
+当前链路是：
+
+```text
+实测关节 seed + TCP 目标
+        -> solveIk() 内部反复 FK/Jacobian/DLS
+        -> 一个最终关节目标
+        -> 现有 MuJoCo position servo
+```
+
+这保持了现有 joint command 接口和 FSM 的阶段判据，能够单独验证“物体位置变化是否进入 waypoint 计算”。它不是在线 Cartesian servo：`solveIk()` 内部的反馈是自写模型中的迭代状态，不是 MuJoCo 实际 TCP 状态。
+
+在线 differential IK 会在每个控制周期重新读取实际关节状态，再计算 FK、误差和增量。它可以修正伺服误差和外部扰动，但需要重新定义控制周期、延迟、速度/加速度限制、阶段到位和两层闭环的稳定性。MPC 还需要预测多个未来步并优化一段控制序列；“每 tick 调 `differentialIkStep()`”本身不是 MPC。当前选择离线形式是为了保持 FSM 和控制接口稳定，不代表在线控制已经完成。
+
+### 10.4 诊断信号：模型残差和执行残差必须分开
+
+每个阶段首次求解记录 world frame 下 TCP 目标位置、四元数、IK 迭代次数、模型位置/姿态残差和加权 `sigma_min`。阶段退出时额外从 `world -> hand_tcp` TF 计算实际 TCP 位置、姿态误差以及关节最大绝对误差。
+
+这两个残差回答不同问题：
+
+| 信号 | 回答的问题 |
+|---|---|
+| IK position/orientation error | 自写运动学模型能否找到目标解 |
+| joint error | position servo 是否接近命令关节角 |
+| actual TCP error | 执行后的末端是否真的到达目标 |
+| `sigma_min` | 当前加权 Jacobian 是否接近病态构型 |
+
+默认实验中，`GRASP -> CLOSE` 的 IK 模型残差接近零，但实际 TCP 平移误差约 `0.111m`、姿态误差约 `0.393rad`；`PLACE -> OPEN` 的实际 TCP 平移误差约 `0.006m`。这说明“求解器收敛”不能替代“执行器到位”。查表模式没有 IK 目标诊断，日志中的 TCP 误差会保持为 `NaN`，不伪造零值。
+
+### 10.5 验收结果和失败边界
+
+固定场景的 20/20 回归证明替换 waypoint 源没有破坏现有任务链。偏移场景的对照证明新能力来自 IK，而不是 FSM 逻辑：IK 能把物体的 y 偏移传到抓取 waypoint，查表仍然前往旧位置并最终 `GRASP_EMPTY`。
+
+放置实验揭示了另一条边界。使用默认放置验收中心 `(0.43, 0.31)m` 和半径 `0.08m` 时任务成功，但最终 box 均值约为 `(0.43226, 0.30902)m`；把目标改为 marker 中心 `(0.5, 0.3)m` 且半径收紧到 `0.03m`，任务经过 3 次重试后返回 `PLACE_MISSED`。因此宽松成功不能解释成 marker 中心的精确放置，`place_x_m`/`place_y_m` 仍是当前执行系统的实测验收点。
+
+### 10.6 失败模式与验证手段
+
+| 失败模式 | 现象 | 验证或防护 |
+|---|---|---|
+| IK 不收敛 | 阶段输出 `IK_FAILED`，不发布该解 | 检查 `IkStatus`、迭代次数和有限残差；不可达目标 gtest |
+| 阶段缓存未清理 | 新 episode 继承旧物体位置或目标 | `beginEpisode()` 单测和连续 episode 实跑 |
+| 每 tick 追逐 object pose | 命令随接触微动抖动 | `PREGRASP` 锁定物体位置、阶段缓存 |
+| 物体偏航未处理 | 平移场景成功，旋转物体可能抓取失败 | 当前明确记录为能力边界；后续增加偏航测试 |
+| 奇异区步长放大 | 关节目标突然跳变 | 记录 `sigma_min`；复用 Stage M 阻尼和有界步长测试 |
+| IK 模型收敛但 servo 跟不上 | 模型残差小，实际 TCP 误差大 | 同时记录模型残差、关节误差和 TF TCP 误差 |
+| 放置半径过宽 | 偏离 marker 仍报告成功 | 用 0.03m 严格实验；实际返回 `PLACE_MISSED` |
+| 查表源误用于偏移物体 | 机械臂仍去旧位置，抓取为空 | `waypoint_source:=keyframe` 对照实验 |
+
+### 10.7 你没问但值得注意的
+
+1. **物体姿态是否应进入抓取目标的旋转部分？** 当前只传播平移；物体偏航、夹爪方向和抓取对称性仍未验证，值得在第 4 周随机化前先定义验收范围。
+2. **IK 目标是否需要碰撞检查？** 当前 `solveIk()` 只处理运动学和关节限位，不能保证从一个阶段到下一个阶段的路径不碰撞；MoveIt/规划器接入时要把 waypoint 可达和路径可行分开记录。
+3. **seed 取当前关节状态是否总是合适？** 它有利于选择靠近当前构型的解，但在错误恢复或奇异区可能把求解带到不理想的局部结果；后续可比较固定 ready seed、上一阶段目标和多 seed 策略。
+4. **`mutable` 缓存是否应该继续留在 `const` 查询接口里？** 当前是兼容既有 `WaypointSource` 契约的折中；如果将来 waypoint 源需要更复杂的生命周期，应该重新评估 `preparePhase()` 等非 `const` 接口，而不是继续扩大具体类型分支。
+
+### 10.8 排查记录：构建、运行和严格放置验证
+
+首次构建失败原因是 `arm_kinematics` 的导出目标名为 `arm_kinematics::arm_kinematics`，而 `task_executor` 只链接了未限定的 `arm_kinematics`，导致 Eigen 头文件路径没有通过 imported target 传递。改为链接导出目标后构建通过。
+
+第一次真实启动时，executor 因消息类型支持库未在同一个已 source 的 workspace 环境中加载而退出；错误是找不到 `libmanipulation_interfaces__rosidl_typesupport_fastrtps_cpp.so`。随后统一在同一个 shell 中 source `/opt/ros/humble/setup.bash` 和 `install/setup.bash`，直接启动两个真实可执行文件，episode 成功。
+
+新增测试最初只验证了功能，lint 还发现 include 顺序和 uncrustify 格式问题；修复后 `task_executor` 的 84 项测试全绿，最终全仓 265 项测试全绿。
+
+最后用 marker 中心和 3cm 半径做严格验证，任务连续 4 次尝试均在 `VERIFY` 以 `PLACE_MISSED` 退出。日志显示 `PLACE` 阶段的模型 IK 残差约为微米级，但实际 TCP 仍有毫米级误差，且物体最终落点约为 `(0.428, 0.314)m`。这次实验把“IK 目标正确”和“物理执行达到严格放置标准”明确分开。
+
+### 10.9 后续边界
+
+Stage N 完成了离线 IK waypoint 接入、固定场景回归、平移物体对照、阶段诊断和执行误差测量。它没有完成在线 Cartesian servo、物体偏航抓取、碰撞规划或精确 marker 中心放置。随机物体批量泛化评测仍推迟到第 4 周，与 RGB-D 感知一起进行。
+
+### 10.10 Stage N 设计复盘：Keyframe 反推 Cartesian 目标是不合理的过渡
+
+> 现在 `tcpTargetFor()` 是不是把 `KeyframeWaypointSource` 的构型做了一次 FK？Keyframe 本来就是不精确的扫描结果，放置误差是不是大概率来自这里？
+
+是的。当前 `tcpTargetFor()` 先取 `KeyframeWaypointSource` 的手调关节目标，再通过自写 FK 得到一个理想 `hand_tcp` 位姿，然后把这个位姿交给 `solveIk()`。这验证了“一个关节目标可以经过 FK/IK 往返”，但没有从真正的任务世界坐标定义抓取或放置目标。
+
+Keyframe 中的数字不是纯几何数据，而是运行 position servo 后手工调出的经验命令，已经混入重力下垂、执行器饱和、接触和放置妥协。把它们再做理想 FK，会把执行端补偿误认为任务几何。实测证据是：Stage N 的 `PLACE` IK TCP 目标约为 `(0.434, 0.310)m`，而不是 marker 中心 `(0.5, 0.3)m`；最终 box 约落在 `(0.432, 0.309)m`。因此 6--7cm 的系统性放置偏移主要在目标构造阶段就已经存在，毫米级差异才是 position servo 和接触执行误差。
+
+> `joint error` 的 ground truth 是不是 Keyframe waypoint？`IK position/orientation error` 又是什么？
+
+不是。`joint error` 是 MuJoCo 实际 `/joint_states` 与当前源产生的关节命令之间的最大绝对差：`diff_ik` 模式比较实际状态和 IK 输出，`keyframe` 模式才比较实际状态和 Keyframe 命令。Keyframe 是命令/经验参考，不是关节 ground truth；仿真中的实际 `qpos` 才是当前执行状态。
+
+`IK position/orientation error` 是自写模型内部的残差：比较 `fk(model, q_ik).hand_tcp` 和 `tcpTargetFor()` 生成的目标位姿。它不读取 MuJoCo 实际 TF、重力或 position servo，因此只说明数学模型找到了一个解，不能说明仿真中的末端已经到位。当前需要同时看三类量：IK 模型残差、关节跟踪误差、实际 TF TCP 误差。
+
+> 现在的物体坐标仍然是 oracle 吗？加入深度相机后当前结构够不够 generic？MoveIt 的动态路径点能否直接兼容？
+
+当前订阅的 `/mujoco_bridge/ground_truth/object_pose` 确实仍是 oracle。`WaypointSource` 的纯 C++ `ObjectPose` 参数与数据来源无关，因此视觉节点如果输出同样语义的 world-frame 位姿，下游数学代码可以复用；但当前数据契约还没有 frame id、时间戳、置信度、协方差和观测失败状态，不能称为完整的感知接口。相机外参和 camera-to-world 变换应由感知/TF 层处理，不能让 IK 源读取相机坐标。
+
+MoveIt 通常最终输出带时间的 `JointTrajectory`，而当前接口只输出一个 `JointTarget`。MoveIt 可以组合 pose target、IK、碰撞检查和轨迹规划，但 Cartesian path、全局路径规划和轨迹执行不是同一个接口。因此随机障碍和 MoveIt 结果不能直接塞进当前 `WaypointSource`，需要规划器和轨迹执行适配层。
+
+> 是否应该现在增加世界坐标轨迹抽象？
+
+复盘结论是应该增加，但范围放在 Stage O：引入 message-free 的 `CartesianWaypoint`/`CartesianWaypointSource`，让任务层输出 world-frame `hand_tcp` 目标和夹爪命令；离线 IK、MoveIt 和在线 Cartesian servo 分别消费该契约。Stage O 将把 `DiffIkWaypointSource` 改成 Cartesian waypoint 到 JointTarget 的适配器，并去掉它对 `KeyframeWaypointSource` 的直接依赖。Keyframe 可以保留为旧版关节执行和回归对照，但不能再作为任务 Cartesian 目标的权威来源。
+
+因此 Stage N 的结论被修正为：代码、构建、单测和回归实验有效，但设计验收不完整。Stage N 不能作为本周最终完成的标志；必须完成 Stage O 的 Cartesian 抓取/放置目标和离线 IK 适配，并重新通过固定场景回归后，本周工作才算完成。MoveIt 本身和随机障碍规划仍留到后续 stage。
+
+### 10.11 用户否定 Stage N 后的正式决策记录
+
+> Stage N 的设计实在不合理。Keyframe 里的点本来就是不精确的扫描结果；要等到 Stage O 的笛卡尔坐标 IK 抓取放置完成之后，这个 week 的工作才能够算正式完成。
+
+这不是对 Stage N 实验结果的否定，而是对目标构造层的否定。Stage N 已经证明了离线 `solveIk()` 能接入现有 FSM，也证明了物体平移可以让 IK 产生不同关节目标；但它把手调的执行命令错误地当成了任务几何输入，因而不能证明抓取/放置目标在 world frame 中是正确的。放置目标已经在进入 IK 前偏离 marker 中心，继续调 DLS 参数或 position servo 不能修复这个架构错误。
+
+因此本周验收状态明确改为：
+
+1. Stage K/L/M 的数学库、模型一致性和 DLS 实验保持有效。
+2. Stage N 作为“离线 IK 接入和失败模式暴露”保留，但不作为 Week 3 的最终完成标志。
+3. Stage O 必须完成真实的 Cartesian 抓取/放置目标、离线 IK 适配和固定场景回归后，Week 3 才能收周。
+4. 第 4 周的 RGB-D 和随机化评测建立在 Stage O 的 Cartesian 契约之上，不再从 Keyframe 反推目标。
+
+Stage O 的具体计划：
+
+| 步骤 | 计划交付 | 验收方式 |
+|---|---|---|
+| 1 | 定义 message-free `CartesianWaypoint`：阶段、world-frame `hand_tcp` pose、夹爪命令、必要的到位容差/目标有效性 | 单测检查 frame 约定、四元数和阶段夹爪时序 |
+| 2 | 定义 `CartesianWaypointSource`，直接从任务物体位姿和抓取/放置几何构造目标 | 测试目标随物体 world 平移变化，放置目标直接等于指定 world 坐标 |
+| 3 | 提取 `KeyframeCartesianWaypointSource` 作为过渡几何源，但不再让它充当关节命令的 FK 反推结果 | 检查 `DiffIkWaypointSource` 不再依赖 `KeyframeWaypointSource` 的 joint target |
+| 4 | 将离线 IK 改成 Cartesian waypoint 的执行适配器，输出现有 `JointTarget` | 固定场景 20 次回归、偏移物体成功、严格放置目标误差可解释 |
+| 5 | 保留 `waypoint_source:=keyframe` 作为旧版 joint-space 回归入口 | 旧实现仍能单独运行，但不参与 Cartesian 目标正确性的证明 |
+| 6 | 记录模型 IK 残差、关节跟踪误差、实际 TCP 误差和任务放置误差四个层次 | 日志和 CSV 能区分目标构造、IK、servo、接触四类问题 |
+
+Stage O 暂不包含 MoveIt planner、随机障碍、完整 `JointTrajectory` 执行器或在线 Cartesian servo。它先建立正确的 Cartesian 任务契约；后续后端可以分别接离线 IK、MoveIt 或在线控制，而不会再次修改任务几何层。

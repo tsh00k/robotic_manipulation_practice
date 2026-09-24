@@ -19,6 +19,9 @@
   <depend>tf2_ros</depend>
   <depend>mujoco_bridge</depend>
   <depend>manipulation_interfaces</depend>
+  <depend>arm_kinematics</depend>
+  <depend>ament_index_cpp</depend>
+  <exec_depend>franka_description</exec_depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
