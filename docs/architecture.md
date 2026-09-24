@@ -243,3 +243,15 @@ Stage L 已在 [test_model_consistency.cpp](../src/mujoco_bridge/test/test_model
 **验收标准**：`place_x_m`/`place_y_m` 默认 `(0.43, 0.31)`——不是 `pick_place_scene.xml` 里 `place_marker` 几何体的名义位置 `(0.5, 0.3)`，是 `KeyframeWaypointSource` 的 `PLACE` waypoint 实际能送到的位置（重力下垂导致的系统性偏差，见笔记 Stage I 讨论），`place_region_radius_m` 默认 0.08m。已验证一次完整成功 episode（全 11 阶段到 `DONE`）和一次人为制造的必然失败（`place_x_m/y_m` 设为不可达值，`RECOVER` 重试 3 次后正确落到 `FAILED`）。
 
 - [ ] `close_settle_s`/`lift_settle_grace_s` 是"改到实测通过为止"定的，不是从物理量推出来的；第3周换 diff-IK 后需要重新测（见第4节延伸）
+
+## 8. `arm_kinematics` differential IK（Stage M）
+
+`arm_kinematics` 继续保持纯 C++/Eigen/yaml-cpp 边界，不依赖 ROS、MoveIt 或 MuJoCo。Stage M 新增两层接口：`differentialIkStep()` 计算一次加权 DLS 关节增量，`solveIk()` 在内部反复执行 FK/Jacobian/DLS，返回一个离线求得的最终关节目标。
+
+**冻结的任务空间约定**：参考点为 `hand_tcp`，表达 frame 为 world，六维顺序为 `[x, y, z, rx, ry, rz]`；平移误差单位为 m，旋转误差为轴角向量、单位 rad。加权 Jacobian 使用 `translation_weight=1.0`、`rotation_weight=0.2`，因此 `sigma_min`、条件数和阻尼阈值只能在这套权重下比较，不能作为跨权重或跨机器人的绝对奇异性指标。
+
+**默认单步参数**：`damping_threshold=0.08`、`maximum_damping=0.05`、`joint_centering_gain=0.02`、平移误差裁剪 `0.05m`、旋转误差裁剪 `0.2rad`、单关节最大步长 `0.12rad`、关节限位内缩量 `1e-4rad`。其中 `joint_limit_margin` 只是在官方 `lower/upper` 角度限位基础上的数值内缩量，不是关节下限或机械安全距离。这些值已通过数学单测证明行为有界，但尚未经过 position servo 闭环调参；Stage N 接入执行链后必须重测。
+
+`IkStatus` 当前只有 `kConverged`、`kMaxIterations` 和 `kStalled`。不可达目标返回最后一个有限关节状态和残差，不返回名义成功或 NaN。当前约束实现是“先求 DLS，再裁剪步长并投影到位置限位”，不是把约束直接放进 QP；因此裁剪后的解不保证仍是约束最小二乘最优解。
+
+**能力边界**：`solveIk()` 的迭代反馈来自自写运动学模型，不读取 MuJoCo/真机实际状态。它是用 differential IK 实现的离线 full-pose IK 求解器，不是在线 Cartesian servo，也不是 MPC；不能修正重力下垂、actuator 饱和、接触扰动或 position servo 稳态误差。Stage N 先用它生成离散 waypoint，以便把运动学求解和执行控制分层验证。

@@ -1,6 +1,6 @@
 # Week 3 学习笔记
 
-> **本文按 stage 完成进度持续扩写**。第 1~6 节是开周计划与清单；第 7 节 Stage K、第 8 节 Stage L 已完成并写入实测结果，后续 stage 仍按 [STUDY_NOTES_GUIDE.md](../../STUDY_NOTES_GUIDE.md) 2.2 的骨架就地追加。
+> **本文按 stage 完成进度持续扩写**。第 1~6 节是开周计划与清单；第 7 节 Stage K、第 8 节 Stage L、第 9 节 Stage M 已完成并写入实测结果，后续 stage 仍按 [STUDY_NOTES_GUIDE.md](../../STUDY_NOTES_GUIDE.md) 2.2 的骨架就地追加。
 >
 > Stage 编号延续第1周的 A~E、第2周的 F~J，本周是 **K~N**（四个，[范围选择见 2.0](#20-为什么是四个-stage不是五个)）。
 
@@ -58,6 +58,22 @@
   - [8.8 排查记录：首次编译与 lint 反馈](#88-排查记录首次编译与-lint-反馈)
   - [8.9 你没问但值得注意的](#89-你没问但值得注意的)
   - [8.10 本阶段边界与后续](#810-本阶段边界与后续)
+- [9. Stage M：damped least-squares diff-IK 与奇异性观测](#9-stage-mdamped-least-squares-diff-ik-与奇异性观测)
+  - [9.0 一句话总结](#90-一句话总结)
+  - [9.1 改动清单与验证结果](#91-改动清单与验证结果)
+  - [9.2 加权 DLS、误差向量与数值求解](#92-加权-dls误差向量与数值求解)
+  - [9.3 阻尼、奇异值与奇异性诊断](#93-阻尼奇异值与奇异性诊断)
+    - [9.3.1 奇异性扫线的读法](#931-奇异性扫线的读法)
+  - [9.4 关节中心化项与冗余自由度](#94-关节中心化项与冗余自由度)
+    - [9.4.1 一维冗余不等于只作用于一个关节](#941-一维冗余不等于只作用于一个关节)
+  - [9.5 裁剪标准与关节限位](#95-裁剪标准与关节限位)
+  - [9.6 最小二乘 IK 的计划边界](#96-最小二乘-ik-的计划边界)
+    - [9.6.1 面试辨析：Jacobian 与最小二乘 IK 的区别](#961-面试辨析jacobian-与最小二乘-ik-的区别)
+    - [9.6.2 `solveIk()`、在线反馈 diff-IK 与 MPC](#962-solveik在线反馈-diff-ik-与-mpc)
+  - [9.7 失败模式与验证手段](#97-失败模式与验证手段)
+  - [9.8 排查记录：阻尼错误注入与实验路径修正](#98-排查记录阻尼错误注入与实验路径修正)
+  - [9.9 你没问但值得注意的](#99-你没问但值得注意的)
+  - [9.10 本阶段边界与后续](#910-本阶段边界与后续)
 
 ---
 
@@ -512,3 +528,371 @@ Stage L 没有实现 MoveIt 与 MuJoCo 的自动碰撞结果一致性测试。�
 ### 8.10 本阶段边界与后续
 
 Stage L 至此结束：运动学三方一致性、门槛、`hand_tcp` 方案和碰撞几何事实已经落地。没有新增 MoveIt 碰撞运行测试、没有启动 `move_group`，也没有开始 IK。下一阶段 Stage M 只在 `arm_kinematics` 中实现 DLS differential IK、奇异性观测、限位与零空间处理；Stage L 的三方门禁将作为其模型前提持续回归。
+
+## 9. Stage M：damped least-squares diff-IK 与奇异性观测
+
+### 9.0 一句话总结
+
+Stage M 在只依赖 Eigen 的 `arm_kinematics` 中加入了加权 damped least-squares differential IK。`differentialIkStep()` 负责单步求解、误差裁剪、阻尼、关节中心化和限位投影；`solveIk()` 反复调用单步求解器，作为离线位姿 IK 使用。实现没有显式构造矩阵逆，而是用 LDLT 分解解线性方程。新增 8 个 gtest、奇异性扫线工具和 CSV/PNG 产物；最终全仓 5 个包构建成功，249 项测试 0 失败。
+
+### 9.1 改动清单与验证结果
+
+| 改动 | 内容 |
+|---|---|
+| 求解接口 | [`differential_ik.hpp`](../../src/arm_kinematics/include/arm_kinematics/differential_ik.hpp)：`TaskVector`、参数、单步结果、IK 状态和最终结果 |
+| 求解实现 | [`differential_ik.cpp`](../../src/arm_kinematics/src/differential_ik.cpp)：加权 DLS、最小奇异值、阻尼、joint centering、误差/步长裁剪和限位投影 |
+| 自动测试 | [`test_differential_ik.cpp`](../../src/arm_kinematics/test/test_differential_ik.cpp)：良态、奇异、限位、冗余、可达/不可达目标和非法输入 |
+| 奇异性实验 | [`singularity_sweep.cpp`](../../src/arm_kinematics/tools/singularity_sweep.cpp) + [`plot_singularity_sweep.py`](../../scripts/plot_singularity_sweep.py) |
+| 实验产物 | [`stage_m_singularity_sweep.csv`](../../results/stage_m_singularity_sweep.csv)、[`stage_m_singularity_sweep.png`](../../results/stage_m_singularity_sweep.png) |
+
+最终实测：4 个可达目标分别在 5、6、6、7 次迭代内收敛；不可达 `(5, 5, 5)m` 目标在 80 次后返回 `kMaxIterations`，位置残差 `7.54997m`，状态和残差均有限。奇异性扫线 81 个样本中，加权 `sigma_min` 最低约 `3.86e-4`，条件数峰值约 `1649`，自适应阻尼最高约 `0.05`，固定 `1mm` 笛卡尔命令产生的最大单步关节增量低于 `0.0032rad`。
+
+单元测试按风险分层，而不是只测一个成功案例：
+
+| 测试层 | 代表测试 | 主要验证 |
+|---|---|---|
+| 公式约定 | `PoseError` | world frame、平移差、轴角旋转误差和分量顺序 |
+| 良态单步 | 人工构造单位 Jacobian | DLS 公式、矩阵维度、主任务跟踪 |
+| 奇异保护 | 最后一行缩放到 `1e-9` | `sigma_min` 变小、阻尼增大、`delta_q` 仍有界 |
+| 约束行为 | 大误差、接近上限的关节 | 误差裁剪、单步限制、关节限位投影 |
+| 冗余处理 | 第 7 关节作为冗余方向 | joint centering 确实沿近似零空间起作用 |
+| 完整可达 IK | FK 生成的 4 个目标 | 多轮迭代收敛、误差达标、结果仍在限位内 |
+| 不可达/非法输入 | `(5,5,5)m`、NaN seed、越界 seed | 有限失败、最大迭代退出、输入拒绝 |
+| 错误注入 | 强制 `lambda=0` | 奇异单测必须变红，证明测试能捕获关键退化 |
+
+### 9.2 加权 DLS、误差向量与数值求解
+
+> 加权 DLS 是什么，公式里每一项是什么意思？`e_w` 是世界坐标系路径点之间的差、代表世界坐标速度吗？当前方法实际上就是矩阵逆的解析解吗？
+
+当前任务向量采用 world frame 和 `[vx, vy, vz, wx, wy, wz]` 的顺序。对位姿 IK 来说，误差写成：
+
+$$
+e = \begin{bmatrix}
+\Delta x & \Delta y & \Delta z & r_x & r_y & r_z
+\end{bmatrix}^T
+$$
+
+前三项是目标 TCP 与当前 TCP 的世界坐标位置差，后三项是相对旋转的轴角向量。它是**位姿误差**，不是速度；只有除以控制周期 `dt` 后，才可以近似解释为期望空间速度：
+
+```cpp
+// Offline IK: e is a pose error.
+TaskVector e = poseError(current_tcp, target_tcp);
+
+// Online servo would need an explicit time scale.
+TaskVector desired_twist = e / dt;
+```
+
+因为米和弧度的数值尺度不同，代码显式构造权重矩阵：
+
+$$
+W=\operatorname{diag}(w_t,w_t,w_t,w_r,w_r,w_r),\qquad
+e_w=We,\qquad J_w=WJ
+$$
+
+对应实现是：
+
+```cpp
+const Eigen::DiagonalMatrix<double, 6> weights = taskWeights(parameters);
+const Jacobian weighted_jacobian = weights * geometric_jacobian;
+const TaskVector weighted_error = weights * bounded_error;
+```
+
+加权 DLS 单步公式是：
+
+$$
+\Delta q = J_w^T(J_wJ_w^T+\lambda^2I)^{-1}e_w
+$$
+
+它等价于带 Tikhonov 正则项的最小二乘问题：
+
+$$
+\arg\min_{\Delta q}
+\left\|J_w\Delta q-e_w\right\|^2
+ +\lambda^2\left\|\Delta q\right\|^2
+$$
+
+这里 `J` 是 `6x7`，因为 Panda 有 7 个关节、末端任务有 6 个自由度。数学表达式确实是这个优化问题的闭式解，但工程代码不显式调用 `inverse()`：
+
+```cpp
+TaskMatrix normal = weighted_jacobian * weighted_jacobian.transpose();
+normal.diagonal().array() += damping * damping;
+const Eigen::LDLT<TaskMatrix> factorization(normal);
+const auto damped_inverse =
+  weighted_jacobian.transpose() * factorization.solve(TaskMatrix::Identity());
+result.delta_q = damped_inverse * weighted_error;
+```
+
+所以应准确表述为“使用解析形式、通过 LDLT 数值分解求解”，而不是“显式计算矩阵逆”。显式 `A.inverse()` 更容易放大病态数值误差，也没有必要。
+
+### 9.3 阻尼、奇异值与奇异性诊断
+
+> 阻尼是哪来的？为什么可以和最小奇异值自适应？为什么要诊断奇异值？
+
+没有阻尼时，伪逆在奇异值方向上的增益近似为 `1/sigma`。`sigma` 越小，末端的小误差和噪声越容易被放大成巨大的关节增量。DLS 把增益改为：
+
+$$
+\frac{\sigma}{\sigma^2+\lambda^2}
+$$
+
+这来自目标函数中的正则项 `lambda^2 ||Delta q||^2`，不是任意添加的安全常数。代码根据加权 Jacobian 的最小奇异值选择阻尼：
+
+```cpp
+if (minimum_singular_value >= parameters.damping_threshold) {
+  return 0.0;
+}
+const double ratio = minimum_singular_value / parameters.damping_threshold;
+return parameters.maximum_damping * (1.0 - ratio * ratio);
+```
+
+远离奇异区时保持准确跟踪；接近奇异区时牺牲一部分跟踪误差，换取有界的 `delta_q`。诊断 `sigma_min` 是为了区分“目标不可达”“当前构型病态”和“执行器没跟上”，并为日志中的阻尼、条件数和关节步长提供因果线索。注意：`sigma_min` 依赖 Jacobian 的米/弧度权重，因此不是脱离权重约定的绝对构型属性。
+
+#### 9.3.1 奇异性扫线的读法
+
+> 扫奇异性曲线的原理是什么，横轴是什么意思，条件数的解释以及它的变化趋势能够说明什么，`error/step` 那一张图表示的是什么？
+
+扫线工具不启动 MuJoCo，也不运行 position servo；它沿一条预先指定的关节构型路径逐点计算 Jacobian：
+
+```cpp
+const double fraction = static_cast<double>(sample) / (kSamples - 1U);
+const JointVector q = (1.0 - fraction) * start_q + fraction * near_singular_q;
+const Jacobian geometric_jacobian = jacobian(model, q);
+```
+
+因此横轴 `fraction` 是**关节构型路径的归一化进度**，不是时间，也不是 TCP 距离：`0` 是 `start_q`，`1` 是预先选定的 `near_singular_q`，中间值是两组关节角的线性插值。
+
+对加权 Jacobian 做 SVD：
+
+$$
+J_w=U\Sigma V^T,\qquad
+\kappa(J_w)=\frac{\sigma_{\max}}{\sigma_{\min}}
+$$
+
+条件数表示不同笛卡尔方向的可控性差异：`sigma_min` 越小，至少有一个方向越难由关节运动产生；条件数越大，Jacobian 越病态，误差和噪声越容易被放大成关节动作。曲线中的尖峰说明这条指定路径经过局部病态构型；条件数随后下降则表示离开该构型后局部可控性恢复。这个结论只针对这条路径和当前的米/弧度权重，不能推广成所有路径的绝对阈值。
+
+第三张 `error/step` 图使用一个固定的 `1mm` 世界 `x` 方向任务：
+
+```cpp
+const TaskVector cartesian_command =
+  (TaskVector() << 0.001, 0.0, 0.0, 0.0, 0.0, 0.0).finished();
+const DifferentialIkStep step = differentialIkStep(model, q, J, cartesian_command, parameters);
+const double tracking_error = (J * step.delta_q - cartesian_command).norm();
+```
+
+图中的 `error / step` 只是“误差与步长画在同一张图”的简写，**不是 error 除以 step**。
+
+蓝线 `linearized tracking error` 计算的是 `||J delta_q - e_command||`。它表示把求出的 `delta_q` 代回一阶 Jacobian 模型后，与请求的 `1mm` 任务之间还剩多少残差。远离奇异区且 `lambda=0` 时，满秩 Jacobian 几乎能精确实现该命令，所以蓝线接近机器精度；进入阻尼区后，DLS 主动放弃部分难以稳定实现的任务分量，因此蓝线上升。它是 6 维线性化任务残差的范数，其中平移分量是 m、旋转分量是 rad，只能作为当前约定下的诊断量。它也不是实际 MuJoCo TCP tracking error，因为实验没有包含重力、执行器饱和、position servo 或时间推进。
+
+橙线 `max |dq| [rad]` 计算的是 `max_i |delta_q_i|`，也就是 7 个关节增量中绝对值最大的一个，不是 7 个关节之和，也不是末端误差。对同一个 `1mm` 命令，它表示这一步中最忙的关节需要转多少。接近奇异区时橙线没有爆炸、甚至下降，是因为增大的阻尼宁愿少完成任务，也不产生巨大的关节动作；这不表示奇异区反而更容易运动。
+
+两条线画在同一个对数纵轴面板，是为了一起观察 DLS 的稳定性权衡：接近奇异区时，蓝线所代表的局部任务残差增加，而橙线所代表的最大关节步长仍然有界。两条线单位不同，不能直接比较数值大小。
+
+### 9.4 关节中心化项与冗余自由度
+
+> 关节中心化项是直接加到 `delta q` 上吗？
+
+是，但它先经过近似零空间投影：
+
+$$
+\Delta q = J^\#e_w +
+\alpha(I-J^\#J_w)v_\text{center}
+$$
+
+代码对应：
+
+```cpp
+const auto nullspace =
+  Eigen::Matrix<double, kArmDof, kArmDof>::Identity() -
+  damped_inverse * weighted_jacobian;
+result.delta_q = damped_inverse * weighted_error;
+result.delta_q += parameters.joint_centering_gain *
+  nullspace * centeringDirection(model, q);
+```
+
+`v_center` 指向各关节的中间位置。Panda 是 7 自由度，而任务空间是 6 维，因此存在一个冗余方向可以用于远离限位。由于这里使用的是阻尼逆而非严格伪逆，阻尼较大时投影只是近似零空间，中心化项会有少量主任务泄漏；随后还会经过步长裁剪和限位投影。
+
+#### 9.4.1 一维冗余不等于只作用于一个关节
+
+> 关节冗余是可以真正反映到某个关节上的吗？零空间投影的关节居中最后只能作用在一个关节上吗？我以为冗余是一个抽象维度，最后可以同时对所有关节产生一定效果。
+
+后一种理解才是一般情况。Panda 的 Jacobian 是 `6x7`；在满秩构型下：
+
+$$
+\dim\mathcal{N}(J)=7-\operatorname{rank}(J)=1
+$$
+
+“一维”表示只有一个独立冗余运动方向，不表示只有一个关节能动。这个方向是一个 7 维关节向量：
+
+$$
+n=\begin{bmatrix}n_1&n_2&n_3&n_4&n_5&n_6&n_7\end{bmatrix}^T,
+\qquad Jn=0
+$$
+
+沿 `n` 运动时，一阶近似的末端变化为零，但 `n` 的多个关节分量通常同时非零。因此真实 Panda 的 joint centering 一般会协调改变多个关节：
+
+```cpp
+JointVector preferred = centeringDirection(model, q);  // 7 个关节各自想回中点
+JointVector projected = nullspace * preferred;          // 保留尽量不动 TCP 的组合
+result.delta_q += joint_centering_gain * projected;
+```
+
+单元测试中看起来只有 joint7 运动，是因为测试刻意构造 `J=[I6 | 0]`。这个人工模型的零空间恰好是 `[0,0,0,0,0,0,1]^T`，方便给出明确断言；它不是生产 Panda Jacobian 的结构。接近奇异构型时 `rank(J)` 还可能下降，零空间维数会超过一维；当前阻尼投影又只是近似零空间，因此中心化可能轻微改变 TCP。
+
+### 9.5 裁剪标准与关节限位
+
+> 你的裁剪标准是如何确定的？关节限位指的是什么？
+
+关节限位是每个关节角允许的范围：
+
+$$
+q_i^\text{lower}\le q_i\le q_i^\text{upper}
+$$
+
+`lower`/`upper` 是从官方 `joint_limits.yaml` 读取的实际角度上下限，**不是** `1e-4`。`joint_limit_margin=1e-4rad` 只是把有效区间稍微内缩，避免浮点数恰好落在边界：
+
+```cpp
+const double lower = model.joints[i].limits.lower + parameters.joint_limit_margin;
+const double upper = model.joints[i].limits.upper - parameters.joint_limit_margin;
+const double projected = std::clamp(q(index) + result.delta_q(index), lower, upper);
+result.delta_q(index) = projected - q(index);
+```
+
+三种裁剪各自对应不同理由：
+
+| 裁剪 | 当前默认值 | 理由与边界 |
+|---|---:|---|
+| 平移误差范数 | `0.05m` | 保持 FK/Jacobian 的局部线性近似；工程初值，需在 Stage N 重测 |
+| 旋转误差范数 | `0.2rad` | 同上，避免单步跨过太大的姿态变化 |
+| 单关节步长 | `0.12rad` | 抑制奇异区和大误差下的巨大关节跳变 |
+| 限位 margin | `1e-4rad` | 数值边界保护，不是机械安全距离 |
+
+这些数目前证明了“行为有界且测试可重复”，还没有证明“对真实伺服最优”。Stage N 接入 position servo 后必须重新测量。位置限位也不等于速度、加速度、力矩或碰撞约束；本阶段只实现位置限位和单步裁剪。
+
+### 9.6 最小二乘 IK 的计划边界
+
+> 计划中有实现最小二乘 IK 的部分吗？以后还会做吗？
+
+当前 `solveIk()` 已经是最小二乘 IK：它反复计算位姿误差、Jacobian 和 DLS 单步，直到收敛。计划书和本周 Stage M 都要求解释 DLS 与正则化最小二乘的等价关系。
+
+尚未实现的是“把约束直接放进优化器”的版本。当前流程是：
+
+```text
+先求 DLS 最小二乘解 -> 再裁剪 delta_q -> 再投影到关节限位
+```
+
+计划书 5.4 的 stretch 项才是：
+
+```text
+把速度/位置约束直接放进 QP 或其他约束最小二乘求解器
+```
+
+后续 Chap 6 会比较自写 DLS、MoveIt IK/规划器和碰撞筛选；不预设生产系统必须继续手写完整约束优化器。
+
+#### 9.6.1 面试辨析：Jacobian 与最小二乘 IK 的区别
+
+> 面试会问 Jacobian 和最小二乘 IK 的区别。是否可以回答二者没有本质区别，只是后者能把约束显式加入 QP？
+
+不能回答“没有本质区别”，因为两者不在同一层级：
+
+| 概念 | 定位 | 典型表达 |
+|---|---|---|
+| Jacobian | 当前构型附近的局部微分模型/工具 | `Delta x approximately equals J(q) Delta q` |
+| 最小二乘 IK | 使用局部模型求关节增量的一类求解方法 | `min ||J Delta q - e||^2` |
+| DLS | 带关节增量正则项的最小二乘 IK | `min ||J Delta q-e||^2 + lambda^2 ||Delta q||^2` |
+| QP | 可在二次目标上显式加入线性约束的优化形式 | joint position/velocity bounds 等 |
+
+无约束最小二乘 IK 已经成立，可以用伪逆、SVD、QR 或 DLS 求解，不需要 QP。只有需要把位置、速度等约束直接放进优化问题时，才进一步写成例如：
+
+$$
+\begin{aligned}
+\min_{\Delta q}\quad &
+\left\|J\Delta q-e\right\|^2+\lambda^2\left\|\Delta q\right\|^2\\
+\text{s.t.}\quad &
+\Delta q_{\min}\le\Delta q\le\Delta q_{\max}\\
+&q_{\min}\le q+\Delta q\le q_{\max}
+\end{aligned}
+$$
+
+面试中的精简回答可以是：
+
+> Jacobian 不是 IK 算法，而是关节空间到任务空间的局部微分映射。最小二乘 IK 利用 Jacobian，把末端误差转化为 `min ||J Delta q-e||^2` 的优化问题。无约束时可用伪逆、SVD 或 DLS 求解；需要显式处理关节限位和速度等约束时，可以进一步写成 QP。由于 Jacobian 只是局部线性化，完整位姿 IK 通常还需要反复更新 Jacobian 并迭代收敛。
+
+知识边界：IK 不一定依赖 Jacobian，解析 IK、几何 IK 等是其他路线；使用 Jacobian 的通常是数值迭代 IK 或 differential IK。因此应记成：
+
+```text
+Jacobian：模型/工具
+最小二乘 IK：使用该模型的一类求解方法
+QP：在二次目标上显式加入约束的一种求解形式
+```
+
+#### 9.6.2 `solveIk()`、在线反馈 diff-IK 与 MPC
+
+> 当前的 `DifferentialIkStep` 是求解单步 IK。那么 `solveIk()` 呢？它一次直接求解到底吗？难道不应该使用 MPC 范式，每步读取反馈并调用 `differentialIkStep()`，也就是和 MuJoCo 联调吗？
+
+`differentialIkStep()` 只完成一次局部线性更新；`solveIk()` 在一次函数调用内部反复执行 FK、位姿误差、Jacobian 和单步更新，直到收敛或失败：
+
+```cpp
+JointVector q = seed;
+while (!converged) {
+  const auto current = fk(model, q).hand_tcp;
+  const TaskVector error = poseError(current, target);
+  const Jacobian J = jacobian(model, q);
+  q += differentialIkStep(model, q, J, error).delta_q;
+}
+return q;
+```
+
+所以它是“用 differential IK 迭代实现的离线 full-pose IK 求解器”。每轮会重新线性化，但状态反馈来自自写运动学模型预测的 `q`，不是 MuJoCo 或真机实际状态。它能证明模型中存在可收敛的关节解，不能修正 position servo 稳态误差、重力下垂、actuator 饱和、接触扰动或模型偏差。
+
+在线反馈式 diff-IK 则应每个控制周期读取实际状态：
+
+```cpp
+while (running) {
+  const JointVector q_actual = readJointState();
+  const auto current = fk(model, q_actual).hand_tcp;
+  const TaskVector error = poseError(current, target);
+  const auto step = differentialIkStep(
+    model, q_actual, jacobian(model, q_actual), error);
+  sendJointCommand(q_actual + step.delta_q);
+}
+```
+
+这通常称为 resolved-rate control、在线 differential IK 或 Cartesian servo。它虽然每轮反馈重算，但不是严格 MPC：MPC 还需要预测多个未来 timestep、联合优化一段控制序列并显式处理动态和约束，然后只执行第一个控制量。
+
+| 对比 | 当前 `solveIk()` | 在线反馈 diff-IK |
+|---|---|---|
+| 状态来源 | 内部模型预测的 `q` | MuJoCo/真机实际 `q` |
+| 输出 | 一个最终关节目标 | 每周期一个增量目标 |
+| 现有 FSM | 兼容“发目标、等待到位” | 需要重新定义运动中、到位和超时 |
+| 执行误差修正 | 不能 | 可以 |
+| 新增要求 | 很少 | 反馈频率、延迟、稳定性和命令接口 |
+
+Stage N 先选择离线 `solveIk()`，目的是只替换 waypoint 生成方式，保留 FSM 和 position servo，从而把运动学错误与控制错误分开定位。这个分层合理，但知识边界必须写清：Stage N 只能证明“模型中算得到并能作为离散目标执行”，不能宣称已经完成在线 differential IK 控制。后续 manipulation control 阶段需要增加反馈式 Cartesian servo，并比较实际 TCP 误差、奇异区行为和执行稳定性。
+
+### 9.7 失败模式与验证手段
+
+| 失败模式 | 现象 | 怎么发现或防住 |
+|---|---|---|
+| 把位姿误差当速度使用 | 在线控制随周期改变而速度尺度错误 | 离线 `solveIk()` 不除以 `dt`；在线形态必须显式引入控制周期 |
+| 米和弧度不加权 | 平移或旋转任务被数值尺度单方面支配 | 参数中显式保存两个权重；改变权重时同步解释 `sigma_min` |
+| 奇异区不加阻尼 | `delta_q` 突然变成数弧度，测试或执行发生跳变 | 奇异单测；关闭阻尼的错误注入使测试失败 |
+| 把 `joint_limit_margin` 当作关节下限 | 合法关节状态被错误拒绝，或有效区间缩成极小范围 | `withinJointLimits()` 使用官方 lower/upper；margin 只在更新投影时加入 |
+| 先求解后裁剪造成路径偏差 | TCP 线性跟踪误差在限位附近变大 | 记录 `sigma_min`、tracking error、限位命中次数；完整约束求解列为 stretch |
+| 把 `sigma_min` 当成无单位绝对阈值 | 换权重后错误地比较奇异性 | 日志记录权重约定；曲线只在同一权重下比较 |
+| 不可达目标死循环或返回 NaN | 执行端收到非法关节命令 | `max_iterations`、停滞检测、有限性断言和不可达目标测试 |
+
+### 9.8 排查记录：阻尼错误注入与实验路径修正
+
+首次奇异性实验工具错误地在不同路径样本之间复用上一个样本的关节状态，导致样本结果相互污染。发现后改为每个样本从同一个 seed 开始，并将实验改为直接沿关节插值路径记录局部 Jacobian 响应，从而确保曲线确实经过预定的近奇异构型。
+
+随后临时把 `adaptiveDamping()` 强制返回 `0.0` 做错误注入。奇异单测按预期变红：`delta_q.norm()` 从应小于 `1e-6` 膨胀到 `2.1815rad`。恢复阻尼实现后，Stage M 的 8 个 gtest、lint 和全仓测试全部通过。
+
+### 9.9 你没问但值得注意的
+
+1. **阻尼零空间不是严格零空间**（E/F 类）：当前实现用 DLS 逆近似 `J#`，阻尼越大，joint centering 对 TCP 主任务的泄漏越明显；需要后续单测量化这个泄漏上界。
+2. **裁剪不是约束优化**（E 类）：当前方法保证 `q` 合法和步长有界，但不保证裁剪后的 `delta_q` 仍是最小二乘意义下的最佳解；QP 对照是明确的 stretch 项。
+3. **奇异性扫线是运动学实验，不是执行实验**（C 类）：曲线记录的是固定精确 `q` 下的 Jacobian，不包含 position servo、重力和 actuator 饱和；Stage N 需要分别记录求解残差和实际末端残差。
+4. **失败状态还可以细分**（C/E 类）：当前区分 `kConverged`、`kMaxIterations` 和 `kStalled`，尚未单独报告“限位阻塞”和“奇异区阻塞”；接入 waypoint 日志后再判断是否需要扩展错误码。
+
+### 9.10 本阶段边界与后续
+
+Stage M 完成了加权 DLS differential IK、奇异性观测、误差/步长裁剪、关节限位投影和零空间 joint centering。它仍是独立的纯运动学层，没有接入 ROS topic、position servo 或 FSM。下一阶段 Stage N 将实现 `DiffIkWaypointSource`，把离线求解出的关节目标接入现有 waypoint 接口，并重新测量执行端稳态误差、settle 时间和放置位置。
