@@ -63,12 +63,11 @@ namespace task_executor
 //    verified end-to-end through kPlace and a full release. kClosedWidthM below
 //    is 0.0, not 0.03, for exactly this reason.
 //
-// PLACE's xy (joint1=0.6ish) lands ~5-7cm short of the visual place_marker
-// geom (0.5, 0.3) for the same gravity-sag reason -- angle (joint1) is preserved
-// almost exactly by the descent, only the *radius* shrinks. task_executor_node's
-// verify.place_x/place_y parameters are set to the empirically-reached point, not
-// the marker's nominal position; see week2.md Stage I for why closing that gap is
-// deferred to week3's IK rather than hand-tuned further.
+// In the legacy joint-space mode, PLACE (joint1=0.62) lands ~5-7cm short of the
+// visual place_marker (0.5, 0.3). These are empirically chosen servo commands,
+// not world-frame task geometry; Stage N showed that applying FK to them already
+// puts the nominal TCP target near (0.434, 0.310), before execution error enters.
+// Stage O's separate Cartesian source now targets the marker directly.
 class KeyframeWaypointSource : public WaypointSource
 {
 public:

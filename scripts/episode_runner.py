@@ -19,6 +19,7 @@ Usage:
 """
 import argparse
 import csv
+import math
 import sys
 from pathlib import Path
 
@@ -48,6 +49,8 @@ DEFAULT_TIMEOUT_S = 120.0
 CSV_FIELDS = [
     'episode', 'seed', 'success', 'failure_code', 'retries', 'total_duration_s',
     'phase_names', 'phase_durations_s', 'final_box_x_m', 'final_box_y_m', 'final_box_z_m',
+    'target_tcp_x_m', 'target_tcp_y_m', 'target_tcp_z_m', 'ik_position_error_m',
+    'joint_tracking_error_rad', 'actual_tcp_position_error_m', 'place_error_m',
 ]
 
 
@@ -101,8 +104,9 @@ class EpisodeRunner(Node):
 
 
 def row_for(index, outcome, pose):
+    diagnostic_fields = CSV_FIELDS[11:]
     if outcome is None:
-        return {
+        row = {
             'episode': index,
             'seed': 0,
             'success': False,
@@ -115,7 +119,9 @@ def row_for(index, outcome, pose):
             'final_box_y_m': pose.pose.position.y if pose else '',
             'final_box_z_m': pose.pose.position.z if pose else '',
         }
-    return {
+        row.update({field: '' for field in diagnostic_fields})
+        return row
+    row = {
         'episode': index,
         # Fixed object pose this week (week2.md Stage I's KeyframeWaypointSource
         # ignores object_pose) -- a constant placeholder column, not a real seed,
@@ -132,6 +138,17 @@ def row_for(index, outcome, pose):
         'final_box_y_m': pose.pose.position.y if pose else '',
         'final_box_z_m': pose.pose.position.z if pose else '',
     }
+    for field in diagnostic_fields[:-1]:
+        row[field] = '|'.join(f'{value:.6f}' for value in getattr(outcome, field))
+    row['place_error_m'] = ''
+    if pose and 'PLACE' in outcome.phase_names:
+        place_index = outcome.phase_names.index('PLACE')
+        target_x = outcome.target_tcp_x_m[place_index]
+        target_y = outcome.target_tcp_y_m[place_index]
+        if math.isfinite(target_x) and math.isfinite(target_y):
+            row['place_error_m'] = math.hypot(
+                pose.pose.position.x - target_x, pose.pose.position.y - target_y)
+    return row
 
 
 def main():

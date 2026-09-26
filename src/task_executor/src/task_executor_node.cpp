@@ -39,6 +39,7 @@
 #include <trajectory_msgs/msg/joint_trajectory.hpp>
 
 #include "task_executor/fsm.hpp"
+#include "task_executor/cartesian_waypoint_source.hpp"
 #include "task_executor/diff_ik_waypoint_source.hpp"
 #include "task_executor/keyframe_waypoint_source.hpp"
 #include "task_executor/phase.hpp"
@@ -94,21 +95,28 @@ public:
     params_.phase_timeout_s = declare_parameter("fsm.phase_timeout_s", 6.0);
     params_.max_retries = declare_parameter("fsm.max_retries", 3);
 
-    // Measured release point under the current position servo. Stage N's IK
-    // preserves this value: solving the kinematic target does not remove the
-    // observed displacement from the marker at (0.5, 0.3).
-    params_.place_x_m = declare_parameter("verify.place_x_m", 0.43);
-    params_.place_y_m = declare_parameter("verify.place_y_m", 0.31);
+    const std::string waypoint_mode = declare_parameter("waypoint_source", "diff_ik");
+    PickPlaceGeometry geometry;
+    geometry.place_x_m = declare_parameter("target.place_x_m", 0.5);
+    geometry.place_y_m = declare_parameter("target.place_y_m", 0.3);
+    geometry.hover_height_m = declare_parameter("target.hover_height_m", 0.15);
+    geometry.place_tcp_above_box_center_m = declare_parameter(
+      "target.place_tcp_above_box_center_m", 0.05);
+    geometry.tool_yaw_rad = declare_parameter("target.tool_yaw_rad", 0.0);
+    // The legacy joint-space baseline still lands near its measured point.
+    const bool legacy = waypoint_mode == "keyframe";
+    params_.place_x_m = declare_parameter("verify.place_x_m", legacy ? 0.43 : 0.5);
+    params_.place_y_m = declare_parameter("verify.place_y_m", legacy ? 0.31 : 0.3);
     params_.place_region_radius_m = declare_parameter("verify.place_region_radius_m", 0.08);
 
-    const std::string waypoint_mode = declare_parameter("waypoint_source", "diff_ik");
     if (waypoint_mode == "diff_ik") {
       const std::string share = ament_index_cpp::get_package_share_directory(
         "franka_description");
       diff_ik_source_ = std::make_unique<DiffIkWaypointSource>(
         arm_kinematics::loadFrankaFerModel(
           share + "/robots/fer/kinematics.yaml",
-          share + "/robots/fer/joint_limits.yaml"));
+          share + "/robots/fer/joint_limits.yaml"),
+        std::make_shared<PickPlaceCartesianWaypointSource>(geometry));
       waypoint_source_ = diff_ik_source_.get();
     } else if (waypoint_mode == "keyframe") {
       waypoint_source_ = &keyframe_source_;
@@ -245,17 +253,31 @@ private:
 
   void requestReset()
   {
+    reset_pending_ = true;
     if (!reset_client_->service_is_ready()) {
-      RCLCPP_WARN(get_logger(), "~/reset not available yet, retry will re-enter HOME unreset");
+      RCLCPP_WARN_ONCE(get_logger(), "~/reset not available yet, waiting for service");
       return;
     }
+    reset_request_sent_ = true;
     auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
     reset_client_->async_send_request(
       request, [this](rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future) {
         const auto response = future.get();
+        reset_request_sent_ = false;
         RCLCPP_INFO(
-          get_logger(), "reset for retry: success=%d message='%s'", response->success,
+          get_logger(), "reset: success=%d message='%s'", response->success,
           response->message.c_str());
+        if (response->success) {
+          // Discard samples queued before the reset, then allow fresh physics and
+          // TF publications before using an observed joint state as an IK seed.
+          latest_joint_state_.reset();
+          latest_object_pose_.reset();
+          left_contact_.reset();
+          right_contact_.reset();
+          reset_ready_after_ = get_clock()->now() + rclcpp::Duration::from_seconds(0.1);
+          phase_start_time_ = get_clock()->now();
+          reset_pending_ = false;
+        }
       });
   }
 
@@ -276,6 +298,12 @@ private:
     last_failure_reason_ = ExitReason::kNone;
     phase_names_log_.clear();
     phase_durations_log_.clear();
+    target_tcp_x_log_.clear();
+    target_tcp_y_log_.clear();
+    target_tcp_z_log_.clear();
+    ik_position_error_log_.clear();
+    joint_tracking_error_log_.clear();
+    actual_tcp_position_error_log_.clear();
     phase_start_time_ = get_clock()->now();
     requestReset();
     RCLCPP_INFO(get_logger(), "episode start requested");
@@ -289,10 +317,25 @@ private:
     outcome.retries = retry_count_;
     outcome.phase_names = phase_names_log_;
     outcome.phase_durations_s = phase_durations_log_;
+    outcome.target_tcp_x_m = target_tcp_x_log_;
+    outcome.target_tcp_y_m = target_tcp_y_log_;
+    outcome.target_tcp_z_m = target_tcp_z_log_;
+    outcome.ik_position_error_m = ik_position_error_log_;
+    outcome.joint_tracking_error_rad = joint_tracking_error_log_;
+    outcome.actual_tcp_position_error_m = actual_tcp_position_error_log_;
     episode_outcome_pub_->publish(outcome);
     RCLCPP_INFO(
       get_logger(), "episode outcome published: success=%d failure_code=%s retries=%u",
       outcome.success, outcome.failure_code.c_str(), outcome.retries);
+    if (latest_object_pose_) {
+      const double dx = latest_object_pose_->pose.position.x - params_.place_x_m;
+      const double dy = latest_object_pose_->pose.position.y - params_.place_y_m;
+      RCLCPP_INFO(
+        get_logger(),
+        "final placement: box_xy=[%.5f %.5f] verify_xy=[%.5f %.5f] error=%.5fm",
+        latest_object_pose_->pose.position.x, latest_object_pose_->pose.position.y,
+        params_.place_x_m, params_.place_y_m, std::hypot(dx, dy));
+    }
   }
 
   void onTimer()
@@ -302,6 +345,15 @@ private:
     }
     if (phase_ == Phase::kDone || phase_ == Phase::kFailed) {
       return;  // Terminal: stop publishing/deciding until the next ~/start_episode.
+    }
+    if (reset_pending_) {
+      if (!reset_request_sent_) {
+        requestReset();
+      }
+      return;
+    }
+    if (get_clock()->now() < reset_ready_after_) {
+      return;
     }
 
     const auto arm = extractArmState();
@@ -328,6 +380,9 @@ private:
     }
     JointTarget target;
     try {
+      if (diff_ik_source_ && latest_object_pose_->header.frame_id != "world") {
+        throw std::invalid_argument("Object pose must be in world frame");
+      }
       target = waypoint_source_->jointTargetFor(phase_, object_pose);
     } catch (const std::exception & e) {
       RCLCPP_ERROR(get_logger(), "phase %s IK_FAILED: %s", phaseName(phase_), e.what());
@@ -339,6 +394,19 @@ private:
       outcome.phase_names.push_back(phaseName(phase_));
       outcome.phase_durations_s = phase_durations_log_;
       outcome.phase_durations_s.push_back((get_clock()->now() - phase_start_time_).seconds());
+      outcome.target_tcp_x_m = target_tcp_x_log_;
+      outcome.target_tcp_y_m = target_tcp_y_log_;
+      outcome.target_tcp_z_m = target_tcp_z_log_;
+      outcome.ik_position_error_m = ik_position_error_log_;
+      outcome.joint_tracking_error_rad = joint_tracking_error_log_;
+      outcome.actual_tcp_position_error_m = actual_tcp_position_error_log_;
+      const double unavailable = std::numeric_limits<double>::quiet_NaN();
+      outcome.target_tcp_x_m.push_back(unavailable);
+      outcome.target_tcp_y_m.push_back(unavailable);
+      outcome.target_tcp_z_m.push_back(unavailable);
+      outcome.ik_position_error_m.push_back(unavailable);
+      outcome.joint_tracking_error_rad.push_back(unavailable);
+      outcome.actual_tcp_position_error_m.push_back(unavailable);
       episode_outcome_pub_->publish(outcome);
       phase_ = Phase::kFailed;
       return;
@@ -417,6 +485,21 @@ private:
 
     phase_names_log_.push_back(phaseName(phase_));
     phase_durations_log_.push_back(in.elapsed_in_phase_s);
+    const double unavailable = std::numeric_limits<double>::quiet_NaN();
+    if (diff_ik_source_ && diff_ik_source_->diagnostics()) {
+      const auto & data = *diff_ik_source_->diagnostics();
+      target_tcp_x_log_.push_back(data.tcp_target.translation().x());
+      target_tcp_y_log_.push_back(data.tcp_target.translation().y());
+      target_tcp_z_log_.push_back(data.tcp_target.translation().z());
+      ik_position_error_log_.push_back(data.ik.position_error);
+    } else {
+      target_tcp_x_log_.push_back(unavailable);
+      target_tcp_y_log_.push_back(unavailable);
+      target_tcp_z_log_.push_back(unavailable);
+      ik_position_error_log_.push_back(unavailable);
+    }
+    joint_tracking_error_log_.push_back(maxAbsError(arm->positions, target.arm_positions));
+    actual_tcp_position_error_log_.push_back(tcp_position_error_m);
     if (decision.next_phase == Phase::kRecover) {
       // The four-shape design (week2.md 10.3.3): a transition INTO kRecover
       // always carries the real failure ExitReason (kTimeout/kSlipped/...), never
@@ -460,12 +543,21 @@ private:
   // this sentinel, see phase.hpp's comment on why there is no dedicated Phase for
   // it instead.
   rclcpp::Time phase_start_time_{0, 0, RCL_ROS_TIME};
+  rclcpp::Time reset_ready_after_{0, 0, RCL_ROS_TIME};
+  bool reset_pending_ = false;
+  bool reset_request_sent_ = false;
   int retry_count_ = 0;
   // Per-episode bookkeeping for ~/episode_outcome (week2.md Stage J), reset in
   // onStartEpisode(): which phases this episode visited, in order, and how long
   // elapsed_in_phase_s was when it left each one.
   std::vector<std::string> phase_names_log_;
   std::vector<double> phase_durations_log_;
+  std::vector<double> target_tcp_x_log_;
+  std::vector<double> target_tcp_y_log_;
+  std::vector<double> target_tcp_z_log_;
+  std::vector<double> ik_position_error_log_;
+  std::vector<double> joint_tracking_error_log_;
+  std::vector<double> actual_tcp_position_error_log_;
   // The most recent real failure classification (kTimeout/kSlipped/...), i.e. the
   // exit_reason of the most recent transition INTO kRecover -- kept separately
   // from ExitReason::kRetryLimitExceeded (kRecover's own exit reason when it gives

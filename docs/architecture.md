@@ -103,7 +103,7 @@ xacro $(ros2 pkg prefix franka_description)/share/franka_description/robots/fer/
 | **`ros2_control` fake system** | 同目录 `initial_positions.yaml` | 0 | −0.785 | 0 | −2.356 | 0 | 1.571 | 0.785 | —— |
 | **URDF** | `fer.urdf.xacro` | 没有这个概念（URDF 不含状态；隐含约定是全零位） | | | | | | | |
 
-**当前权威**：`mujoco_bridge` 的 `~/reset` 用 **MJCF 的 `home`**（`mj_resetDataKeyframe` 按名查 `kResetKeyframeName = "home"`）。
+**当前权威**：`mujoco_bridge` 的 `~/reset` 用 MJCF keyframe。Stage G 后带 box 的默认场景使用 **`pick_place_home`**，由 `reset_keyframe_name` 参数选择；表中 vendor 的 `home` 是仅机械臂模型的历史基准。当前场景的 keyframe 在相同机械臂构型后补足 box 的 7 维 freejoint 位姿。
 
 **已知后果**：第6周接 MoveIt 后，MoveIt 的 `setNamedTarget("ready")` 和我们的 `~/reset` 指向两个不同构型，**不会有任何报错**，只表现为"点了 reset，MoveIt 说当前不在 ready 位姿"。第6周必须显式定权威（倾向对齐 SRDF 的 `ready`，因为它是真机生态的约定俗成），并补一份 ADR。已进第4节待办。
 
@@ -216,7 +216,7 @@ Stage L 已在 [test_model_consistency.cpp](../src/mujoco_bridge/test/test_model
 
 **`grasp_criteria` 库的复用**：`mujoco_bridge` 的 `classifyGrasp()` 拆成独立 CMake 库目标 `mujoco_bridge::grasp_criteria` 并导出（`ament_export_targets`），`task_executor` 直接链接、不重新实现。`task_executor_node` 自己从 `/joint_states` + `mujoco_bridge` 已发布的 `~/ground_truth/*` 话题拼一份 `GraspSignals` 再调这个函数——**没有**新增一个 `GraspOutcome` ROS topic：Stage H 结束时留的悬挂项（"不知道 task_executor 想要整个分类结果还是原始信号"）答案是都不需要，谁掌握阶段信息就该拥有计算权。
 
-**`WaypointSource` 抽象**：`jointTargetFor(Phase, ObjectPose) -> JointTarget` 接口。`KeyframeWaypointSource` 是固定查表并忽略 `object_pose`；Stage N 的默认 `DiffIkWaypointSource` 从实测关节状态作 seed，按阶段调用离线 `solveIk()`，阶段内缓存目标。节点参数 `waypoint_source:=keyframe` 可切回查表；`fsm.cpp` 未修改。节点需要选择源、设置 seed、处理 IK 失败及记录诊断，所以“节点也不需要改”的旧预期并未成立。
+**`WaypointSource` 抽象**：`jointTargetFor(Phase, ObjectPose) -> JointTarget` 接口。`KeyframeWaypointSource` 是固定查表并忽略 `object_pose`；Stage O 的默认 `DiffIkWaypointSource` 从实测关节状态作 seed，消费独立的 `CartesianWaypointSource` 并调用离线 `solveIk()`，阶段内缓存目标。节点参数 `waypoint_source:=keyframe` 可切回查表；`fsm.cpp` 未修改。节点需要选择源、设置 seed、处理 IK 失败及记录诊断，所以“节点也不需要改”的旧预期并未成立。
 
 **手测出来的关节空间 waypoint**（`KeyframeWaypointSource`，单位 rad，顺序 joint1..joint7；`box` 初始位姿见第5节表格）：
 
@@ -240,7 +240,7 @@ Stage L 已在 [test_model_consistency.cpp](../src/mujoco_bridge/test/test_model
 | `close_settle_s` | 2.0s | `kClose` 专用：夹爪是不是刚开始收紧、伺服还没收敛？ |
 | `lift_settle_grace_s` | 2.0s | `kLift` 专用：手臂已到位，box（独立仿真体，靠摩擦耦合）有没有跟上？实测滞后接近 1s |
 
-**验收标准**：`place_x_m`/`place_y_m` 默认 `(0.43, 0.31)`——不是 `pick_place_scene.xml` 里 `place_marker` 几何体的名义位置 `(0.5, 0.3)`，是 `KeyframeWaypointSource` 的 `PLACE` waypoint 实际能送到的位置（重力下垂导致的系统性偏差，见笔记 Stage I 讨论），`place_region_radius_m` 默认 0.08m。已验证一次完整成功 episode（全 11 阶段到 `DONE`）和一次人为制造的必然失败（`place_x_m/y_m` 设为不可达值，`RECOVER` 重试 3 次后正确落到 `FAILED`）。
+**Stage I 的历史验收标准**：`place_x_m`/`place_y_m` 当时默认 `(0.43, 0.31)`——不是 `pick_place_scene.xml` 里 `place_marker` 几何体的名义位置 `(0.5, 0.3)`，是 `KeyframeWaypointSource` 的 `PLACE` waypoint 实际能送到的位置。Stage O 后仅 `waypoint_source:=keyframe` 保留这一默认值；IK 模式默认验证 marker 中心，见第 10 节。`place_region_radius_m` 仍默认 0.08m，Stage O 的严格回归显式设为 0.03m。Stage I 已验证一次完整成功 episode（全 11 阶段到 `DONE`）和一次人为制造的必然失败（`place_x_m/y_m` 设为不可达值，`RECOVER` 重试 3 次后正确落到 `FAILED`）。
 
 - [ ] `close_settle_s`/`lift_settle_grace_s` 是"改到实测通过为止"定的，不是从物理量推出来的；第3周换 diff-IK 后需要重新测（见第4节延伸）
 
@@ -256,7 +256,7 @@ Stage L 已在 [test_model_consistency.cpp](../src/mujoco_bridge/test/test_model
 
 **能力边界**：`solveIk()` 的迭代反馈来自自写运动学模型，不读取 MuJoCo/真机实际状态。它是用 differential IK 实现的离线 full-pose IK 求解器，不是在线 Cartesian servo，也不是 MPC；不能修正重力下垂、actuator 饱和、接触扰动或 position servo 稳态误差。Stage N 先用它生成离散 waypoint，以便把运动学求解和执行控制分层验证。
 
-**Stage O 必做但尚未实现**：Stage N 复盘确认，先由 `KeyframeWaypointSource` 的手调关节目标 FK 反推 Cartesian 目标，会把执行端经验补偿混入任务几何，不能作为最终架构。Stage O 必须新增 message-free 的 `CartesianWaypoint`/`CartesianWaypointSource`，表达 world frame 的 `hand_tcp` 目标和夹爪命令；离线 IK、MoveIt motion planning、在线 Cartesian servo 分别作为适配器消费该契约。当前 `DiffIkWaypointSource` 仍直接引用 `KeyframeWaypointSource`，属于待拆分的过渡实现。Stage O 不提前接入 MoveIt，也不把完整 `JointTrajectory` 执行器混入现有 FSM；随机障碍和规划器集成留到后续 stage。Week 3 在 Stage O 完成并重新通过固定场景回归后才算收周。
+**Stage O 已实现**：Stage N 复盘确认，由手调关节目标 FK 反推 Cartesian 目标会把执行端经验补偿混入任务几何。Stage O 新增 message-free 的 `CartesianWaypoint`/`CartesianWaypointSource`，表达 world-frame `hand_tcp` 目标、阶段和夹爪命令；`PickPlaceCartesianWaypointSource` 直接从任务几何构造目标，`DiffIkWaypointSource` 作为离线 IK 适配器消费它，不再包含 `KeyframeWaypointSource` 或由关节目标求任务 pose。旧 keyframe 模式仍可单独运行。MoveIt 规划、`JointTrajectory` 执行器、随机障碍和在线 Cartesian servo 均不在本阶段。决策见 [ADR 001](adr/001-cartesian-task-waypoints.md)。
 
 ## 9. Stage N 离线 IK waypoint 与执行验证
 
@@ -265,3 +265,13 @@ Stage L 已在 [test_model_consistency.cpp](../src/mujoco_bridge/test/test_model
 阶段日志分别记录 world frame 下 TCP 目标位置/四元数、IK 迭代数、模型内残差、加权 `sigma_min`、实测关节误差及 TF 测得的 TCP 误差。默认场景 20/20 次成功、零重试，最终 box 均值 `(0.43226, 0.30902)m`；向 `+y` 移动 4cm 的场景中 IK 1/1 成功，查表 0/1、三次重试后 `GRASP_EMPTY`。结果见 `results/stage_n_*.csv`；偏移场景在 `stage_n_shifted_scene.xml`。
 
 当前 `close_settle_s=2.0s`、`lift_settle_grace_s=2.0s`、`grasp_position_epsilon_rad=0.3rad` 组合通过 20 次回归，但尚未测最小可行阈值。`GRASP -> CLOSE` 时关节最大误差约 `0.190rad`，实际 TCP 平移误差约 `0.111m`；`PLACE -> OPEN` 时实际 TCP 平移误差约 `0.006m`。以 marker 中心 `(0.5, 0.3)m` 和原有 0.08m 半径验收会通过，但最终 box 约 `(0.4323, 0.3090)m`；半径改为 0.03m 则 `PLACE_MISSED`，三次重试后失败。故默认验收中心仍为实测 `(0.43, 0.31)m`，不能把宽半径成功解释为 marker 中心精确放置。
+
+## 10. Stage O Cartesian 任务目标与离线 IK 适配
+
+`CartesianWaypoint` 含阶段、`world -> hand_tcp` 位姿和夹爪总开口宽度；无 ROS 消息或关节目标。`PickPlaceCartesianWaypointSource` 用物体中心 `(x, y, z)` 产生 `GRASP/CLOSE` TCP 目标，`PREGRASP/LIFT` 高出中心 `0.15m`。抓取侧物体位姿在首次 `PREGRASP` 锁定。放置侧 XY 独立于物体观测，默认为 marker 中心 `(0.5, 0.3)m`；桌面上表面 `z=0.22m`、box 半高 `0.02m`，`PLACE/OPEN` TCP 为放置 box 中心上方 `0.05m`，即 `z=0.29m`，`PREPLACE/RETRACT` 为该中心上方 `0.15m`，即 `z=0.39m`。工具 z 轴朝下，绕 world z 的旋转由独立参数 `target.tool_yaw_rad`（默认 0）指定，抓取与放置保持同一方向；**不再**从目标 `(x,y)` 相对 world 原点的径向角推算 yaw。当前方形 box 不读取其偏航角，也不验证最终箱体姿态。`CLOSE/LIFT/PREPLACE/PLACE` 夹爪命令全闭，其余阶段张开。`HOME` 使用 world 中已知安全位姿 `(0.5545, 0, 0.5211)m`。`target.place_x_m/y_m`、两个高度参数及 `target.tool_yaw_rad` 可覆盖几何值；默认 `verify.place_x_m/y_m` 在 IK 模式为 marker 中心，旧 keyframe 模式仍为实测 `(0.43, 0.31)m`。box 的初始与 reset 位姿来自 MJCF 的 `<body>`/`<keyframe>`，这些 executor 参数不会移动 box。
+
+姿态的精确定义是 `R_world_tcp = Rz(tool_yaw_rad) * R_down`，其中 `R_down` 绕 `(1,1,0)/sqrt(2)` 旋转 π；参数为 0 时 TCP x/y/z 分别指向 world +y/+x/-z。该参数是相对基准姿态绕 world z 的旋转，不是 ZYX Euler yaw。节点仅在构造时读取 `target.*` 和 `verify.*`，无动态更新回调；两组 XY 默认值独立，不会彼此联动，也不会修改 XML marker。旧 keyframe 模式不消费 `target.*`。
+
+固定场景以 **3cm** 验收半径连续 20/20 成功、零重试，最终 box 均值 `(0.49742, 0.29532)m`，距 marker 中心均值 `5.35mm`、最大 `6.07mm`。`PLACE` 模型 IK 残差约 `8µm`、关节跟踪最大绝对误差均值约 `0.00666rad`、实际 TCP 位置误差均值约 `6.82mm`；这些量和最终落点误差分别记录，不能互相代替。box 沿 `+y` 移动 `4cm` 时 IK 1/1 成功、最终放置误差 `5.60mm`；同场景 keyframe 0/1，重试三次后 `GRASP_EMPTY`。固定场景 keyframe 1/1 成功。结果见 `results/stage_o_*.csv`，其中每阶段目标、IK 残差、关节误差和实际 TCP 误差与最终 box 落点同列记录；keyframe 没有 Cartesian 诊断时写 `NaN`，最终 `place_error_m` 留空，不伪造零误差。runner 的 `place_error_m` 相对于记录的 PLACE TCP XY，FSM 成功判据和节点最终落点日志相对于 `verify.*`；本次 IK 实验这两个中心一致。这里的 20 次结果来自移除径向 yaw 后的固定 world-frame yaw 版本；早先径向 yaw 版本的均值 `4.62mm` 不再是当前代码的验收数据。验证证明当前固定场景可工作，不证明随机姿态、碰撞路径或真机精度。
+
+最终 smoke 验证还暴露了 episode reset 竞态：reset 服务虽已成功回复，节点仍可能立即用 reset 前排队的 `/joint_states` 作 HOME 的 IK seed，实测报 `IK seed is outside the joint limits`。现在 executor 在 reset 回执前停止决策，清掉旧 joint/object/contact 样本，并等待 0.1s 仿真时间的新发布；之后才启动 HOME。修复后最终实现重新通过上述 20 次严格回归。若以后改用多线程 executor，reset 回调与 tick 的状态访问需要重新加同步。

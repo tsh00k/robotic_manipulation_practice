@@ -24,6 +24,7 @@ add_executable(task_executor_node
   src/task_executor_node.cpp
   src/phase.cpp
   src/fsm.cpp
+  src/cartesian_waypoint_source.cpp
   src/diff_ik_waypoint_source.cpp
 )
 target_include_directories(task_executor_node PRIVATE
@@ -71,6 +72,7 @@ if(BUILD_TESTING)
 
   ament_add_gtest(test_diff_ik_waypoint_source
     test/test_diff_ik_waypoint_source.cpp
+    src/cartesian_waypoint_source.cpp
     src/diff_ik_waypoint_source.cpp
     src/phase.cpp
   )
@@ -83,6 +85,13 @@ if(BUILD_TESTING)
     KINEMATICS_YAML_PATH="${FRANKA_DESCRIPTION_SHARE_DIR}/robots/fer/kinematics.yaml"
     JOINT_LIMITS_YAML_PATH="${FRANKA_DESCRIPTION_SHARE_DIR}/robots/fer/joint_limits.yaml"
   )
+
+  ament_add_gtest(test_cartesian_waypoint_source
+    test/test_cartesian_waypoint_source.cpp
+    src/cartesian_waypoint_source.cpp
+  )
+  target_include_directories(test_cartesian_waypoint_source PRIVATE include)
+  target_link_libraries(test_cartesian_waypoint_source Eigen3::Eigen)
 
   find_package(ament_lint_auto REQUIRED)
   ament_lint_auto_find_test_dependencies()

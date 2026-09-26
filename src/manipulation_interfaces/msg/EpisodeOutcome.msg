@@ -22,3 +22,12 @@ uint32 retries
 # the FSM left phase_names[i].
 string[] phase_names
 float64[] phase_durations_s
+
+# Parallel to phase_names. NaN means the selected waypoint source does not
+# provide a Cartesian/IK diagnostic (e.g. legacy keyframe mode).
+float64[] target_tcp_x_m
+float64[] target_tcp_y_m
+float64[] target_tcp_z_m
+float64[] ik_position_error_m
+float64[] joint_tracking_error_rad
+float64[] actual_tcp_position_error_m

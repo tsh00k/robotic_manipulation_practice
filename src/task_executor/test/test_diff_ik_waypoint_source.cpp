@@ -16,6 +16,7 @@
 
 #include <array>
 #include <cmath>
+#include <memory>
 
 #include "arm_kinematics/forward_kinematics.hpp"
 #include "task_executor/diff_ik_waypoint_source.hpp"
@@ -28,7 +29,8 @@ namespace
 DiffIkWaypointSource makeSource()
 {
   return DiffIkWaypointSource(
-    arm_kinematics::loadFrankaFerModel(KINEMATICS_YAML_PATH, JOINT_LIMITS_YAML_PATH));
+    arm_kinematics::loadFrankaFerModel(KINEMATICS_YAML_PATH, JOINT_LIMITS_YAML_PATH),
+    std::make_shared<PickPlaceCartesianWaypointSource>());
 }
 
 std::array<double, 7> home()
@@ -75,6 +77,24 @@ TEST(DiffIkWaypointSource, RejectsUnreachableObjectWithoutPublishingACommand)
   source.setSeed(home());
   EXPECT_THROW(
     source.jointTargetFor(Phase::kPregrasp, {5.0, 5.0, 5.0}), std::runtime_error);
+}
+
+TEST(DiffIkWaypointSource, ConsumesInjectedCartesianTaskTarget)
+{
+  PickPlaceGeometry geometry;
+  geometry.place_x_m = 0.48;
+  geometry.place_y_m = 0.28;
+  auto cartesian_source = std::make_shared<PickPlaceCartesianWaypointSource>(geometry);
+  DiffIkWaypointSource source(
+    arm_kinematics::loadFrankaFerModel(KINEMATICS_YAML_PATH, JOINT_LIMITS_YAML_PATH),
+    cartesian_source);
+  source.setSeed(home());
+  const auto target = source.jointTargetFor(Phase::kPlace, {0.5, 0.0, 0.241});
+  ASSERT_TRUE(source.diagnostics());
+  EXPECT_EQ(target.gripper_width_m, 0.0);
+  EXPECT_NEAR(source.diagnostics()->tcp_target.translation().x(), 0.48, 1e-12);
+  EXPECT_NEAR(source.diagnostics()->tcp_target.translation().y(), 0.28, 1e-12);
+  EXPECT_LT(source.diagnostics()->ik.position_error, 1e-4);
 }
 
 }  // namespace

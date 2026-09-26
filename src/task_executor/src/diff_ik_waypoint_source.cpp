@@ -18,40 +18,16 @@
 #include <stdexcept>
 #include <utility>
 
-#include "arm_kinematics/forward_kinematics.hpp"
-
 namespace task_executor
 {
-
-namespace
+DiffIkWaypointSource::DiffIkWaypointSource(
+  arm_kinematics::ArmModel model,
+  std::shared_ptr<const CartesianWaypointSource> cartesian_source)
+: model_(std::move(model)), cartesian_source_(std::move(cartesian_source))
 {
-constexpr double kReferenceBoxX = 0.5;
-constexpr double kReferenceBoxY = 0.0;
-constexpr double kReferenceBoxZ = 0.241;
-
-Phase armReferencePhase(Phase phase)
-{
-  switch (phase) {
-    case Phase::kClose: return Phase::kGrasp;
-    case Phase::kOpen: return Phase::kPlace;
-    case Phase::kVerify:
-    case Phase::kDone:
-    case Phase::kRecover:
-    case Phase::kFailed: return Phase::kRetract;
-    default: return phase;
+  if (!cartesian_source_) {
+    throw std::invalid_argument("Cartesian waypoint source must not be null");
   }
-}
-
-bool followsObject(Phase phase)
-{
-  return phase == Phase::kPregrasp || phase == Phase::kGrasp ||
-         phase == Phase::kClose || phase == Phase::kLift;
-}
-}  // namespace
-
-DiffIkWaypointSource::DiffIkWaypointSource(arm_kinematics::ArmModel model)
-: model_(std::move(model))
-{
 }
 
 void DiffIkWaypointSource::beginEpisode()
@@ -67,24 +43,6 @@ void DiffIkWaypointSource::setSeed(const std::array<double, 7> & positions)
     seed_(static_cast<Eigen::Index>(i)) = positions[i];
   }
   have_seed_ = true;
-}
-
-Eigen::Isometry3d DiffIkWaypointSource::tcpTargetFor(
-  Phase phase, const ObjectPose & object_pose) const
-{
-  const JointTarget reference = reference_.jointTargetFor(armReferencePhase(phase), object_pose);
-  arm_kinematics::JointVector q;
-  for (std::size_t i = 0; i < reference.arm_positions.size(); ++i) {
-    q(static_cast<Eigen::Index>(i)) = reference.arm_positions[i];
-  }
-  Eigen::Isometry3d target = arm_kinematics::fk(model_, q).hand_tcp;
-  if (followsObject(phase)) {
-    const ObjectPose & observed = grasp_object_pose_.value_or(object_pose);
-    target.translation() += Eigen::Vector3d(
-      observed.x - kReferenceBoxX, observed.y - kReferenceBoxY,
-      observed.z - kReferenceBoxZ);
-  }
-  return target;
 }
 
 JointTarget DiffIkWaypointSource::jointTargetFor(
@@ -105,7 +63,12 @@ JointTarget DiffIkWaypointSource::jointTargetFor(
     grasp_object_pose_ = object_pose;
   }
 
-  const Eigen::Isometry3d tcp_target = tcpTargetFor(phase, object_pose);
+  const bool grasp_side = phase == Phase::kPregrasp || phase == Phase::kGrasp ||
+    phase == Phase::kClose || phase == Phase::kLift;
+  const ObjectPose & task_object =
+    grasp_side ? grasp_object_pose_.value_or(object_pose) : object_pose;
+  const CartesianWaypoint waypoint = cartesian_source_->waypointFor(phase, task_object);
+  const Eigen::Isometry3d & tcp_target = waypoint.world_to_hand_tcp;
   const auto result = arm_kinematics::solveIk(model_, seed_, tcp_target);
   if (result.status != arm_kinematics::IkStatus::kConverged) {
     throw std::runtime_error(
@@ -113,7 +76,8 @@ JointTarget DiffIkWaypointSource::jointTargetFor(
             " position_error=" + std::to_string(result.position_error) +
             " orientation_error=" + std::to_string(result.orientation_error));
   }
-  JointTarget target = reference_.jointTargetFor(phase, object_pose);
+  JointTarget target;
+  target.gripper_width_m = waypoint.gripper_width_m;
   for (std::size_t i = 0; i < target.arm_positions.size(); ++i) {
     target.arm_positions[i] = result.q(static_cast<Eigen::Index>(i));
   }
