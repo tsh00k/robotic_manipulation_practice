@@ -283,3 +283,9 @@ Stage L 已在 [test_model_consistency.cpp](../src/mujoco_bridge/test/test_model
 固定场景以 **3cm** 验收半径连续 20/20 成功、零重试，最终 box 均值 `(0.49742, 0.29532)m`，距 marker 中心均值 `5.35mm`、最大 `6.07mm`。`PLACE` 模型 IK 残差约 `8µm`、关节跟踪最大绝对误差均值约 `0.00666rad`、实际 TCP 位置误差均值约 `6.82mm`；这些量和最终落点误差分别记录，不能互相代替。box 沿 `+y` 移动 `4cm` 时 IK 1/1 成功、最终放置误差 `5.60mm`；同场景 keyframe 0/1，重试三次后 `GRASP_EMPTY`。固定场景 keyframe 1/1 成功。结果见 `results/stage_o_*.csv`，其中每阶段目标、IK 残差、关节误差和实际 TCP 误差与最终 box 落点同列记录；keyframe 没有 Cartesian 诊断时写 `NaN`，最终 `place_error_m` 留空，不伪造零误差。runner 的 `place_error_m` 相对于记录的 PLACE TCP XY，FSM 成功判据和节点最终落点日志相对于 `verify.*`；本次 IK 实验这两个中心一致。这里的 20 次结果来自移除径向 yaw 后的固定 world-frame yaw 版本；早先径向 yaw 版本的均值 `4.62mm` 不再是当前代码的验收数据。验证证明当前固定场景可工作，不证明随机姿态、碰撞路径或真机精度。
 
 Stage O 的最终 smoke 曾暴露 episode reset 竞态：reset 服务虽已成功回复，节点仍可能用 reset 前排队的 `/joint_states` 作 HOME IK seed，实测报 `IK seed is outside the joint limits`。当时靠清本地缓存并等待 0.1s 仿真时间缓解，第三层已改成上述 generation 协议；不再把固定等待视为新鲜度证明。若以后改用多线程 executor，reset 回调与 tick 的状态访问需要重新加同步。
+
+## 11. Week 3.5 episode 编排重构前基线
+
+P0 在未修改 `task_executor` 生产代码的情况下冻结了 episode 编排基线。当前 `onTimer()` 在调用 FSM `step()` 前发布当前 phase 的关节/夹爪目标；phase 未变化时继续重发目标，phase 变化时追加一条 telemetry；`DONE`/`FAILED` 后停止决策和发布，下一次 `start_episode` 才重新进入 `HOME`。episode 运行中再次收到 `start_episode` 也会立即清空本地状态、重新 reset 并从 `HOME` 开始；实测在 `CLOSE` 阶段抢占时 generation 从 `1` 增到 `2`。IK 异常直接发布 `IK_FAILED` 且不增加 retry；retry 会重新 reset 并使 generation 从旧值递增。
+
+实测基线为：默认 diff-IK 固定场景 **20/20 成功、0 retry**，最终 box 均值 `(0.497417, 0.295315)m`，放置误差均值 `5.352mm`；keyframe 固定场景 **1/1 成功**；物体沿 `+y` 偏移 `4cm` 时 diff-IK **1/1 成功**，keyframe **0/1** 并在 3 次 retry 后 `GRASP_EMPTY`；不可达放置目标在 `PREPLACE` 返回 `IK_FAILED`；错误验收中心的 retry 实验使 generation `1 → 2` 后以 `PLACE_MISSED` 失败；旧 generation 观测只得到 `OBSERVATION_STALE` 且没有关节命令。详细 CSV、命令和源码行为契约见 [week3.5 P0](../Job_guides/my_study/week3.5.md#10-p0现有行为基线)。

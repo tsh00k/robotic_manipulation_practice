@@ -1,0 +1,290 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "task_executor 重构前后架构",
+    "output": "task_executor_episode_orchestration.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "viewBox": [1380, 1000],
+    "repository": {
+      "url": "git@github.com:tsh00k/robotic_manipulation_practice.git",
+      "link_mode": "local-only",
+      "revision": "3e89528fef363180246e630de05b80ddf92ddb99"
+    },
+    "views": [
+      {
+        "id": "before",
+        "label": "重构前",
+        "focus": ["current-node", "current-loop", "ros-bus"],
+        "note": "onTimer 同时承担通信、准入、决策、发布和记录。"
+      },
+      {
+        "id": "after",
+        "label": "重构后",
+        "focus": ["target-adapter", "episode-controller", "domain-actions"],
+        "note": "ROS 节点翻译输入和执行动作，EpisodeController 负责 episode 编排。"
+      },
+      {
+        "id": "unchanged-core",
+        "label": "继续复用的核心",
+        "focus": ["reusable-core", "arm-kinematics"],
+        "note": "FSM、策略接口、reset 门控和 IK 不因本次整理而改写。"
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "mujoco-bridge",
+      "type": "backend",
+      "label": "mujoco_bridge",
+      "sublabel": "物理仿真 + 观测包",
+      "pos": [40, 70],
+      "size": [230, 76],
+      "tag": "保持不变"
+    },
+    {
+      "id": "ros-bus",
+      "type": "messagebus",
+      "label": "ROS 2 graph",
+      "sublabel": "topics / service / timer",
+      "pos": [510, 70],
+      "size": [250, 76],
+      "tag": "外部契约"
+    },
+    {
+      "id": "current-node",
+      "type": "backend",
+      "label": "TaskExecutorNode",
+      "sublabel": "ROS 通信 + episode 状态",
+      "pos": [60, 280],
+      "size": [270, 82],
+      "tag": "重构前"
+    },
+    {
+      "id": "current-loop",
+      "type": "backend",
+      "label": "onTimer()",
+      "sublabel": "reset · 观测 · IK · FSM · 发布 · retry · telemetry",
+      "pos": [60, 455],
+      "size": [330, 92],
+      "sources": [
+        {
+          "path": "src/task_executor/src/task_executor_node.cpp",
+          "line": 261,
+          "label": "当前控制流程"
+        }
+      ]
+    },
+    {
+      "id": "target-adapter",
+      "type": "backend",
+      "label": "TaskExecutorNode",
+      "sublabel": "ROS 适配层",
+      "pos": [1030, 280],
+      "size": [270, 82],
+      "tag": "重构后"
+    },
+    {
+      "id": "episode-controller",
+      "type": "backend",
+      "label": "EpisodeController",
+      "sublabel": "episode 生命周期与 tick 编排",
+      "pos": [1030, 455],
+      "size": [300, 92],
+      "tag": "新增边界"
+    },
+    {
+      "id": "domain-actions",
+      "type": "backend",
+      "label": "领域输入与动作",
+      "sublabel": "ObservationFrame · TargetCommand · EpisodeResult",
+      "pos": [1030, 640],
+      "size": [330, 88],
+      "tag": "无 ROS message"
+    },
+    {
+      "id": "reusable-core",
+      "type": "backend",
+      "label": "可复用控制核心",
+      "sublabel": "FSM · WaypointSource · ResetGate · Telemetry",
+      "pos": [480, 405],
+      "size": [300, 96],
+      "sources": [
+        {
+          "path": "src/task_executor/include/task_executor/fsm.hpp",
+          "line": 140,
+          "label": "纯 FSM"
+        },
+        {
+          "path": "src/task_executor/include/task_executor/waypoint_source.hpp",
+          "line": 51,
+          "label": "策略接口"
+        },
+        {
+          "path": "src/task_executor/include/task_executor/reset_gate.hpp",
+          "line": 23,
+          "label": "reset 门控"
+        }
+      ],
+      "tag": "继续复用"
+    },
+    {
+      "id": "arm-kinematics",
+      "type": "backend",
+      "label": "arm_kinematics",
+      "sublabel": "FK / Jacobian / 离线 diff-IK",
+      "pos": [500, 625],
+      "size": [260, 78],
+      "tag": "保持不变"
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Before · 当前单体编排",
+      "wraps": ["current-node", "current-loop"],
+      "pad": 28
+    },
+    {
+      "kind": "region",
+      "label": "After · ROS 适配与 episode 控制分离",
+      "wraps": ["target-adapter", "episode-controller", "domain-actions"],
+      "pad": 16
+    },
+    {
+      "kind": "region",
+      "label": "Unchanged · 计算核心",
+      "wraps": ["reusable-core", "arm-kinematics"],
+      "pad": 28
+    }
+  ],
+  "connections": [
+    {
+      "id": "bridge-to-bus",
+      "from": "mujoco-bridge",
+      "to": "ros-bus",
+      "label": "观测 + reset 服务",
+      "variant": "emphasis"
+    },
+    {
+      "id": "bus-to-current",
+      "from": "ros-bus",
+      "to": "current-node",
+      "label": "ROS callbacks",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "current-owns-loop",
+      "from": "current-node",
+      "to": "current-loop",
+      "label": "直接持有并执行",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "current-publishes",
+      "from": "current-node",
+      "to": "ros-bus",
+      "label": "joint / gripper / outcome",
+      "fromSide": "top",
+      "toSide": "left",
+      "variant": "dashed"
+    },
+    {
+      "id": "bus-to-target",
+      "from": "ros-bus",
+      "to": "target-adapter",
+      "label": "同一 ROS 契约",
+      "fromSide": "right",
+      "toSide": "top"
+    },
+    {
+      "id": "adapter-to-controller",
+      "from": "target-adapter",
+      "to": "episode-controller",
+      "label": "start / reset / observation / tick",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [900, 410],
+      "variant": "emphasis"
+    },
+    {
+      "id": "controller-to-domain",
+      "from": "episode-controller",
+      "to": "domain-actions",
+      "label": "返回值动作",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "variant": "emphasis"
+    },
+    {
+      "id": "domain-to-adapter",
+      "from": "domain-actions",
+      "to": "target-adapter",
+      "label": "执行 reset / publish / finish",
+      "fromSide": "bottom",
+      "toSide": "bottom",
+      "route": "orthogonal-v",
+      "via": [[1195, 780], [1365, 780], [1365, 390], [1165, 390]],
+      "labelAt": [1285, 780],
+      "variant": "dashed"
+    },
+    {
+      "id": "adapter-to-bus",
+      "from": "target-adapter",
+      "to": "ros-bus",
+      "label": "ROS outputs",
+      "fromSide": "top",
+      "toSide": "bottom",
+      "route": "orthogonal-v",
+      "via": [[1165, 220], [635, 220]],
+      "labelAt": [900, 220],
+      "variant": "dashed"
+    },
+    {
+      "id": "controller-uses-core",
+      "from": "episode-controller",
+      "to": "reusable-core",
+      "label": "调用 FSM / Strategy / Gate",
+      "fromSide": "left",
+      "toSide": "right"
+    },
+    {
+      "id": "core-to-ik",
+      "from": "reusable-core",
+      "to": "arm-kinematics",
+      "label": "DiffIkWaypointSource",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 35
+    }
+  ],
+  "cards": [
+    {
+      "dot": "rose",
+      "title": "重构前的问题",
+      "items": [
+        "onTimer 同时处理通信、状态、决策和记录",
+        "新增观测来源或执行后端容易继续堆进节点"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "重构后的边界",
+      "items": [
+        "EpisodeController 接收领域输入并返回值动作",
+        "TaskExecutorNode 只负责 ROS 翻译和动作执行"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "保持不变",
+      "items": [
+        "ROS topic、service、参数和 EpisodeOutcome 契约",
+        "FSM、WaypointSource、ResetGate 和 FK/IK 能力"
+      ]
+    }
+  ]
+}
