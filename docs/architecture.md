@@ -218,6 +218,8 @@ Stage L 已在 [test_model_consistency.cpp](../src/mujoco_bridge/test/test_model
 
 **`WaypointSource` 抽象**：`jointTargetFor(Phase, ObjectPose) -> JointTarget` 接口。`KeyframeWaypointSource` 是固定查表并忽略 `object_pose`；Stage O 的默认 `DiffIkWaypointSource` 从实测关节状态作 seed，消费独立的 `CartesianWaypointSource` 并调用离线 `solveIk()`，阶段内缓存目标。节点参数 `waypoint_source:=keyframe` 可切回查表；`fsm.cpp` 未修改。节点需要选择源、设置 seed、处理 IK 失败及记录诊断，所以“节点也不需要改”的旧预期并未成立。
 
+**Stage O 后的第一层职责整理**：`TaskExecutorConfig` 集中声明和校验 `fsm.*`、`grasp.*`、`target.*`、`verify.*` 及 waypoint 模式；`verify.*` 同时映射到 `FsmParams` 的 VERIFY 判据。`ObservationSnapshot` 从 joint name 对齐的关节状态、物体 pose、接触布尔值和 `world -> hand_tcp` TF 组成一次决策输入；缺任何必要观测则等待。`EpisodeTelemetry` 按阶段存一条记录，在发布时转换为原有 `EpisodeOutcome` 并行数组。话题、消息、参数默认值和 keyframe 的历史验收点 `(0.43, 0.31)m` 不变。快照仅保证本次 20 Hz tick 后续使用同一组已读值；各 ROS 话题仍可能来自不同仿真时刻，reset 后的新鲜度协议尚未实现。
+
 **手测出来的关节空间 waypoint**（`KeyframeWaypointSource`，单位 rad，顺序 joint1..joint7；`box` 初始位姿见第5节表格）：
 
 | 阶段 | joint1 | joint2 | joint4 | 其余关节 | 夹爪宽度 (m) |

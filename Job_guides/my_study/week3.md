@@ -29,7 +29,7 @@
   - [2.5 Stage O — Cartesian waypoint 与执行后端解耦（本周必做，持续复盘）](#25-stage-o--cartesian-waypoint-与执行后端解耦本周必做持续复盘)
 - [3. 本周验收标准](#3-本周验收标准)
 - [4. 要回头解锁的 Week 1/2 悬挂项](#4-要回头解锁的-week-12-悬挂项)
-- [5. 开周就该注意的（Claude 提示，尚未讨论）](#5-开周就该注意的claude-提示尚未讨论)
+- [5. 开周提示及处理状态（历史记录）](#5-开周提示及处理状态历史记录)
 - [6. 悬挂问题（本周新增）](#6-悬挂问题本周新增)
   - [6.1 清单](#61-清单)
   - [6.2 反向清单：现在就该做的](#62-反向清单现在就该做的)
@@ -98,6 +98,18 @@
   - [11.6 失败模式与验证手段](#116-失败模式与验证手段)
   - [11.7 排查记录与被推翻的结论](#117-排查记录与被推翻的结论)
   - [11.8 补充核查与后续边界](#118-补充核查与后续边界)
+- [12. 本周总结与第 4 周交接](#12-本周总结与第-4-周交接)
+  - [12.0 本周完成情况](#120-本周完成情况)
+  - [12.1 文档审阅结论](#121-文档审阅结论)
+  - [12.2 第 4 周入口和边界](#122-第-4-周入口和边界)
+- [13. 重构讨论与触发条件](#13-重构讨论与触发条件)
+  - [13.0 现在的判断](#130-现在的判断)
+  - [13.1 现在值得做的局部重构](#131-现在值得做的局部重构)
+    - [13.1.1 第一层：提取配置、观测快照和 episode telemetry](#1311-第一层提取配置观测快照和-episode-telemetry)
+    - [13.1.2 第二层：把任务目标和验收目标变成显式配置](#1312-第二层把任务目标和验收目标变成显式配置)
+    - [13.1.3 第三层：把 reset 后等待改成可证明的新鲜度门控](#1313-第三层把-reset-后等待改成可证明的新鲜度门控)
+  - [13.2 暂时不要做的重构](#132-暂时不要做的重构)
+  - [13.3 何时必须重构](#133-何时必须重构)
 
 ---
 
@@ -208,7 +220,7 @@
 | 2 | MuJoCo 与 MoveIt FK 一致性通过固定样例测试 | 5.3 第2条（week2 推来） | **本周做**（Stage L，且升级成三方对照） |
 | 3 | 日志显示每阶段、目标 frame、末端误差、**最小奇异值**、失败原因 | 5.3 第5条（week2 只做了一半） | **本周补齐**（Stage M 产生该量，Stage N 打进日志） |
 | 4 | 实现 damped least-squares differential IK，记录最小奇异值、关节限位裕量、tracking error | 5.2 第5条 | **本周做**（Stage M + N） |
-| 5 | 固定物体位姿下连续成功 20 次，无非预期碰撞 | 5.3 第4条 | **回归**：week2 已达成，本周换了求目标的方式，必须不退化（Stage N） |
+| 5 | 固定物体位姿下连续成功 20 次，无非预期碰撞 | 5.3 第4条 | **回归**：week2 已达成，本周换了求目标的方式，必须不退化（Stage O） |
 | 6 | 约束 differential IK（速度/位置限制、joint centering、奇异区减速）与"伪逆后裁剪"的路径偏差对照 | 5.4 扩展点1 | **部分**：限制与 centering 做（Stage M），**对照实验列为 stretch** |
 | 7 | 随机物体位姿下的泛化评测 | 2.1 | **推到第4周**（见 [2.0](#20-为什么是五个-stage)） |
 | 8 | Cartesian waypoint 与离线 IK 后端解耦 | 本周新增 Stage O | **本周必须完成**，先完成接口和回归，不接 MoveIt |
@@ -236,9 +248,9 @@
 | [week1 13.1 #2](week1.md#131-清单) timestep = 0.002 凭什么 | **继续挂着**：本周不增加接触复杂度 |
 | [week2 6.1](week2.md#61-清单) `classifyGrasp` 没有"宽度-only"降级判据（标注"现在就可以做"） | **本周不插队**，进本周反向清单。它和 IK 无依赖关系，硬塞进来会打断主线 |
 
-## 5. 开周就该注意的（Claude 提示，尚未讨论）
+## 5. 开周提示及处理状态（历史记录）
 
-按 [STUDY_NOTES_GUIDE.md 第5节](../../STUDY_NOTES_GUIDE.md)，这几条是"你还没问但值得注意的"。**点出来，不自问自答**，等到对应 stage 再展开或决定忽略。
+按 [STUDY_NOTES_GUIDE.md 第5节](../../STUDY_NOTES_GUIDE.md)，这些是开周时主动指出的问题。它们保留在这里作为提问过程记录；已经在 Stage K~O 或后续审阅中回答的内容，以对应 stage 的实测和边界为准。
 
 1. **Jacobian 的三处约定不一致时，没有任何东西会报错**（C 类）— 参考点（TCP / hand / body 质心）、表达 frame（world / body）、6 维向量里线速度和角速度谁在前。MuJoCo（`jacp`/`jacr` 分开两个数组、world frame）、MoveIt（`getJacobian()` 有默认参考点）、自写实现三套默认值大概率不同。**值得在写第一行代码前先把三边约定各自查清写下来**，否则数值对不上时是三选一甚至八选一的排错。
 2. **"三方对照"其实只有两方数据独立**（E/F 类，已核实）— [1.1 #3](#11-开周核对出来的新事实本周才第一次相关)：`fer.urdf.xacro` 直接读 `kinematics.yaml`。所以自写 ↔ MoveIt 的一致**只证明两个实现都没写错，不证明参数对**。值得问的是：**那"参数抄错"这类错误，本周有哪一条测试真的能抓到？** 如果答案是"只有和 MJCF 的对照"，那这个对照对的容差就不能和另一对用同一个数。
@@ -1247,3 +1259,126 @@ R_down = Rotation(pi, normalize([1, 1, 0]))
 当前可测试性已有直接断言：平移不改变工具方向，放置 XY 不依赖抓取物体位置，非零朝向参数独立生效。当前可观测性保留四层误差，但 CSV 未保存物体最终四元数；需要姿态验收时，应先补这一观测，再定义考虑物体对称性的误差判据。
 
 仍可继续追问的实现边界包括 reset 的样本新鲜度和物体到工具相对变换。前者已有明确代码缺口，不是缺少参照系的悬挂题；后者在引入旋转物体或抓取生成时必须成为显式契约。现有 20 次固定回归和单次平移实验不足以替代这些验证，也不据此直接进入下一 stage 或宣告整周收尾。
+
+## 12. 本周总结与第 4 周交接
+
+### 12.0 本周完成情况
+
+Week 3 完成了从模型数学到任务执行的第一条可验证闭环：
+
+1. Stage K 建立纯 C++/Eigen 的 FK、几何 Jacobian 和模型加载库，并用有限差分、MoveIt 与 MuJoCo 交叉核对约定。
+2. Stage L 明确了三方对照的独立性边界、frame/参考点约定和碰撞几何并非完全相同。
+3. Stage M 实现带阻尼、关节限位、joint centering 和奇异性诊断的离线 DLS IK；明确它不是在线 Cartesian servo。
+4. Stage N 将离线 IK 接入原有 FSM，暴露了“从手调 keyframe 反推任务目标”的设计错误和执行端误差层次。
+5. Stage O 把任务几何改成直接输出 world-frame Cartesian waypoint，固定场景在 3cm 验收半径下 20/20 成功，平移 box 的 IK 实验 1/1 成功；旧 keyframe 模式保留为对照，并在偏移场景 0/1 失败，说明它没有泛化能力。
+
+本周最重要的结论不是“20 次成功”，而是把四类误差分开：任务目标、IK 模型残差、关节跟踪/TCP 执行误差、最终物体落点。固定场景中 PLACE 的 IK 残差约 8µm，但实际 TCP 位置误差约 6.82mm，最终 box 落点误差均值约 5.35mm；这证明后续不能继续用调 IK 的方式解决执行器和接触误差。
+
+### 12.1 文档审阅结论
+
+本周文档现在有明确的事实来源和过程记录：`docs/architecture.md` 保存当前模型、frame、参数和实验事实；`docs/adr/001-cartesian-task-waypoints.md` 保存 Cartesian 任务几何的架构决策；本文件保存 Stage K~O 的推导、追问、失败模式和实测过程。Stage N 的旧结论没有被删除，而是明确标为“实验有效、设计验收不完整”，Stage O 作为修正后的收束。
+
+审阅时修正了两处容易误读的地方：20 次回归属于 Stage O 的新目标构造验证；第 5 节的主动提示现在标明是历史记录，不再伪装成尚未回答的问题。仍需在后续周次独立补 ADR 的历史决策包括 vendor `<include>` 约定、GLFW debug viewer 和 episode 边界从进程改为话题触发。
+
+### 12.2 第 4 周入口和边界
+
+第 4 周可以在 Stage O 的 Cartesian 契约上接 RGB-D/视觉估计和随机物体位姿，但必须先决定视觉输出的语义：world-frame 还是 camera-frame、是否带时间戳/置信度、物体四元数是否参与抓取。当前 ground-truth oracle 只能作为仿真验证源，不能伪装成视觉接口。
+
+第 4 周不应默认扩大 Stage O 的职责。MoveIt planner、碰撞规划、在线 Cartesian servo、真实抓取姿态生成和物体朝向验收分别是后续能力，只有触发条件到来时才进入接口重构。
+
+## 13. 重构讨论与触发条件
+
+### 13.0 现在的判断
+
+当前不做大范围重写。Stage O 刚建立 `CartesianWaypointSource -> DiffIkWaypointSource -> JointTarget` 的边界，先让视觉和随机化实验使用它，才能知道哪些字段是真正稳定的契约。过早把接口改成 ROS action、轨迹对象或在线 servo，会把尚未观测到的需求写死。
+
+### 13.1 现在值得做的局部重构
+
+以下改动可以在不改变任务行为的前提下进行，但每项都应伴随纯函数测试或节点契约测试：
+
+| 改动 | 触发理由 | 验收方式 |
+|---|---|---|
+| 从 `TaskExecutorNode` 提取参数解析、观测快照和 episode 日志结构 | 当前节点同时负责 ROS 回调、reset 门控、FSM 驱动、IK 诊断和 CSV 字段拼装，已接近“胶水层过厚” | 提取后 `fsm.cpp` 行为不变；参数默认值快照测试；episode outcome 字段长度一致 |
+| 把 `target.*`、`verify.*` 和 marker 位置集中成显式 `PlacementGoal` 或配置结构 | 两组 XY 当前允许不一致，容易出现“机械臂去 A、FSM 验收 B” | 单测覆盖一致配置、故意不一致配置和启动日志；不改变现有 keyframe 兼容模式 |
+| 把 reset 后的观测新鲜度从固定 `0.1s` 改成带时间/序号的快照条件 | 现有等待只能降低概率，不能证明拿到的是 reset 后样本；随机化和视觉接入会放大该风险 | 给 bridge/观测加 reset generation 或时间戳，测试旧样本不会驱动 HOME/GRASP |
+
+这些是“复杂度已经阻碍测试或造成错误”的重构，不是为了追求更少的行数。建议先做参数/日志提取，再做 reset 新鲜度；`PlacementGoal` 在视觉输出协议确定后一起定型。
+
+#### 13.1.1 第一层：提取配置、观测快照和 episode telemetry
+
+> 启动第一层修改吧
+
+这一层只整理职责，不改变 ROS 接口和任务语义。当前 [`TaskExecutorNode`](../../src/task_executor/src/task_executor_node.cpp) 同时负责参数声明、消息解析、reset 门控、IK 调用、FSM 输入组装和 episode 日志。第一层把它拆成三个数据边界：
+
+| 边界 | 当前混在何处 | 建议抽出的内容 | 不改变的行为 |
+|---|---|---|---|
+| `TaskExecutorConfig` | 构造函数中 `declare_parameter()` 和 `waypoint_mode` 分支 | `FsmParams`、`PickPlaceGeometry`、验收配置和模式；另有集中校验函数 | 参数名、默认值、`diff_ik`/`keyframe` 选择规则 |
+| `ObservationSnapshot` | `onTimer()` 直接读取多个 `latest_*` 成员并拼装 `FsmInputs` | arm、gripper、object pose、接触信号和 `world -> hand_tcp` 的一次 tick 快照 | joint name 映射、world frame 检查、缺数据时等待 |
+| `EpisodeTelemetry` | 多组 `phase_names_log_`、`target_tcp_*`、误差数组 | 一个阶段一个结构体，最后再转换成已有 `EpisodeOutcome` | 消息字段、CSV 字段、阶段顺序和 NaN 语义 |
+
+**配置抽取。** 可以增加 `loadTaskExecutorConfig(rclcpp::Node &)` 和 `validateTaskExecutorConfig()`。前者只做 ROS 参数到结构体的映射，后者是可单测的纯校验：高度和半径必须为有限正数，yaw 不能是 NaN，模式只能是 `diff_ik` 或 `keyframe`。构造函数随后只负责根据配置创建 waypoint source。这样以后新增参数不会继续扩大节点构造函数，也能直接测试默认配置和 keyframe 的兼容默认值。
+
+**观测抽取。** 增加 `collectObservation()`，成功时返回一个完整 `ObservationSnapshot`，缺少任意必要输入时返回空。按 joint name 查找和两个手指宽度检查放进可单测的 `makeObservationSnapshot()`；`world` frame 检查和 TF 查询仍在节点中。`onTimer()` 先取得一份快照，再用它驱动 IK 和 FSM。这只避免同一 tick 的后续代码重复读取可变缓存，**并不保证 arm、box、contact 与 TF 来自同一仿真时刻**；多线程 executor 或随机化场景需要第三层的新鲜度协议。
+
+**episode telemetry 抽取。** 当前正常阶段转换和 IK 失败路径各自手工 push 多组并行数组；新增诊断字段时容易造成数组长度错位。建议使用 `PhaseTelemetry` 保存阶段名、耗时、TCP 目标、IK 残差、关节误差和实际 TCP 误差，节点只调用 `recordPhase()`。`makeEpisodeOutcome()` 在 episode 结束时把结构体展开成现有 ROS message，因此暂时不需要修改 `EpisodeOutcome.msg` 或 `episode_runner.py`。
+
+这一层的验收不是“文件变短”，而是：配置默认值单测通过；joint name 任意排序仍能得到相同快照；缺少输入不会调用 FSM；成功和 IK 失败路径生成的所有并行数组长度一致；固定场景 20/20、keyframe 对照和 CSV 字段保持不变。
+
+**第一层实施与排查记录。** `TaskExecutorConfig`、`ObservationSnapshot`、`EpisodeTelemetry` 已分别落到独立头文件和实现文件；节点保留 ROS 回调、TF 查询、reset 门控、IK/FSM 驱动。配置测试覆盖默认 IK、keyframe 历史验收中心、参数覆盖以及非法几何；观测测试覆盖 joint name 逆序和缺手指/速度数据；telemetry 测试覆盖阶段顺序、字段长度与失败阶段 NaN。第一次实跑的首个 episode 出现 `PLACE_MISSED`、3 次重试，虽然最终 box 与验收中心只差 5.67mm。排查发现 `verify.*` 只写入新建的 `PlacementVerification`，漏写 `FsmParams.place_*`，FSM 实际仍按 `(0, 0)` 验收；日志却从新配置打印 `(0.5, 0.3)`，两者分叉。修复后同时断言两组字段相等，再做实跑回归。这个故障说明结构抽取中的同值复制也是行为契约，不能只比较参数声明的名字和默认值。
+
+最终代码在 `robotics-dev` 环境用 `colcon build --packages-select task_executor --symlink-install` 和 `colcon test --packages-select task_executor` 验证；`colcon test-result --test-result-base build/task_executor/test_results --all --verbose` 报告 **135 tests、0 errors、0 failures、24 skipped**（其中 skipped 为静态检查中未启用的 cppcheck 项）。启动真实 bridge/executor 前 `ps -eo pid,comm` 未发现遗留 bridge；运行时 `/clock` 是 **1 个 publisher**。进程均直接使用 `install/*/lib/*/*_node` 可执行文件，结束后再查无遗留进程。实跑 CSV 保存在 `/tmp`，没有覆盖 Stage O 的基线文件。
+
+| 最终代码验证 | 结果 | 证据 |
+|---|---|---|
+| 固定场景 IK，3cm 验收半径，20 次 | **20/20 成功、0 重试**；平均 episode 6.853s，平均放置误差 5.25mm、最大 5.67mm | `/tmp/first_layer_final_fixed_20.csv` |
+| keyframe 旧模式，1 次 | **1/1 成功、0 重试**；日志中的验收中心仍是 `(0.43, 0.31)m` | `/tmp/first_layer_final_keyframe.csv` |
+| 故意不可达的 `target.place_x_m:=10.0`，1 次 | `0/1`，`IK_FAILED`，失败阶段 `PREPLACE`，其 IK 残差字段为 `nan` | `/tmp/first_layer_final_ik_failed.csv` |
+| CSV 结构 | 三组结果的所有阶段数组长度均等于 `phase_names` 长度；18 个列名及顺序与 `stage_o_fixed_20.csv` 完全相同 | 用 `/usr/bin/python3` 的 `csv` 解析后逐行检查 |
+
+**机制与权衡。** 每次 tick 由节点检查消息是否齐备、查询 TF，再由 `makeObservationSnapshot()` 按 joint name 对齐 7 个关节和 2 个手指。IK 与 FSM 消费同一份快照；配置解析只在构造时进行；阶段退出时追加一条 `PhaseTelemetry`，发布结果时统一展开成 ROS 消息。保留 `EpisodeOutcome` 的并行数组，是为保持 runner 和历史 CSV 契约；内部改成每阶段一个结构体，使新增字段时不必同时维护多组 push。代价是发布时仍需一次转换，并且 `PlacementVerification` 到 `FsmParams` 有一份必须测试的同值映射。
+
+**失败模式与边界。** 配置漏映射会造成日志目标与 FSM 判据不一致，第一次实跑已复现并修复；缺任一必要 joint/手指数据时快照返回空，节点不会调用 FSM；不可达 IK 保留已完成阶段并追加带 NaN 诊断的失败阶段。当前快照没有各话题的时间戳一致性检查，reset 后仍依靠原有 0.1s 等待；这是第三层的范围，不能把第一层的快照称为严格同步观测。
+
+#### 13.1.2 第二层：把任务目标和验收目标变成显式配置
+
+当前 `target.place_x_m/y_m` 控制 IK 的 TCP 目标，`verify.place_x_m/y_m` 控制 FSM 的最终落点圆心。它们默认相同，但允许分别覆盖，因此可以出现“机械臂去 A、FSM 在 B 判成功”。这不是当前实验已经发生的失败，而是配置语义没有被类型表达出来。
+
+第二层不应简单删除 `verify.*`：keyframe 基线的历史落点约为 `(0.43, 0.31)m`，而 IK 任务目标是 marker 中心 `(0.5, 0.3)m`；执行误差实验也可能故意让命令目标和验收目标不同。应该把两者改成不同名字、不同字段：
+
+```text
+PlacementTask       { tcp_target_xy, tcp_target_height, tool_yaw }
+PlacementVerification { box_target_xy, radius }
+```
+
+启动时打印两组值，并在 `diff_ik` 模式下默认检查它们是否一致；若实验确实需要不一致，应增加显式的允许开关，而不是依靠用户记住两组参数的关系。keyframe 模式保留旧默认值和旧行为。
+
+验收需要覆盖四个配置组合：IK 同目标、IK 故意不一致、keyframe 旧默认值、两组显式覆盖。每次 episode 的日志同时打印 task target 和 verification target，避免只看最终成功布尔值。这个重构应在视觉输出协议确定前完成，因为视觉接入后需要明确“观测到的物体、生成的抓取目标、指定的放置目标、最终验收目标”分别是谁负责。
+
+#### 13.1.3 第三层：把 reset 后等待改成可证明的新鲜度门控
+
+当前实现已经有 `reset_pending_`、`reset_request_sent_` 和 reset 后 `0.1s` 等待。它解决了“reset 回调成功后立即使用旧缓存”的已知竞态，但它只能降低风险：清空本地指针不能清空 DDS 队列，TF 仍取 latest，`0.1s` 也不是样本来源证明。
+
+第三层分两步做。第一步先抽出 `ResetGate`，把 begin、服务请求中、reset 成功、等待观测和 ready 状态集中管理；节点的 `onTimer()` 只询问 gate 是否允许决策。第二步在随机化或视觉接入前引入 reset generation 或等价的样本序号：bridge 每次 reset 产生新 generation，joint/object/contact/TF 观测带上时间或 generation，executor 只接受当前 episode 的样本。这样才能测试“reset 前的样本不会驱动 HOME seed、抓取目标或 VERIFY 判据”。
+
+第三层的验收必须包含故意延迟旧消息、连续 reset、retry reset 和正常 episode 四类场景。只看到 20 次成功不能证明时序已经严格同步；应记录被接受的 generation/timestamp，失败时明确报告“没有新鲜观测”，而不是继续等到 phase timeout。
+
+三层的顺序是：先做第一层的数据结构抽取，再做第二层的目标语义整理，最后在随机化和视觉需要时做第三层的 generation 协议。第一层和第二层可以保持现有实验行为；第三层会改变观测契约，必须单独记录 ADR 和回归结果。
+
+### 13.2 暂时不要做的重构
+
+- 不要现在把 `CartesianWaypoint` 改成完整 ROS message。视觉真正接入、需要跨进程传输 frame、时间戳和置信度时再决定 message/action 的字段。
+- 不要现在把 FSM 改成 MoveIt `JointTrajectory` 或在线 Cartesian controller。当前 20Hz 离散目标正是验证任务几何的实验后端，替换它会混淆任务目标和控制执行问题。
+- 不要现在删除 `KeyframeWaypointSource`。它仍是旧行为回归基线；等 Cartesian 后端在固定、平移、旋转和失败恢复场景都有覆盖后再移除，并保留一次历史对照数据。
+- 不要仅因为 `task_executor_node.cpp` 较长就拆成多个 ROS 节点。节点边界应由通信、线程或生命周期需求驱动，而不是按文件长度切分。
+
+### 13.3 何时必须重构
+
+满足下列任一条件时，重构从“可选整理”变成“下一阶段的前置工作”：
+
+1. 视觉输出需要跨节点传递 `frame_id`、时间戳、置信度或观测失败状态；当前 `ObjectPose` 无法表达这些信息。
+2. `target.*` 与 `verify.*` 在随机化实验中出现过一次配置漂移，导致目标和验收中心不一致。
+3. reset 竞态再次导致旧样本进入 IK seed、目标缓存或抓取判据。
+4. 第二个 Cartesian 后端（MoveIt 或在线 servo）接入时，现有接口需要加入后端专属字段；此时应先稳定任务层，再加适配器，不能把后端字段塞进任务 waypoint。
+5. `TaskExecutorNode` 的单元测试需求已经无法通过纯函数提取完成，必须启动 ROS graph 才能验证关键行为；此时增加节点级测试，而不是继续扩大未测试的 glue code。
+
+重构完成的判据是：行为变化有独立实验说明，旧模式仍有可比基线，接口边界有单测，文档和 ADR 同步更新。仅“代码变短”“类更多”不算重构收益。

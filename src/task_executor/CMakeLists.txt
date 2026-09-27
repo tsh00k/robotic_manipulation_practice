@@ -26,6 +26,9 @@ add_executable(task_executor_node
   src/fsm.cpp
   src/cartesian_waypoint_source.cpp
   src/diff_ik_waypoint_source.cpp
+  src/task_executor_config.cpp
+  src/episode_telemetry.cpp
+  src/observation_snapshot.cpp
 )
 target_include_directories(task_executor_node PRIVATE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -92,6 +95,31 @@ if(BUILD_TESTING)
   )
   target_include_directories(test_cartesian_waypoint_source PRIVATE include)
   target_link_libraries(test_cartesian_waypoint_source Eigen3::Eigen)
+
+  ament_add_gtest(test_task_executor_config
+    test/test_task_executor_config.cpp
+    src/task_executor_config.cpp
+  )
+  target_include_directories(test_task_executor_config PRIVATE include)
+  target_link_libraries(test_task_executor_config
+    Eigen3::Eigen mujoco_bridge::grasp_criteria)
+  ament_target_dependencies(test_task_executor_config rclcpp)
+
+  ament_add_gtest(test_episode_telemetry
+    test/test_episode_telemetry.cpp
+    src/episode_telemetry.cpp
+  )
+  target_include_directories(test_episode_telemetry PRIVATE include)
+  ament_target_dependencies(test_episode_telemetry manipulation_interfaces)
+
+  ament_add_gtest(test_observation_snapshot
+    test/test_observation_snapshot.cpp
+    src/observation_snapshot.cpp
+  )
+  target_include_directories(test_observation_snapshot PRIVATE include)
+  target_link_libraries(test_observation_snapshot
+    Eigen3::Eigen mujoco_bridge::grasp_criteria)
+  ament_target_dependencies(test_observation_snapshot sensor_msgs geometry_msgs)
 
   find_package(ament_lint_auto REQUIRED)
   ament_lint_auto_find_test_dependencies()
