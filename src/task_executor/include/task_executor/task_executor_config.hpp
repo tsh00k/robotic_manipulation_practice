@@ -30,17 +30,36 @@ enum class WaypointMode
 
 struct PlacementVerification
 {
-  double x_m = 0.5;
-  double y_m = 0.3;
+  double box_target_x_m = 0.5;
+  double box_target_y_m = 0.3;
   double radius_m = 0.08;
+};
+
+struct PlacementTask
+{
+  double tcp_target_x_m = 0.5;
+  double tcp_target_y_m = 0.3;
+  double hover_height_m = 0.15;
+  double tcp_above_box_center_m = 0.05;
+  double tool_yaw_rad = 0.0;
+
+  PickPlaceGeometry geometry() const;
 };
 
 struct TaskExecutorConfig
 {
+  TaskExecutorConfig()
+  {
+    fsm.place_x_m = verification.box_target_x_m;
+    fsm.place_y_m = verification.box_target_y_m;
+    fsm.place_region_radius_m = verification.radius_m;
+  }
+
   FsmParams fsm;
-  PickPlaceGeometry geometry;
+  PlacementTask task;
   PlacementVerification verification;
   WaypointMode waypoint_mode = WaypointMode::kDiffIk;
+  bool allow_target_mismatch = false;
 };
 
 const char * waypointModeName(WaypointMode mode);

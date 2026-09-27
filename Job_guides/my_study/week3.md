@@ -1341,6 +1341,8 @@ Week 3 完成了从模型数学到任务执行的第一条可验证闭环：
 
 #### 13.1.2 第二层：把任务目标和验收目标变成显式配置
 
+> 开始下一层级的重构
+
 当前 `target.place_x_m/y_m` 控制 IK 的 TCP 目标，`verify.place_x_m/y_m` 控制 FSM 的最终落点圆心。它们默认相同，但允许分别覆盖，因此可以出现“机械臂去 A、FSM 在 B 判成功”。这不是当前实验已经发生的失败，而是配置语义没有被类型表达出来。
 
 第二层不应简单删除 `verify.*`：keyframe 基线的历史落点约为 `(0.43, 0.31)m`，而 IK 任务目标是 marker 中心 `(0.5, 0.3)m`；执行误差实验也可能故意让命令目标和验收目标不同。应该把两者改成不同名字、不同字段：
@@ -1353,6 +1355,24 @@ PlacementVerification { box_target_xy, radius }
 启动时打印两组值，并在 `diff_ik` 模式下默认检查它们是否一致；若实验确实需要不一致，应增加显式的允许开关，而不是依靠用户记住两组参数的关系。keyframe 模式保留旧默认值和旧行为。
 
 验收需要覆盖四个配置组合：IK 同目标、IK 故意不一致、keyframe 旧默认值、两组显式覆盖。每次 episode 的日志同时打印 task target 和 verification target，避免只看最终成功布尔值。这个重构应在视觉输出协议确定前完成，因为视觉接入后需要明确“观测到的物体、生成的抓取目标、指定的放置目标、最终验收目标”分别是谁负责。
+
+**实施机制。** `PlacementTask` 持有 TCP 目标 XY、高度和工具旋转，在创建 `PickPlaceCartesianWaypointSource` 时转换为旧 `PickPlaceGeometry`；`PlacementVerification` 持有 box 目标圆心与半径，加载时映射到 `FsmParams`。`diff_ik` 模式若两组 XY 不同，默认抛出配置错误；只有显式设置 `verify.allow_target_mismatch:=true` 才允许故意不一致。`keyframe` 不消费 Cartesian 任务目标，因此保留默认 `(0.43, 0.31)m`，无需这个开关。参数和 CSV 列未改；节点在启动和每次 episode 开始时同时打印两组目标。决策见 [ADR 002](../../docs/adr/002-placement-target-verification-contract.md)。
+
+**权衡与失败模式。** 保留两组目标可继续做 keyframe 对照和故意不一致实验，但多了一个显式允许参数。只检查 XY 是当前固定朝下、无物体姿态验收的任务约定；不意味着一般物体的 TCP 与 box 目标一定同点。漏设开关时 IK 节点启动即失败，比跑完才报 `PLACE_MISSED` 更易定位；误开开关时日志会同时暴露两组值，但仍需实验者核对目标语义。`FsmParams` 仍需从 `PlacementVerification` 拷贝三个验收字段，加载测试对这三项做断言，防止第一层的漏映射回归。
+
+**实测结果。** 在无遗留 bridge 的环境启动安装目录中的真实可执行文件，运行时 `/clock` 有 1 个 publisher。最终代码执行 `colcon build --packages-select task_executor --symlink-install`、`colcon test --packages-select task_executor`，测试汇总为 **139 tests、0 errors、0 failures、24 skipped**；结束后无遗留 bridge/executor 进程。CSV 存在 `/tmp`，没有覆盖既有基线。
+
+| 配置 | 实跑 | 目标与验收日志 / 结果 |
+|---|---|---|
+| 默认 IK，`verify.place_region_radius_m:=0.03` | 固定场景 **20/20 成功、零重试** | 任务 TCP XY 与 box 验收中心均为 `(0.50, 0.30)m`；`/tmp/second_layer_final_fixed_20.csv` 的平均 `place_error_m` 为 5.22mm |
+| keyframe 默认值 | **1/1 成功、零重试** | 验收中心仍是 `(0.43, 0.31)m`；`/tmp/second_layer_final_keyframe.csv` 的 `place_error_m` 仍为空，因为 keyframe 不产生 TCP 目标 |
+| 两组显式覆盖到 `(0.51, 0.30)m` | **1/1 成功、零重试** | 任务 TCP 与验收中心都改变；`/tmp/second_layer_final_matching_override.csv` 的放置误差为 5.43mm |
+| 任务 `(0.50, 0.30)m`、验收 `(0.51, 0.30)m`，显式允许 | **1/1 成功、零重试** | 启动和 episode 日志同时打印两组值；`/tmp/second_layer_final_allowed_mismatch.csv` 相对任务 TCP 的放置误差为 5.22mm，而节点日志相对验收圆心的误差为 13.39mm |
+| 同上但未设置允许参数 | 启动拒绝，退出码 **1** | `Startup failed: IK task and verification XY differ; set verify.allow_target_mismatch:=true for an intentional mismatch`；`/tmp/second_layer_rejected.log` |
+
+四个实际运行结果的 18 个 CSV 列名和顺序均与 `stage_o_fixed_20.csv` 相同，每行所有诊断数组长度都等于 `phase_names` 长度。`place_error_m` 是 runner 按 `PLACE` 阶段的任务 TCP XY 计算的，**不是 FSM 相对 `verify.*` 的验收误差**。因此故意不一致实验不能只看 CSV 的这一列；要同时看节点日志中的 `verify_box_xy` 与 `final placement`。
+
+**排查记录。** 第一轮启动拒绝测试确实检查出不一致配置，但旧 `main()` 对构造异常未捕获，进程以 `Aborted`（退出码 134）结束。该错误如今是一个预期配置路径，因此在构造节点时捕获异常、打印 FATAL 原因并以退出码 1 结束；后续异常不被误标为启动错误。第一次 CSV 校验脚本又把 keyframe 的空 `place_error_m` 当浮点数解析而报错；按字段可用性重做统计后四组结果全部通过，这个空值本身是旧 CSV 语义，并非执行失败。
 
 #### 13.1.3 第三层：把 reset 后等待改成可证明的新鲜度门控
 

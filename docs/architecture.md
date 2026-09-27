@@ -220,6 +220,8 @@ Stage L 已在 [test_model_consistency.cpp](../src/mujoco_bridge/test/test_model
 
 **Stage O 后的第一层职责整理**：`TaskExecutorConfig` 集中声明和校验 `fsm.*`、`grasp.*`、`target.*`、`verify.*` 及 waypoint 模式；`verify.*` 同时映射到 `FsmParams` 的 VERIFY 判据。`ObservationSnapshot` 从 joint name 对齐的关节状态、物体 pose、接触布尔值和 `world -> hand_tcp` TF 组成一次决策输入；缺任何必要观测则等待。`EpisodeTelemetry` 按阶段存一条记录，在发布时转换为原有 `EpisodeOutcome` 并行数组。话题、消息、参数默认值和 keyframe 的历史验收点 `(0.43, 0.31)m` 不变。快照仅保证本次 20 Hz tick 后续使用同一组已读值；各 ROS 话题仍可能来自不同仿真时刻，reset 后的新鲜度协议尚未实现。
 
+**第二层目标配置**：`TaskExecutorConfig.task`（`PlacementTask`）表达 world-frame TCP 放置目标 XY、高度与工具旋转；`TaskExecutorConfig.verification`（`PlacementVerification`）表达 box 落点验收圆心和半径。`target.*` 与 `verify.*` 的参数名和默认值保持不变。`diff_ik` 模式启动时默认要求两组 XY 相等；故意不一致的实验必须显式设置 `verify.allow_target_mismatch:=true`，否则配置加载抛错。`keyframe` 不消费任务 Cartesian 目标，继续使用历史验收中心 `(0.43, 0.31)m`，免除此检查。启动和每个 episode 的日志均打印两组 XY；CSV 契约不变。决策见 [ADR 002](adr/002-placement-target-verification-contract.md)。
+
 **手测出来的关节空间 waypoint**（`KeyframeWaypointSource`，单位 rad，顺序 joint1..joint7；`box` 初始位姿见第5节表格）：
 
 | 阶段 | joint1 | joint2 | joint4 | 其余关节 | 夹爪宽度 (m) |
@@ -272,7 +274,7 @@ Stage L 已在 [test_model_consistency.cpp](../src/mujoco_bridge/test/test_model
 
 `CartesianWaypoint` 含阶段、`world -> hand_tcp` 位姿和夹爪总开口宽度；无 ROS 消息或关节目标。`PickPlaceCartesianWaypointSource` 用物体中心 `(x, y, z)` 产生 `GRASP/CLOSE` TCP 目标，`PREGRASP/LIFT` 高出中心 `0.15m`。抓取侧物体位姿在首次 `PREGRASP` 锁定。放置侧 XY 独立于物体观测，默认为 marker 中心 `(0.5, 0.3)m`；桌面上表面 `z=0.22m`、box 半高 `0.02m`，`PLACE/OPEN` TCP 为放置 box 中心上方 `0.05m`，即 `z=0.29m`，`PREPLACE/RETRACT` 为该中心上方 `0.15m`，即 `z=0.39m`。工具 z 轴朝下，绕 world z 的旋转由独立参数 `target.tool_yaw_rad`（默认 0）指定，抓取与放置保持同一方向；**不再**从目标 `(x,y)` 相对 world 原点的径向角推算 yaw。当前方形 box 不读取其偏航角，也不验证最终箱体姿态。`CLOSE/LIFT/PREPLACE/PLACE` 夹爪命令全闭，其余阶段张开。`HOME` 使用 world 中已知安全位姿 `(0.5545, 0, 0.5211)m`。`target.place_x_m/y_m`、两个高度参数及 `target.tool_yaw_rad` 可覆盖几何值；默认 `verify.place_x_m/y_m` 在 IK 模式为 marker 中心，旧 keyframe 模式仍为实测 `(0.43, 0.31)m`。box 的初始与 reset 位姿来自 MJCF 的 `<body>`/`<keyframe>`，这些 executor 参数不会移动 box。
 
-姿态的精确定义是 `R_world_tcp = Rz(tool_yaw_rad) * R_down`，其中 `R_down` 绕 `(1,1,0)/sqrt(2)` 旋转 π；参数为 0 时 TCP x/y/z 分别指向 world +y/+x/-z。该参数是相对基准姿态绕 world z 的旋转，不是 ZYX Euler yaw。节点仅在构造时读取 `target.*` 和 `verify.*`，无动态更新回调；两组 XY 默认值独立，不会彼此联动，也不会修改 XML marker。旧 keyframe 模式不消费 `target.*`。
+姿态的精确定义是 `R_world_tcp = Rz(tool_yaw_rad) * R_down`，其中 `R_down` 绕 `(1,1,0)/sqrt(2)` 旋转 π；参数为 0 时 TCP x/y/z 分别指向 world +y/+x/-z。该参数是相对基准姿态绕 world z 的旋转，不是 ZYX Euler yaw。节点仅在构造时读取 `target.*` 和 `verify.*`，无动态更新回调；两组 XY 默认值独立，不会彼此联动，也不会修改 XML marker。IK 模式下的覆盖值若不同，必须显式允许。旧 keyframe 模式不消费 `target.*`。
 
 固定场景以 **3cm** 验收半径连续 20/20 成功、零重试，最终 box 均值 `(0.49742, 0.29532)m`，距 marker 中心均值 `5.35mm`、最大 `6.07mm`。`PLACE` 模型 IK 残差约 `8µm`、关节跟踪最大绝对误差均值约 `0.00666rad`、实际 TCP 位置误差均值约 `6.82mm`；这些量和最终落点误差分别记录，不能互相代替。box 沿 `+y` 移动 `4cm` 时 IK 1/1 成功、最终放置误差 `5.60mm`；同场景 keyframe 0/1，重试三次后 `GRASP_EMPTY`。固定场景 keyframe 1/1 成功。结果见 `results/stage_o_*.csv`，其中每阶段目标、IK 残差、关节误差和实际 TCP 误差与最终 box 落点同列记录；keyframe 没有 Cartesian 诊断时写 `NaN`，最终 `place_error_m` 留空，不伪造零误差。runner 的 `place_error_m` 相对于记录的 PLACE TCP XY，FSM 成功判据和节点最终落点日志相对于 `verify.*`；本次 IK 实验这两个中心一致。这里的 20 次结果来自移除径向 yaw 后的固定 world-frame yaw 版本；早先径向 yaw 版本的均值 `4.62mm` 不再是当前代码的验收数据。验证证明当前固定场景可工作，不证明随机姿态、碰撞路径或真机精度。
 

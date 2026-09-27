@@ -37,7 +37,7 @@ TEST(TaskExecutorConfig, DefaultsAreValid)
 TEST(TaskExecutorConfig, RejectsInvalidGeometry)
 {
   TaskExecutorConfig config;
-  config.geometry.tool_yaw_rad = std::numeric_limits<double>::quiet_NaN();
+  config.task.tool_yaw_rad = std::numeric_limits<double>::quiet_NaN();
   EXPECT_THROW(validateTaskExecutorConfig(config), std::invalid_argument);
 
   config = TaskExecutorConfig{};
@@ -49,6 +49,13 @@ TEST(TaskExecutorConfig, RejectsInvalidFsm)
 {
   TaskExecutorConfig config;
   config.fsm.max_retries = -1;
+  EXPECT_THROW(validateTaskExecutorConfig(config), std::invalid_argument);
+}
+
+TEST(TaskExecutorConfig, RejectsUnmappedVerificationCriterion)
+{
+  TaskExecutorConfig config;
+  config.verification.box_target_x_m = 0.6;
   EXPECT_THROW(validateTaskExecutorConfig(config), std::invalid_argument);
 }
 
@@ -64,10 +71,12 @@ TEST_F(LoadedTaskExecutorConfig, PreservesModeDefaultsAndOverrides)
   auto default_node = std::make_shared<rclcpp::Node>("config_default_test");
   const auto defaults = loadTaskExecutorConfig(*default_node);
   EXPECT_EQ(defaults.waypoint_mode, WaypointMode::kDiffIk);
-  EXPECT_DOUBLE_EQ(defaults.verification.x_m, 0.5);
-  EXPECT_DOUBLE_EQ(defaults.verification.y_m, 0.3);
-  EXPECT_DOUBLE_EQ(defaults.fsm.place_x_m, defaults.verification.x_m);
-  EXPECT_DOUBLE_EQ(defaults.fsm.place_y_m, defaults.verification.y_m);
+  EXPECT_DOUBLE_EQ(defaults.task.tcp_target_x_m, 0.5);
+  EXPECT_DOUBLE_EQ(defaults.task.tcp_target_y_m, 0.3);
+  EXPECT_DOUBLE_EQ(defaults.verification.box_target_x_m, 0.5);
+  EXPECT_DOUBLE_EQ(defaults.verification.box_target_y_m, 0.3);
+  EXPECT_DOUBLE_EQ(defaults.fsm.place_x_m, defaults.verification.box_target_x_m);
+  EXPECT_DOUBLE_EQ(defaults.fsm.place_y_m, defaults.verification.box_target_y_m);
   EXPECT_DOUBLE_EQ(defaults.fsm.place_region_radius_m, defaults.verification.radius_m);
   EXPECT_DOUBLE_EQ(defaults.fsm.close_settle_s, 2.0);
 
@@ -80,13 +89,52 @@ TEST_F(LoadedTaskExecutorConfig, PreservesModeDefaultsAndOverrides)
   auto legacy_node = std::make_shared<rclcpp::Node>("config_legacy_test", options);
   const auto legacy = loadTaskExecutorConfig(*legacy_node);
   EXPECT_EQ(legacy.waypoint_mode, WaypointMode::kKeyframe);
-  EXPECT_DOUBLE_EQ(legacy.geometry.place_x_m, 0.6);
-  EXPECT_DOUBLE_EQ(legacy.verification.x_m, 0.43);
-  EXPECT_DOUBLE_EQ(legacy.verification.y_m, 0.31);
+  EXPECT_DOUBLE_EQ(legacy.task.tcp_target_x_m, 0.6);
+  EXPECT_DOUBLE_EQ(legacy.verification.box_target_x_m, 0.43);
+  EXPECT_DOUBLE_EQ(legacy.verification.box_target_y_m, 0.31);
   EXPECT_DOUBLE_EQ(legacy.verification.radius_m, 0.03);
-  EXPECT_DOUBLE_EQ(legacy.fsm.place_x_m, legacy.verification.x_m);
-  EXPECT_DOUBLE_EQ(legacy.fsm.place_y_m, legacy.verification.y_m);
+  EXPECT_DOUBLE_EQ(legacy.fsm.place_x_m, legacy.verification.box_target_x_m);
+  EXPECT_DOUBLE_EQ(legacy.fsm.place_y_m, legacy.verification.box_target_y_m);
   EXPECT_DOUBLE_EQ(legacy.fsm.place_region_radius_m, legacy.verification.radius_m);
+}
+
+TEST_F(LoadedTaskExecutorConfig, RejectsUnapprovedIkMismatch)
+{
+  rclcpp::NodeOptions options;
+  options.parameter_overrides(
+    {rclcpp::Parameter("target.place_x_m", 0.6)});
+  auto node = std::make_shared<rclcpp::Node>("config_mismatch_test", options);
+  EXPECT_THROW(loadTaskExecutorConfig(*node), std::invalid_argument);
+}
+
+TEST_F(LoadedTaskExecutorConfig, AcceptsIntentionalIkMismatch)
+{
+  rclcpp::NodeOptions options;
+  options.parameter_overrides(
+    {rclcpp::Parameter("target.place_x_m", 0.6),
+      rclcpp::Parameter("verify.allow_target_mismatch", true)});
+  auto node = std::make_shared<rclcpp::Node>("config_experiment_test", options);
+  const auto config = loadTaskExecutorConfig(*node);
+  EXPECT_TRUE(config.allow_target_mismatch);
+  EXPECT_DOUBLE_EQ(config.task.geometry().place_x_m, 0.6);
+  EXPECT_DOUBLE_EQ(config.verification.box_target_x_m, 0.5);
+  EXPECT_DOUBLE_EQ(config.fsm.place_x_m, 0.5);
+}
+
+TEST_F(LoadedTaskExecutorConfig, PreservesExplicitMatchingOverrides)
+{
+  rclcpp::NodeOptions options;
+  options.parameter_overrides(
+    {rclcpp::Parameter("target.place_x_m", 0.6),
+      rclcpp::Parameter("target.place_y_m", 0.2),
+      rclcpp::Parameter("verify.place_x_m", 0.6),
+      rclcpp::Parameter("verify.place_y_m", 0.2)});
+  auto node = std::make_shared<rclcpp::Node>("config_matching_test", options);
+  const auto config = loadTaskExecutorConfig(*node);
+  EXPECT_DOUBLE_EQ(config.task.geometry().place_x_m, 0.6);
+  EXPECT_DOUBLE_EQ(config.task.geometry().place_y_m, 0.2);
+  EXPECT_DOUBLE_EQ(config.fsm.place_x_m, 0.6);
+  EXPECT_DOUBLE_EQ(config.fsm.place_y_m, 0.2);
 }
 
 }  // namespace

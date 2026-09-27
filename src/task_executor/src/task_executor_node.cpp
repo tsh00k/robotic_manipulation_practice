@@ -77,7 +77,7 @@ public:
         arm_kinematics::loadFrankaFerModel(
           share + "/robots/fer/kinematics.yaml",
           share + "/robots/fer/joint_limits.yaml"),
-        std::make_shared<PickPlaceCartesianWaypointSource>(config_.geometry));
+        std::make_shared<PickPlaceCartesianWaypointSource>(config_.task.geometry()));
       waypoint_source_ = diff_ik_source_.get();
     } else if (config_.waypoint_mode == WaypointMode::kKeyframe) {
       waypoint_source_ = &keyframe_source_;
@@ -85,6 +85,13 @@ public:
       throw std::invalid_argument("waypoint_source must be diff_ik or keyframe");
     }
     RCLCPP_INFO(get_logger(), "waypoint source: %s", waypointModeName(config_.waypoint_mode));
+    RCLCPP_INFO(
+      get_logger(),
+      "placement configuration: task_tcp_xy=[%.5f %.5f] verify_box_xy=[%.5f %.5f] "
+      "verify_radius=%.5fm allow_target_mismatch=%d",
+      config_.task.tcp_target_x_m, config_.task.tcp_target_y_m,
+      config_.verification.box_target_x_m, config_.verification.box_target_y_m,
+      config_.verification.radius_m, config_.allow_target_mismatch);
 
     joint_command_pub_ = create_publisher<trajectory_msgs::msg::JointTrajectory>(
       "/mujoco_bridge/joint_command", rclcpp::QoS(10));
@@ -231,6 +238,10 @@ private:
     telemetry_.clear();
     phase_start_time_ = get_clock()->now();
     requestReset();
+    RCLCPP_INFO(
+      get_logger(), "episode placement: task_tcp_xy=[%.5f %.5f] verify_box_xy=[%.5f %.5f]",
+      config_.task.tcp_target_x_m, config_.task.tcp_target_y_m,
+      config_.verification.box_target_x_m, config_.verification.box_target_y_m);
     RCLCPP_INFO(get_logger(), "episode start requested");
   }
 
@@ -246,13 +257,16 @@ private:
       get_logger(), "episode outcome published: success=%d failure_code=%s retries=%u",
       outcome.success, outcome.failure_code.c_str(), outcome.retries);
     if (latest_object_pose_) {
-      const double dx = latest_object_pose_->pose.position.x - config_.verification.x_m;
-      const double dy = latest_object_pose_->pose.position.y - config_.verification.y_m;
+      const double dx = latest_object_pose_->pose.position.x -
+        config_.verification.box_target_x_m;
+      const double dy = latest_object_pose_->pose.position.y -
+        config_.verification.box_target_y_m;
       RCLCPP_INFO(
         get_logger(),
         "final placement: box_xy=[%.5f %.5f] verify_xy=[%.5f %.5f] error=%.5fm",
         latest_object_pose_->pose.position.x, latest_object_pose_->pose.position.y,
-        config_.verification.x_m, config_.verification.y_m, std::hypot(dx, dy));
+        config_.verification.box_target_x_m, config_.verification.box_target_y_m,
+        std::hypot(dx, dy));
     }
   }
 
@@ -464,7 +478,15 @@ private:
 int main(int argc, char ** argv)
 {
   rclcpp::init(argc, argv);
-  rclcpp::spin(std::make_shared<task_executor::TaskExecutorNode>());
+  std::shared_ptr<task_executor::TaskExecutorNode> node;
+  try {
+    node = std::make_shared<task_executor::TaskExecutorNode>();
+  } catch (const std::exception & e) {
+    RCLCPP_FATAL(rclcpp::get_logger("task_executor"), "Startup failed: %s", e.what());
+    rclcpp::shutdown();
+    return 1;
+  }
+  rclcpp::spin(node);
   rclcpp::shutdown();
   return 0;
 }

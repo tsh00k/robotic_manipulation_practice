@@ -25,6 +25,17 @@ const char * waypointModeName(WaypointMode mode)
   return mode == WaypointMode::kDiffIk ? "diff_ik" : "keyframe";
 }
 
+PickPlaceGeometry PlacementTask::geometry() const
+{
+  PickPlaceGeometry result;
+  result.place_x_m = tcp_target_x_m;
+  result.place_y_m = tcp_target_y_m;
+  result.hover_height_m = hover_height_m;
+  result.place_tcp_above_box_center_m = tcp_above_box_center_m;
+  result.tool_yaw_rad = tool_yaw_rad;
+  return result;
+}
+
 TaskExecutorConfig loadTaskExecutorConfig(rclcpp::Node & node)
 {
   TaskExecutorConfig config{};
@@ -47,18 +58,21 @@ TaskExecutorConfig loadTaskExecutorConfig(rclcpp::Node & node)
   config.fsm.max_retries = node.declare_parameter("fsm.max_retries", 3);
 
   const std::string mode = node.declare_parameter("waypoint_source", "diff_ik");
-  config.geometry.place_x_m = node.declare_parameter("target.place_x_m", 0.5);
-  config.geometry.place_y_m = node.declare_parameter("target.place_y_m", 0.3);
-  config.geometry.hover_height_m = node.declare_parameter("target.hover_height_m", 0.15);
-  config.geometry.place_tcp_above_box_center_m = node.declare_parameter(
+  config.task.tcp_target_x_m = node.declare_parameter("target.place_x_m", 0.5);
+  config.task.tcp_target_y_m = node.declare_parameter("target.place_y_m", 0.3);
+  config.task.hover_height_m = node.declare_parameter("target.hover_height_m", 0.15);
+  config.task.tcp_above_box_center_m = node.declare_parameter(
     "target.place_tcp_above_box_center_m", 0.05);
-  config.geometry.tool_yaw_rad = node.declare_parameter("target.tool_yaw_rad", 0.0);
+  config.task.tool_yaw_rad = node.declare_parameter("target.tool_yaw_rad", 0.0);
   const bool legacy = mode == "keyframe";
-  config.verification.x_m = node.declare_parameter("verify.place_x_m", legacy ? 0.43 : 0.5);
-  config.verification.y_m = node.declare_parameter("verify.place_y_m", legacy ? 0.31 : 0.3);
+  config.verification.box_target_x_m = node.declare_parameter(
+    "verify.place_x_m", legacy ? 0.43 : 0.5);
+  config.verification.box_target_y_m = node.declare_parameter(
+    "verify.place_y_m", legacy ? 0.31 : 0.3);
   config.verification.radius_m = node.declare_parameter("verify.place_region_radius_m", 0.08);
-  config.fsm.place_x_m = config.verification.x_m;
-  config.fsm.place_y_m = config.verification.y_m;
+  config.allow_target_mismatch = node.declare_parameter("verify.allow_target_mismatch", false);
+  config.fsm.place_x_m = config.verification.box_target_x_m;
+  config.fsm.place_y_m = config.verification.box_target_y_m;
   config.fsm.place_region_radius_m = config.verification.radius_m;
   if (mode == "diff_ik") {
     config.waypoint_mode = WaypointMode::kDiffIk;
@@ -74,22 +88,36 @@ TaskExecutorConfig loadTaskExecutorConfig(rclcpp::Node & node)
 void validateTaskExecutorConfig(const TaskExecutorConfig & config)
 {
   const auto finite = [](double value) {return std::isfinite(value);};
-  if (!finite(config.geometry.place_x_m) || !finite(config.geometry.place_y_m) ||
-    !finite(config.geometry.hover_height_m) ||
-    !finite(config.geometry.place_tcp_above_box_center_m) ||
-    !finite(config.geometry.tool_yaw_rad) || !finite(config.verification.x_m) ||
-    !finite(config.verification.y_m) || !finite(config.verification.radius_m))
+  if (!finite(config.task.tcp_target_x_m) || !finite(config.task.tcp_target_y_m) ||
+    !finite(config.task.hover_height_m) ||
+    !finite(config.task.tcp_above_box_center_m) ||
+    !finite(config.task.tool_yaw_rad) || !finite(config.verification.box_target_x_m) ||
+    !finite(config.verification.box_target_y_m) || !finite(config.verification.radius_m))
   {
     throw std::invalid_argument("Task executor geometry contains a non-finite value");
   }
-  if (config.geometry.hover_height_m <= 0.0 ||
-    config.geometry.place_tcp_above_box_center_m <= 0.0 ||
+  if (config.task.hover_height_m <= 0.0 ||
+    config.task.tcp_above_box_center_m <= 0.0 ||
     config.verification.radius_m <= 0.0)
   {
     throw std::invalid_argument("Task executor geometry contains a non-positive distance");
   }
   if (config.fsm.max_retries < 0 || config.fsm.phase_timeout_s <= 0.0) {
     throw std::invalid_argument("Task executor FSM configuration is invalid");
+  }
+  if (config.fsm.place_x_m != config.verification.box_target_x_m ||
+    config.fsm.place_y_m != config.verification.box_target_y_m ||
+    config.fsm.place_region_radius_m != config.verification.radius_m)
+  {
+    throw std::invalid_argument("FSM placement criterion differs from verification target");
+  }
+  if (config.waypoint_mode == WaypointMode::kDiffIk && !config.allow_target_mismatch &&
+    (config.task.tcp_target_x_m != config.verification.box_target_x_m ||
+    config.task.tcp_target_y_m != config.verification.box_target_y_m))
+  {
+    throw std::invalid_argument(
+            "IK task and verification XY differ; set verify.allow_target_mismatch:=true "
+            "for an intentional mismatch");
   }
 }
 
