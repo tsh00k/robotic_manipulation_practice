@@ -3,12 +3,14 @@
 <package format="3">
   <name>manipulation_interfaces</name>
   <version>0.0.1</version>
-  <description>Custom message types shared across this project's nodes. Currently just task_executor's per-episode outcome report (week2.md Stage J), kept in a package that neither task_executor nor mujoco_bridge specially owns.</description>
+  <description>Shared episode outcome and generation-stamped simulation observation/reset interfaces.</description>
   <maintainer email="z5pknq@example.com">anby</maintainer>
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
   <buildtool_depend>rosidl_default_generators</buildtool_depend>
+  <depend>sensor_msgs</depend>
+  <depend>geometry_msgs</depend>
 
   <exec_depend>rosidl_default_runtime</exec_depend>
   <member_of_group>rosidl_interface_packages</member_of_group>

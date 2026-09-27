@@ -108,6 +108,9 @@
     - [13.1.1 第一层：提取配置、观测快照和 episode telemetry](#1311-第一层提取配置观测快照和-episode-telemetry)
     - [13.1.2 第二层：把任务目标和验收目标变成显式配置](#1312-第二层把任务目标和验收目标变成显式配置)
     - [13.1.3 第三层：把 reset 后等待改成可证明的新鲜度门控](#1313-第三层把-reset-后等待改成可证明的新鲜度门控)
+      - [13.1.3.1 哪些组件能复用，时间戳对齐通常从哪里来](#13131-哪些组件能复用时间戳对齐通常从哪里来)
+      - [13.1.3.2 旧 onReset 是否还在使用，如何处理兼容接口](#13132-旧-onreset-是否还在使用如何处理兼容接口)
+      - [13.1.3.3 BridgeObservation 与独立 TF、旧话题的关系](#13133-bridgeobservation-与独立-tf旧话题的关系)
   - [13.2 暂时不要做的重构](#132-暂时不要做的重构)
   - [13.3 何时必须重构](#133-何时必须重构)
 
@@ -1376,6 +1379,8 @@ PlacementVerification { box_target_xy, radius }
 
 #### 13.1.3 第三层：把 reset 后等待改成可证明的新鲜度门控
 
+> 开始第三层吧
+
 当前实现已经有 `reset_pending_`、`reset_request_sent_` 和 reset 后 `0.1s` 等待。它解决了“reset 回调成功后立即使用旧缓存”的已知竞态，但它只能降低风险：清空本地指针不能清空 DDS 队列，TF 仍取 latest，`0.1s` 也不是样本来源证明。
 
 第三层分两步做。第一步先抽出 `ResetGate`，把 begin、服务请求中、reset 成功、等待观测和 ready 状态集中管理；节点的 `onTimer()` 只询问 gate 是否允许决策。第二步在随机化或视觉接入前引入 reset generation 或等价的样本序号：bridge 每次 reset 产生新 generation，joint/object/contact/TF 观测带上时间或 generation，executor 只接受当前 episode 的样本。这样才能测试“reset 前的样本不会驱动 HOME seed、抓取目标或 VERIFY 判据”。
@@ -1383,6 +1388,47 @@ PlacementVerification { box_target_xy, radius }
 第三层的验收必须包含故意延迟旧消息、连续 reset、retry reset 和正常 episode 四类场景。只看到 20 次成功不能证明时序已经严格同步；应记录被接受的 generation/timestamp，失败时明确报告“没有新鲜观测”，而不是继续等到 phase timeout。
 
 三层的顺序是：先做第一层的数据结构抽取，再做第二层的目标语义整理，最后在随机化和视觉需要时做第三层的 generation 协议。第一层和第二层可以保持现有实验行为；第三层会改变观测契约，必须单独记录 ADR 和回归结果。
+
+**实现后的数据契约。** bridge 保留旧 `~/reset` Trigger 和 `/joint_states`、TF、ground-truth 话题，另外提供返回会话标识和 generation 的 `~/reset_with_generation` 服务，以及 `~/episode_observation` 同步观测包。每次 bridge 启动生成新会话，成功 reset 才递增 generation；每个观测包来自同一次 `mj_step`，携带会话、generation、单调的 `sample_sequence`、同一仿真时间戳的关节、物体、world-frame TCP 和双指接触。executor 改为只订阅这份包，用纯逻辑 `ResetGate` 管理 reset 请求、回执、等待、ready、失败。观测可解析、会话及 generation 等于回执且序号递增后才调用 IK/FSM；旧会话、旧 generation、重复序号被拒绝，同会话下更高 generation 表示外部 reset 取代本次 episode。5s 墙钟看门狗区分 `RESET_UNAVAILABLE`、`RESET_FAILED`、`OBSERVATION_STALE`、`RESET_SUPERSEDED`；FSM 的阶段耗时仍用仿真时间。详见 [ADR 003](../../docs/adr/003-reset-generation-observation.md)。
+
+**构建、单测与实跑。** `colcon build --packages-up-to task_executor --symlink-install` 构建了接口、bridge、executor 及其依赖；`colcon test --packages-select mujoco_bridge task_executor` 汇总分别为 **106 tests、0 failures、18 skipped** 与 **159 tests、0 failures、27 skipped**。`ResetGate` 单测覆盖故意延迟旧 generation、重复序号、连续 begin、retry reset、bridge 重启后同 generation 的旧会话、观测中断、服务失败和超时。启动实际进程前 `ps -eo pid,comm` 无遗留 bridge，运行中 `/clock` 为 1 个 publisher；执行完再次检查无遗留 bridge/executor。实跑结果保存在 `/tmp`，未覆盖已有基线。
+
+| 场景 | 实测 | 证据 |
+|---|---|---|
+| 固定 IK、3cm 验收半径 | **20/20 成功、零重试**；日志依次接受 generation 1 到 20 | `/tmp/third_layer_session_fixed_20.csv`、`/tmp/third_layer_session_fixed_20.log` |
+| keyframe 旧模式 | **1/1 成功、零重试** | `/tmp/third_layer_session_keyframe.csv` |
+| 故意把 keyframe 验收中心设为 `(0,0)m`，`fsm.max_retries:=1` | `0/1`，`PLACE_MISSED`，**1 次 retry**；reset generation 1 → 2，两次各接受对应 generation 的观测 | `/tmp/third_layer_session_retry_one.csv`、`/tmp/third_layer_session_retry_one.log` |
+| 延迟旧观测集成探针 | reset 回执为 generation 2，连续发布 generation 1 的完整包；约 5s 后 outcome=`OBSERVATION_STALE`，**0 条关节命令** | `/usr/bin/python3 src/task_executor/test/reset_generation_probe.py` |
+
+三组 CSV 的 18 个列名和顺序均与 `stage_o_fixed_20.csv` 相同，每行诊断数组长度等于 `phase_names` 长度。正确参数的 retry 实验在 bridge 与 executor 同时启动、runner 立即请求 episode 的条件下进行：第一次 reset 回执 generation=1 后首份被接受观测为 generation=1、stamp=0.090s；重试后接受 generation=2、stamp=12.390s；没有先把旧样本作为 HOME IK seed。
+
+**机制权衡与排查。** 固定等待 0.1s 无法证明 DDS 队列和 TF 缓存已更新；同一步观测包加会话/generation 可检查来源和内部一致性，代价是桥与 executor 新增共享接口，且同一物理数据会在旧话题和新包中各发布一次。最初只比较 generation，复核发现 bridge 重启后计数会复用，于是加入启动时生成的会话标识，并补“旧会话与新会话同为 generation=1”单测。首次编译因 `collectObservation()` 条件块漏一处花括号失败，补齐后构建通过；静态格式检查先后指出日志整数格式、枚举换行及 Python 探针版权头，逐项修正。正确参数的 retry 初跑又在首条 `/clock` 到来前触发了 episode：仿真时间仍为零，旧的 `phase_start_time_==0` idle 哨兵把已启动 episode 误判为空闲，runner 120s 超时。改用 `ResetGate::kIdle` 判断后重建和测试通过，同样的即时启动方式得到 `PLACE_MISSED`、一次 retry 和两个正确 generation。集成探针证明旧观测不会驱动运动命令；20/20 只证明正常链路没有退化，不能代替延迟注入实验。当前仍依赖默认单线程 executor 和 bridge 的互斥回调组；改成多线程时需为 reset、观测缓存和 `mjData` 加同步。
+
+#### 13.1.3.1 哪些组件能复用，时间戳对齐通常从哪里来
+
+> 这一层的组件，未来是否有复用的可能？我注意到它处理了时间戳对齐的问题？在通常的practice中，这种时间戳对齐的问题通常出自哪里又是如何解决的？
+
+可复用的是时序约束，不是 MuJoCo 的 ground truth 字段本身。[ResetGate](../../src/task_executor/src/reset_gate.cpp) 不依赖 ROS，只检查 reset 回执的会话、generation 与观测序号；以后若仍有“重置场景后开始任务”的流程，可沿用这一门控规则。[BridgeObservation.msg](../../src/manipulation_interfaces/msg/BridgeObservation.msg) 体现“把一次决策所需的同源观测作为一份数据交付”的思路，但它含有仿真 oracle 和接触真值，不能原样充当真机感知协议。
+
+这里要区分两类时间问题：generation 回答“属于哪次 reset”，仿真时间戳回答“物理上是什么时候”。旧节点分别接收不同速率、不同到达顺序的关节、box、无 stamp 的接触消息，再从 TF buffer 取 latest，拼出的状态未必属于同一物理步。新包由 bridge 在同一次 `mj_step` 后读取同一份 `mjData`；executor 检查会话、generation、递增序号，**没有**运行通用的多传感器时间戳匹配算法。实测旧 generation 持续到达时，约 5s 报 `OBSERVATION_STALE` 且没有关节命令；它验证 reset 新鲜度，不证明真机传感器已同步。
+
+实际机器人上的不同采样频率、采集延迟、传输延迟以及时钟不一致，都会造成图像、关节状态、力传感器与 TF 错位。通常先统一时钟并保留采集时刻的 stamp，再用精确/近似时间同步配对离散消息、对连续关节状态插值、用目标观测时刻查询 TF，并限定最大时间差和等待时长。视觉接入时应记录数据年龄、同步误差和丢弃原因；不能仅把几个异步消息塞进一个 ROS message 就称为对齐。
+
+#### 13.1.3.2 旧 onReset 是否还在使用，如何处理兼容接口
+
+> 1. 就现在来看，原本的OnReset没有被任何地方使用对吗？我们通常对这样的函数or实现是如何处理或者标记的？
+
+仓库内运行时已没有 `/mujoco_bridge/reset` 的客户端：executor 改调 `/mujoco_bridge/reset_with_generation`。但 [onReset()](../../src/mujoco_bridge/src/mujoco_bridge_node.cpp) 仍注册为旧 Trigger 服务的回调，外部 `ros2 service call` 仍能触发；week1、week2 也记录过手动调用。它不是死代码。两个回调共用 `resetScene()`，旧服务成功调用同样推进 generation，使正在运行的 episode 能发现被外部 reset 取代。
+
+这是服务名层面的兼容接口。通常先在文档说明“新客户端使用带 generation 的服务，旧服务供现有手动/外部调用”，确认外部依赖并定移除时点后再删除。只给 C++ 回调加 `[[deprecated]]` 无法通知调用 ROS 服务的用户；贸然删除则会让已有外部调用直接失效。当前仓库搜索只能证明没有仓库内运行时客户端，不能证明外部无人使用。
+
+#### 13.1.3.3 BridgeObservation 与独立 TF、旧话题的关系
+
+> 2. 我仍然好奇BridgeObservation的真正作用。它把好几个obs ground truth封装在一起，这样就可以搞定时间戳对齐的问题？但是TF数据仍然是分开发的？而且为什么继publishObjectPose和publishGripperContact还要再发一遍？
+
+包内数据能对齐，原因是**生产时**从同一份 `mjData`、同一次 `mj_step` 后采样，且 bridge 默认互斥回调不会在发布之间再次步进；不是“封装”本身具有同步能力。[onTimer()](../../src/mujoco_bridge/src/mujoco_bridge_node.cpp) 在同一个回调中发布旧话题与新包。新包还内嵌一份从 `mjData` 计算的 world-frame `hand_tcp` 变换，executor 只用这份 TCP，不查 TF buffer 的 latest。`/tf` 仍独立发布父子 frame 变换供 RViz 等使用；其他只订阅旧话题或 `/tf` 的节点**不会**因此自动获得原子快照。
+
+重复发布是兼容旧消费者的代价：`/joint_states` 与 `/tf` 供现有 ROS 可视化链路使用，[episode_runner.py](../../scripts/episode_runner.py) 仍读独立 object pose 写 CSV，旧接触话题也保留原接口。当前代码确实重复填充 joint state、box pose 和接触数据，有额外计算与传输成本；若需要优化，可先从一次采样填充两类输出，再根据实际消费者决定是否移除旧话题。这样做仍需守住“同一次物理步”的不变量，不能让两类输出在重构后从不同时间的缓存取值。
 
 ### 13.2 暂时不要做的重构
 

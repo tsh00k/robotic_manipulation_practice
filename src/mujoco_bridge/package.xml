@@ -18,6 +18,7 @@
   <depend>std_msgs</depend>
   <depend>tf2_ros</depend>
   <depend>std_srvs</depend>
+  <depend>manipulation_interfaces</depend>
   <depend>ament_index_cpp</depend>
   <depend>robot_description</depend>
 

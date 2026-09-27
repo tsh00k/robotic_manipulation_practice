@@ -1,0 +1,5 @@
+---
+bool success
+string message
+uint64 bridge_session
+uint64 generation

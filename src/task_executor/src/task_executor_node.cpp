@@ -12,12 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <tf2/exceptions.h>
-#include <tf2_ros/buffer.h>
-#include <tf2_ros/transform_listener.h>
-
 #include <algorithm>
 #include <array>
+#include <cinttypes>
 #include <chrono>
 #include <cmath>
 #include <limits>
@@ -29,13 +26,11 @@
 
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <control_msgs/msg/gripper_command.hpp>
-#include <geometry_msgs/msg/pose_stamped.hpp>
+#include <manipulation_interfaces/msg/bridge_observation.hpp>
 #include <manipulation_interfaces/msg/episode_outcome.hpp>
+#include <manipulation_interfaces/srv/reset_scene.hpp>
 #include <rclcpp/rclcpp.hpp>
-#include <sensor_msgs/msg/joint_state.hpp>
-#include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/empty.hpp>
-#include <std_srvs/srv/trigger.hpp>
 #include <trajectory_msgs/msg/joint_trajectory.hpp>
 
 #include "task_executor/fsm.hpp"
@@ -45,14 +40,15 @@
 #include "task_executor/keyframe_waypoint_source.hpp"
 #include "task_executor/observation_snapshot.hpp"
 #include "task_executor/phase.hpp"
+#include "task_executor/reset_gate.hpp"
 #include "task_executor/task_executor_config.hpp"
 #include "task_executor/waypoint_source.hpp"
 
 namespace task_executor
 {
 
-// FSM glue (week2.md Stage I): reads /joint_states + mujoco_bridge's
-// ~/ground_truth/* topics, calls the pure step() function in fsm.hpp/cpp once per
+// FSM glue (week2.md Stage I): reads a generation-stamped bridge observation,
+// calls the pure step() function in fsm.hpp/cpp once per
 // tick, and publishes whatever JointTarget the current phase's WaypointSource
 // returns. Deliberately thin and untested -- same "do not mock onTimer" discipline
 // mujoco_bridge_node.cpp follows (week2.md 2.1.1 point 3): all the actual
@@ -97,20 +93,11 @@ public:
       "/mujoco_bridge/joint_command", rclcpp::QoS(10));
     gripper_command_pub_ = create_publisher<control_msgs::msg::GripperCommand>(
       "/mujoco_bridge/gripper_command", rclcpp::QoS(10));
-    reset_client_ = create_client<std_srvs::srv::Trigger>("/mujoco_bridge/reset");
-
-    joint_state_sub_ = create_subscription<sensor_msgs::msg::JointState>(
-      "/joint_states", rclcpp::QoS(10),
-      std::bind(&TaskExecutorNode::onJointState, this, std::placeholders::_1));
-    object_pose_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
-      "/mujoco_bridge/ground_truth/object_pose", rclcpp::QoS(10),
-      std::bind(&TaskExecutorNode::onObjectPose, this, std::placeholders::_1));
-    left_contact_sub_ = create_subscription<std_msgs::msg::Bool>(
-      "/mujoco_bridge/ground_truth/left_finger_contact", rclcpp::QoS(10),
-      std::bind(&TaskExecutorNode::onLeftContact, this, std::placeholders::_1));
-    right_contact_sub_ = create_subscription<std_msgs::msg::Bool>(
-      "/mujoco_bridge/ground_truth/right_finger_contact", rclcpp::QoS(10),
-      std::bind(&TaskExecutorNode::onRightContact, this, std::placeholders::_1));
+    reset_client_ = create_client<manipulation_interfaces::srv::ResetScene>(
+      "/mujoco_bridge/reset_with_generation");
+    observation_sub_ = create_subscription<manipulation_interfaces::msg::BridgeObservation>(
+      "/mujoco_bridge/episode_observation", rclcpp::QoS(10),
+      std::bind(&TaskExecutorNode::onObservation, this, std::placeholders::_1));
 
     // Private names, same reasoning as mujoco_bridge's ~/reset (architecture.md
     // 2.2): a capability of *this* node instance, not a system-wide singleton.
@@ -121,9 +108,6 @@ public:
       std::bind(&TaskExecutorNode::onStartEpisode, this, std::placeholders::_1));
     episode_outcome_pub_ = create_publisher<manipulation_interfaces::msg::EpisodeOutcome>(
       "~/episode_outcome", rclcpp::QoS(10));
-
-    tf_buffer_ = std::make_unique<tf2_ros::Buffer>(get_clock());
-    tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_);
 
     // A fixed 20Hz decision tick, not the physics rate: this node reasons about
     // phases and settled joint targets, not individual mj_step calls. Triggered by
@@ -136,34 +120,28 @@ public:
   }
 
 private:
-  void onJointState(const sensor_msgs::msg::JointState::SharedPtr msg)
+  void onObservation(const manipulation_interfaces::msg::BridgeObservation::SharedPtr msg)
   {
-    latest_joint_state_ = msg;
+    latest_observation_ = msg;
   }
-
-  void onObjectPose(const geometry_msgs::msg::PoseStamped::SharedPtr msg)
-  {
-    latest_object_pose_ = msg;
-  }
-
-  void onLeftContact(const std_msgs::msg::Bool::SharedPtr msg) {left_contact_ = msg->data;}
-  void onRightContact(const std_msgs::msg::Bool::SharedPtr msg) {right_contact_ = msg->data;}
 
   std::optional<ObservationSnapshot> collectObservation()
   {
-    if (!latest_joint_state_ || !latest_object_pose_ || !left_contact_ || !right_contact_) {
+    if (!latest_observation_) {
       return std::nullopt;
     }
-    geometry_msgs::msg::TransformStamped hand_tcp_tf;
-    try {
-      hand_tcp_tf = tf_buffer_->lookupTransform("world", "hand_tcp", tf2::TimePointZero);
-    } catch (const tf2::TransformException & e) {
-      RCLCPP_WARN_ONCE(get_logger(), "world->hand_tcp not available yet: %s", e.what());
+    auto snapshot = makeObservationSnapshot(
+      latest_observation_->joint_state, latest_observation_->object_pose,
+      latest_observation_->left_finger_contact, latest_observation_->right_finger_contact,
+      latest_observation_->world_to_hand_tcp);
+    if (!snapshot || !reset_gate_.accept(
+        latest_observation_->bridge_session, latest_observation_->generation,
+        latest_observation_->sample_sequence,
+        std::chrono::steady_clock::now()))
+    {
       return std::nullopt;
     }
-
-    return makeObservationSnapshot(
-      *latest_joint_state_, *latest_object_pose_, *left_contact_, *right_contact_, hand_tcp_tf);
+    return snapshot;
   }
 
   void publishTarget(const JointTarget & target)
@@ -190,32 +168,41 @@ private:
     return worst;
   }
 
+  void beginReset()
+  {
+    reset_request_id_ = reset_gate_.begin(std::chrono::steady_clock::now());
+    latest_observation_.reset();
+    observation_generation_logged_ = false;
+    requestReset();
+  }
+
   void requestReset()
   {
-    reset_pending_ = true;
-    if (!reset_client_->service_is_ready()) {
-      RCLCPP_WARN_ONCE(get_logger(), "~/reset not available yet, waiting for service");
+    if (reset_gate_.state() != ResetGate::State::kRequestPending) {
       return;
     }
-    reset_request_sent_ = true;
-    auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
+    if (!reset_client_->service_is_ready()) {
+      RCLCPP_WARN_ONCE(get_logger(), "reset_with_generation not available yet");
+      return;
+    }
+    reset_gate_.markRequestSent();
+    const uint64_t request_id = reset_request_id_;
+    auto request = std::make_shared<manipulation_interfaces::srv::ResetScene::Request>();
     reset_client_->async_send_request(
-      request, [this](rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future) {
+      request, [this, request_id](
+        rclcpp::Client<manipulation_interfaces::srv::ResetScene>::SharedFuture future) {
         const auto response = future.get();
-        reset_request_sent_ = false;
+        if (!reset_gate_.onResetResponse(
+          request_id, response->success, response->bridge_session, response->generation))
+        {
+          return;
+        }
         RCLCPP_INFO(
-          get_logger(), "reset: success=%d message='%s'", response->success,
-          response->message.c_str());
+          get_logger(), "reset: success=%d session=%" PRIu64 " generation=%" PRIu64
+          " message='%s'", response->success, response->bridge_session,
+          response->generation, response->message.c_str());
         if (response->success) {
-          // Discard samples queued before the reset, then allow fresh physics and
-          // TF publications before using an observed joint state as an IK seed.
-          latest_joint_state_.reset();
-          latest_object_pose_.reset();
-          left_contact_.reset();
-          right_contact_.reset();
-          reset_ready_after_ = get_clock()->now() + rclcpp::Duration::from_seconds(0.1);
           phase_start_time_ = get_clock()->now();
-          reset_pending_ = false;
         }
       });
   }
@@ -237,7 +224,7 @@ private:
     last_failure_reason_ = ExitReason::kNone;
     telemetry_.clear();
     phase_start_time_ = get_clock()->now();
-    requestReset();
+    beginReset();
     RCLCPP_INFO(
       get_logger(), "episode placement: task_tcp_xy=[%.5f %.5f] verify_box_xy=[%.5f %.5f]",
       config_.task.tcp_target_x_m, config_.task.tcp_target_y_m,
@@ -256,15 +243,16 @@ private:
     RCLCPP_INFO(
       get_logger(), "episode outcome published: success=%d failure_code=%s retries=%u",
       outcome.success, outcome.failure_code.c_str(), outcome.retries);
-    if (latest_object_pose_) {
-      const double dx = latest_object_pose_->pose.position.x -
+    if (latest_observation_) {
+      const double dx = latest_observation_->object_pose.pose.position.x -
         config_.verification.box_target_x_m;
-      const double dy = latest_object_pose_->pose.position.y -
+      const double dy = latest_observation_->object_pose.pose.position.y -
         config_.verification.box_target_y_m;
       RCLCPP_INFO(
         get_logger(),
         "final placement: box_xy=[%.5f %.5f] verify_xy=[%.5f %.5f] error=%.5fm",
-        latest_object_pose_->pose.position.x, latest_object_pose_->pose.position.y,
+        latest_observation_->object_pose.pose.position.x,
+        latest_observation_->object_pose.pose.position.y,
         config_.verification.box_target_x_m, config_.verification.box_target_y_m,
         std::hypot(dx, dy));
     }
@@ -272,25 +260,50 @@ private:
 
   void onTimer()
   {
-    if (phase_start_time_.nanoseconds() == 0) {
+    if (reset_gate_.state() == ResetGate::State::kIdle) {
       return;  // Idle: no ~/start_episode received yet this run.
     }
     if (phase_ == Phase::kDone || phase_ == Phase::kFailed) {
       return;  // Terminal: stop publishing/deciding until the next ~/start_episode.
     }
-    if (reset_pending_) {
-      if (!reset_request_sent_) {
-        requestReset();
-      }
+    reset_gate_.checkTimeout(std::chrono::steady_clock::now(), std::chrono::seconds(5));
+    if (reset_gate_.state() == ResetGate::State::kFailed) {
+      RCLCPP_ERROR(
+        get_logger(), "episode %s: session=%" PRIu64 " expected generation=%" PRIu64
+        ", latest=%" PRIu64, reset_gate_.failureCode(), reset_gate_.bridgeSession(),
+        reset_gate_.generation(),
+        latest_observation_ ? latest_observation_->generation : uint64_t{0});
+      manipulation_interfaces::msg::EpisodeOutcome outcome;
+      outcome.success = false;
+      outcome.failure_code = reset_gate_.failureCode();
+      outcome.retries = retry_count_;
+      PhaseTelemetry failed_phase;
+      failed_phase.phase_name = phaseName(phase_);
+      failed_phase.duration_s = (get_clock()->now() - phase_start_time_).seconds();
+      telemetry_.append(std::move(failed_phase));
+      telemetry_.appendTo(outcome);
+      episode_outcome_pub_->publish(outcome);
+      phase_ = Phase::kFailed;
       return;
     }
-    if (get_clock()->now() < reset_ready_after_) {
+    if (reset_gate_.state() == ResetGate::State::kRequestPending) {
+      requestReset();
+      return;
+    }
+    if (reset_gate_.state() == ResetGate::State::kAwaitingResponse) {
       return;
     }
 
     const auto observation = collectObservation();
     if (!observation) {
       return;
+    }
+    if (!observation_generation_logged_) {
+      RCLCPP_INFO(
+        get_logger(), "accepted observation session=%" PRIu64 " generation=%" PRIu64
+        " stamp=%.3fs", reset_gate_.bridgeSession(), reset_gate_.generation(),
+        rclcpp::Time(latest_observation_->joint_state.header.stamp).seconds());
+      observation_generation_logged_ = true;
     }
     if (diff_ik_source_) {
       diff_ik_source_->setSeed(observation->arm.positions);
@@ -413,7 +426,7 @@ private:
       }
       RCLCPP_WARN(
         get_logger(), "retry %d/%d: recovering to HOME", retry_count_, config_.fsm.max_retries);
-      requestReset();
+      beginReset();
     }
     if (decision.next_phase == Phase::kFailed) {
       RCLCPP_ERROR(get_logger(), "episode FAILED after %d retries", retry_count_);
@@ -434,14 +447,10 @@ private:
   std::optional<Phase> logged_target_phase_;
   TaskExecutorConfig config_;
   Phase phase_ = Phase::kHome;
-  // Zero (RCL_ROS_TIME's default-constructed value) doubles as "no episode has
-  // been started yet" -- onTimer()'s idle check and onStartEpisode() both rely on
-  // this sentinel, see phase.hpp's comment on why there is no dedicated Phase for
-  // it instead.
   rclcpp::Time phase_start_time_{0, 0, RCL_ROS_TIME};
-  rclcpp::Time reset_ready_after_{0, 0, RCL_ROS_TIME};
-  bool reset_pending_ = false;
-  bool reset_request_sent_ = false;
+  ResetGate reset_gate_;
+  uint64_t reset_request_id_ = 0;
+  bool observation_generation_logged_ = false;
   int retry_count_ = 0;
   // Per-episode bookkeeping; converted to the legacy parallel ROS arrays only
   // when publishing EpisodeOutcome.
@@ -458,19 +467,11 @@ private:
   rclcpp::Publisher<control_msgs::msg::GripperCommand>::SharedPtr gripper_command_pub_;
   rclcpp::Publisher<manipulation_interfaces::msg::EpisodeOutcome>::SharedPtr
     episode_outcome_pub_;
-  rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr reset_client_;
-  rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_sub_;
-  rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr object_pose_sub_;
-  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr left_contact_sub_;
-  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr right_contact_sub_;
+  rclcpp::Client<manipulation_interfaces::srv::ResetScene>::SharedPtr reset_client_;
+  rclcpp::Subscription<manipulation_interfaces::msg::BridgeObservation>::SharedPtr
+    observation_sub_;
   rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr start_episode_sub_;
-  std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
-  std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
-
-  sensor_msgs::msg::JointState::SharedPtr latest_joint_state_;
-  geometry_msgs::msg::PoseStamped::SharedPtr latest_object_pose_;
-  std::optional<bool> left_contact_;
-  std::optional<bool> right_contact_;
+  manipulation_interfaces::msg::BridgeObservation::SharedPtr latest_observation_;
 };
 
 }  // namespace task_executor

@@ -18,9 +18,11 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cinttypes>
 #include <cmath>
 #include <memory>
 #include <optional>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -31,6 +33,8 @@
 #include <control_msgs/msg/gripper_command.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
+#include <manipulation_interfaces/msg/bridge_observation.hpp>
+#include <manipulation_interfaces/srv/reset_scene.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rosgraph_msgs/msg/clock.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
@@ -97,6 +101,12 @@ constexpr const char * kObjectBodyName = "box";
 // section 4 (kHandBodyName's entry), not a new one.
 constexpr const char * kLeftFingerBodyName = "left_finger";
 constexpr const char * kRightFingerBodyName = "right_finger";
+
+uint64_t makeBridgeSession()
+{
+  std::random_device entropy;
+  return (uint64_t{entropy()} << 32) | uint64_t{entropy()};
+}
 
 class MujocoBridgeNode : public rclcpp::Node
 {
@@ -212,6 +222,13 @@ public:
       "~/reset",
       std::bind(
         &MujocoBridgeNode::onReset, this, std::placeholders::_1, std::placeholders::_2));
+    reset_with_generation_service_ = create_service<manipulation_interfaces::srv::ResetScene>(
+      "~/reset_with_generation",
+      std::bind(
+        &MujocoBridgeNode::onResetWithGeneration, this,
+        std::placeholders::_1, std::placeholders::_2));
+    observation_pub_ = create_publisher<manipulation_interfaces::msg::BridgeObservation>(
+      "~/episode_observation", rclcpp::QoS(10));
 
     // Private name, same reasoning as ~/reset (10.4): this is a capability of *this*
     // sim instance, not a system-wide singleton, and the name must not collide with
@@ -544,19 +561,16 @@ private:
     return rclcpp::Time(std::llround(data_->time * 1e9), RCL_ROS_TIME);
   }
 
-  // Snaps the simulation back to the `home` keyframe. Trigger (no request fields) is
-  // the right service type here precisely because there is nothing to parameterise:
-  // if a caller could pass a keyframe name or an arbitrary qpos, this would need a
-  // custom .srv -- and that is the point at which "reset" stops being one operation.
+  // Snaps the simulation back to the configured keyframe. The legacy Trigger
+  // service stays available; reset_with_generation returns the generation needed
+  // to reject delayed observations after this reset.
   //
   // Thread safety comes for free from the default single-threaded executor: this
   // callback and onTimer() are both in the node's default (mutually exclusive)
   // callback group, so a reset can never land halfway through an mj_step. Moving
   // either one to a separate callback group, or switching to a MultiThreadedExecutor,
   // would make this a data race on mjData with no compiler or runtime complaint.
-  void onReset(
-    const std::shared_ptr<std_srvs::srv::Trigger::Request>/*request*/,
-    std::shared_ptr<std_srvs::srv::Trigger::Response> response)
+  bool resetScene(std::string & message)
   {
     // mj_resetDataKeyframe restores qpos, qvel, act, ctrl and mocap from the keyframe
     // -- ctrl included. That matters: the `home` key carries its own
@@ -567,17 +581,33 @@ private:
     // are refreshed inside resetToKeyframe (state_ops.hpp) -- see that function for
     // why both matter.
     if (!resetToKeyframe(api_, model_, data_, reset_keyframe_id_)) {
-      response->success = false;
-      response->message = "model has no keyframe `" + reset_keyframe_name_ + "`";
-      RCLCPP_ERROR(get_logger(), "%s", response->message.c_str());
-      return;
+      message = "model has no keyframe `" + reset_keyframe_name_ + "`";
+      RCLCPP_ERROR(get_logger(), "%s", message.c_str());
+      return false;
     }
 
-    response->success = true;
-    response->message = "reset to keyframe `" + reset_keyframe_name_ + "`";
+    ++generation_;
+    message = "reset to keyframe `" + reset_keyframe_name_ + "`";
     RCLCPP_INFO(
-      get_logger(), "%s (sim time preserved at %.3fs)", response->message.c_str(),
-      data_->time);
+      get_logger(), "%s (generation=%" PRIu64 ", sim time preserved at %.3fs)",
+      message.c_str(), generation_, data_->time);
+    return true;
+  }
+
+  void onReset(
+    const std::shared_ptr<std_srvs::srv::Trigger::Request>/*request*/,
+    std::shared_ptr<std_srvs::srv::Trigger::Response> response)
+  {
+    response->success = resetScene(response->message);
+  }
+
+  void onResetWithGeneration(
+    const std::shared_ptr<manipulation_interfaces::srv::ResetScene::Request>/*request*/,
+    std::shared_ptr<manipulation_interfaces::srv::ResetScene::Response> response)
+  {
+    response->success = resetScene(response->message);
+    response->bridge_session = bridge_session_;
+    response->generation = generation_;
   }
 
   // Writes the first trajectory point's positions into mjData::ctrl. Only the first
@@ -718,6 +748,7 @@ private:
       publishTransforms();
       publishObjectPose();
       publishGripperContact();
+      publishEpisodeObservation();
     }
 
     if (viewer_) {
@@ -865,6 +896,12 @@ private:
 
   void publishJointState()
   {
+    fillJointState();
+    joint_state_pub_->publish(joint_state_msg_);
+  }
+
+  void fillJointState()
+  {
     joint_state_msg_.header.stamp = simTime();
     for (size_t i = 0; i < joints_.size(); ++i) {
       joint_state_msg_.position[i] = data_->qpos[joints_[i].qpos_adr];
@@ -873,7 +910,48 @@ private:
       // which is the closest analogue to what a real joint torque sensor reports.
       joint_state_msg_.effort[i] = data_->qfrc_actuator[joints_[i].dof_adr];
     }
-    joint_state_pub_->publish(joint_state_msg_);
+  }
+
+  void publishEpisodeObservation()
+  {
+    if (object_body_id_ < 0 || hand_body_id_ < 0 || left_finger_body_id_ < 0) {
+      return;
+    }
+    fillJointState();
+    manipulation_interfaces::msg::BridgeObservation msg;
+    msg.bridge_session = bridge_session_;
+    msg.generation = generation_;
+    msg.sample_sequence = step_count_;
+    msg.joint_state = joint_state_msg_;
+    msg.object_pose.header.stamp = simTime();
+    msg.object_pose.header.frame_id = "world";
+    msg.object_pose.pose.position.x = data_->xpos[3 * object_body_id_ + 0];
+    msg.object_pose.pose.position.y = data_->xpos[3 * object_body_id_ + 1];
+    msg.object_pose.pose.position.z = data_->xpos[3 * object_body_id_ + 2];
+    msg.object_pose.pose.orientation.w = data_->xquat[4 * object_body_id_ + 0];
+    msg.object_pose.pose.orientation.x = data_->xquat[4 * object_body_id_ + 1];
+    msg.object_pose.pose.orientation.y = data_->xquat[4 * object_body_id_ + 2];
+    msg.object_pose.pose.orientation.z = data_->xquat[4 * object_body_id_ + 3];
+    msg.left_finger_contact = bodiesInContact(
+      model_, data_, left_finger_body_id_, object_body_id_);
+    msg.right_finger_contact = bodiesInContact(
+      model_, data_, right_finger_body_id_, object_body_id_);
+
+    mjtNum tcp_offset_world[3];
+    const mjtNum tcp_local[3] = {0.0, 0.0, kHandToTcpZ};
+    api_.rotVecQuat(tcp_offset_world, tcp_local, data_->xquat + 4 * hand_body_id_);
+    auto & tcp = msg.world_to_hand_tcp;
+    tcp.header.stamp = simTime();
+    tcp.header.frame_id = "world";
+    tcp.child_frame_id = kTcpFrameName;
+    tcp.transform.translation.x = data_->xpos[3 * hand_body_id_ + 0] + tcp_offset_world[0];
+    tcp.transform.translation.y = data_->xpos[3 * hand_body_id_ + 1] + tcp_offset_world[1];
+    tcp.transform.translation.z = data_->xpos[3 * hand_body_id_ + 2] + tcp_offset_world[2];
+    tcp.transform.rotation.w = data_->xquat[4 * hand_body_id_ + 0];
+    tcp.transform.rotation.x = data_->xquat[4 * hand_body_id_ + 1];
+    tcp.transform.rotation.y = data_->xquat[4 * hand_body_id_ + 2];
+    tcp.transform.rotation.z = data_->xquat[4 * hand_body_id_ + 3];
+    observation_pub_->publish(msg);
   }
 
   MujocoApi & api_;
@@ -885,6 +963,11 @@ private:
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
   std::unique_ptr<tf2_ros::StaticTransformBroadcaster> static_tf_broadcaster_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr reset_service_;
+  rclcpp::Service<manipulation_interfaces::srv::ResetScene>::SharedPtr
+    reset_with_generation_service_;
+  rclcpp::Publisher<manipulation_interfaces::msg::BridgeObservation>::SharedPtr observation_pub_;
+  uint64_t generation_ = 0;
+  const uint64_t bridge_session_ = makeBridgeSession();
   int reset_keyframe_id_ = -1;
   std::string reset_keyframe_name_;
   rclcpp::Subscription<trajectory_msgs::msg::JointTrajectory>::SharedPtr joint_command_sub_;

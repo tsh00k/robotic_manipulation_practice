@@ -13,8 +13,6 @@ find_package(geometry_msgs REQUIRED)
 find_package(trajectory_msgs REQUIRED)
 find_package(control_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
-find_package(std_srvs REQUIRED)
-find_package(tf2_ros REQUIRED)
 find_package(mujoco_bridge REQUIRED)
 find_package(manipulation_interfaces REQUIRED)
 find_package(arm_kinematics REQUIRED)
@@ -29,6 +27,7 @@ add_executable(task_executor_node
   src/task_executor_config.cpp
   src/episode_telemetry.cpp
   src/observation_snapshot.cpp
+  src/reset_gate.cpp
 )
 target_include_directories(task_executor_node PRIVATE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -42,8 +41,6 @@ ament_target_dependencies(task_executor_node
   trajectory_msgs
   control_msgs
   std_msgs
-  std_srvs
-  tf2_ros
   manipulation_interfaces
   ament_index_cpp
 )
@@ -120,6 +117,12 @@ if(BUILD_TESTING)
   target_link_libraries(test_observation_snapshot
     Eigen3::Eigen mujoco_bridge::grasp_criteria)
   ament_target_dependencies(test_observation_snapshot sensor_msgs geometry_msgs)
+
+  ament_add_gtest(test_reset_gate
+    test/test_reset_gate.cpp
+    src/reset_gate.cpp
+  )
+  target_include_directories(test_reset_gate PRIVATE include)
 
   find_package(ament_lint_auto REQUIRED)
   ament_lint_auto_find_test_dependencies()

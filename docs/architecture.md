@@ -214,13 +214,17 @@ Stage L 已在 [test_model_consistency.cpp](../src/mujoco_bridge/test/test_model
 
 新增 [task_executor](../src/task_executor/)（C++ 节点，`use_sim_time=true`）。状态机固定顺序：`HOME → PREGRASP → GRASP → CLOSE → LIFT → PREPLACE → PLACE → OPEN → RETRACT → VERIFY → DONE`，异常出口 `RECOVER`（重试，回 `HOME`）→ 耗尽 `max_retries` 后 `FAILED`。核心决策函数 `step()`（[fsm.hpp/cpp](../src/task_executor/include/task_executor/fsm.hpp)）不依赖 `rclcpp`/`mjModel`，是 Stage F 定义的 Layer 1，19 个 gtest。
 
-**`grasp_criteria` 库的复用**：`mujoco_bridge` 的 `classifyGrasp()` 拆成独立 CMake 库目标 `mujoco_bridge::grasp_criteria` 并导出（`ament_export_targets`），`task_executor` 直接链接、不重新实现。`task_executor_node` 自己从 `/joint_states` + `mujoco_bridge` 已发布的 `~/ground_truth/*` 话题拼一份 `GraspSignals` 再调这个函数——**没有**新增一个 `GraspOutcome` ROS topic：Stage H 结束时留的悬挂项（"不知道 task_executor 想要整个分类结果还是原始信号"）答案是都不需要，谁掌握阶段信息就该拥有计算权。
+**`grasp_criteria` 库的复用**：`mujoco_bridge` 的 `classifyGrasp()` 拆成独立 CMake 库目标 `mujoco_bridge::grasp_criteria` 并导出（`ament_export_targets`），`task_executor` 直接链接、不重新实现。Stage I 时节点从 `/joint_states` 与 `~/ground_truth/*` 拼 `GraspSignals`；第三层 reset 重构后改从同一步 `BridgeObservation` 生成信号。仍**没有**新增 `GraspOutcome` ROS topic：谁掌握阶段信息就拥有分类计算权。
 
 **`WaypointSource` 抽象**：`jointTargetFor(Phase, ObjectPose) -> JointTarget` 接口。`KeyframeWaypointSource` 是固定查表并忽略 `object_pose`；Stage O 的默认 `DiffIkWaypointSource` 从实测关节状态作 seed，消费独立的 `CartesianWaypointSource` 并调用离线 `solveIk()`，阶段内缓存目标。节点参数 `waypoint_source:=keyframe` 可切回查表；`fsm.cpp` 未修改。节点需要选择源、设置 seed、处理 IK 失败及记录诊断，所以“节点也不需要改”的旧预期并未成立。
 
 **Stage O 后的第一层职责整理**：`TaskExecutorConfig` 集中声明和校验 `fsm.*`、`grasp.*`、`target.*`、`verify.*` 及 waypoint 模式；`verify.*` 同时映射到 `FsmParams` 的 VERIFY 判据。`ObservationSnapshot` 从 joint name 对齐的关节状态、物体 pose、接触布尔值和 `world -> hand_tcp` TF 组成一次决策输入；缺任何必要观测则等待。`EpisodeTelemetry` 按阶段存一条记录，在发布时转换为原有 `EpisodeOutcome` 并行数组。话题、消息、参数默认值和 keyframe 的历史验收点 `(0.43, 0.31)m` 不变。快照仅保证本次 20 Hz tick 后续使用同一组已读值；各 ROS 话题仍可能来自不同仿真时刻，reset 后的新鲜度协议尚未实现。
 
 **第二层目标配置**：`TaskExecutorConfig.task`（`PlacementTask`）表达 world-frame TCP 放置目标 XY、高度与工具旋转；`TaskExecutorConfig.verification`（`PlacementVerification`）表达 box 落点验收圆心和半径。`target.*` 与 `verify.*` 的参数名和默认值保持不变。`diff_ik` 模式启动时默认要求两组 XY 相等；故意不一致的实验必须显式设置 `verify.allow_target_mismatch:=true`，否则配置加载抛错。`keyframe` 不消费任务 Cartesian 目标，继续使用历史验收中心 `(0.43, 0.31)m`，免除此检查。启动和每个 episode 的日志均打印两组 XY；CSV 契约不变。决策见 [ADR 002](adr/002-placement-target-verification-contract.md)。
+
+**第三层 reset/观测契约**：`/mujoco_bridge/reset_with_generation`（`ResetScene.srv`）在每次成功 reset 后返回 bridge 会话标识和严格递增的 generation；原 `/mujoco_bridge/reset` Trigger 仍可用，也会使 generation 递增。会话标识在每次 bridge 启动时重建，防止重启后计数复用。`/mujoco_bridge/episode_observation`（`BridgeObservation.msg`）在一个物理步后打包会话、generation、单调样本序号、同一仿真时间戳的 9 关节状态、box pose、world-frame `hand_tcp` 变换和双指接触。executor 不再从旧话题及 TF buffer 混合取样；`ResetGate` 只放行本次 reset 会话与 generation 且序号递增的完整观测。旧会话或 generation 被拒绝，同会话下更高 generation 报 `RESET_SUPERSEDED`；服务或观测等待、运行中断流在 5s 墙钟看门狗下分别报 `RESET_UNAVAILABLE`、`RESET_FAILED` 或 `OBSERVATION_STALE`。旧观测话题继续给 RViz 和其他消费者使用。决策见 [ADR 003](adr/003-reset-generation-observation.md)。
+
+`task_executor` 是新 reset 服务的仓库内客户端；旧 Trigger 服务仍注册，供手动及可能的外部调用，两个服务共用同一 reset 实现。观测包的“同一步”来自 bridge 在一次物理步后读取同一份 `mjData`，不是对异步传感器做时间戳匹配。executor 使用包内的 world-frame TCP，不读取单独发布的 `/tf`；`/tf` 和 `/joint_states` 继续服务可视化链路，`episode_runner.py` 仍从独立的 `~/ground_truth/object_pose` 记录最终 box pose。保留这些旧输出会重复发布部分物理量，但旧话题的其他订阅者不会自动获得观测包的原子性保证。
 
 **手测出来的关节空间 waypoint**（`KeyframeWaypointSource`，单位 rad，顺序 joint1..joint7；`box` 初始位姿见第5节表格）：
 
@@ -278,4 +282,4 @@ Stage L 已在 [test_model_consistency.cpp](../src/mujoco_bridge/test/test_model
 
 固定场景以 **3cm** 验收半径连续 20/20 成功、零重试，最终 box 均值 `(0.49742, 0.29532)m`，距 marker 中心均值 `5.35mm`、最大 `6.07mm`。`PLACE` 模型 IK 残差约 `8µm`、关节跟踪最大绝对误差均值约 `0.00666rad`、实际 TCP 位置误差均值约 `6.82mm`；这些量和最终落点误差分别记录，不能互相代替。box 沿 `+y` 移动 `4cm` 时 IK 1/1 成功、最终放置误差 `5.60mm`；同场景 keyframe 0/1，重试三次后 `GRASP_EMPTY`。固定场景 keyframe 1/1 成功。结果见 `results/stage_o_*.csv`，其中每阶段目标、IK 残差、关节误差和实际 TCP 误差与最终 box 落点同列记录；keyframe 没有 Cartesian 诊断时写 `NaN`，最终 `place_error_m` 留空，不伪造零误差。runner 的 `place_error_m` 相对于记录的 PLACE TCP XY，FSM 成功判据和节点最终落点日志相对于 `verify.*`；本次 IK 实验这两个中心一致。这里的 20 次结果来自移除径向 yaw 后的固定 world-frame yaw 版本；早先径向 yaw 版本的均值 `4.62mm` 不再是当前代码的验收数据。验证证明当前固定场景可工作，不证明随机姿态、碰撞路径或真机精度。
 
-最终 smoke 验证还暴露了 episode reset 竞态：reset 服务虽已成功回复，节点仍可能立即用 reset 前排队的 `/joint_states` 作 HOME 的 IK seed，实测报 `IK seed is outside the joint limits`。现在 executor 在 reset 回执前停止决策，清掉旧 joint/object/contact 样本，并等待 0.1s 仿真时间的新发布；之后才启动 HOME。修复后最终实现重新通过上述 20 次严格回归。若以后改用多线程 executor，reset 回调与 tick 的状态访问需要重新加同步。
+Stage O 的最终 smoke 曾暴露 episode reset 竞态：reset 服务虽已成功回复，节点仍可能用 reset 前排队的 `/joint_states` 作 HOME IK seed，实测报 `IK seed is outside the joint limits`。当时靠清本地缓存并等待 0.1s 仿真时间缓解，第三层已改成上述 generation 协议；不再把固定等待视为新鲜度证明。若以后改用多线程 executor，reset 回调与 tick 的状态访问需要重新加同步。

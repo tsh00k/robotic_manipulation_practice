@@ -16,6 +16,7 @@ find_package(control_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(std_srvs REQUIRED)
+find_package(manipulation_interfaces REQUIRED)
 find_package(ament_index_cpp REQUIRED)
 find_package(mujoco REQUIRED)
 # For the optional debug viewer (debug_viewer.cpp) only. Unlike mujoco::mujoco,
@@ -61,6 +62,7 @@ ament_target_dependencies(mujoco_bridge_node
   std_msgs
   tf2_ros
   std_srvs
+  manipulation_interfaces
   ament_index_cpp
 )
 

@@ -1,0 +1,8 @@
+uint64 bridge_session
+uint64 generation
+uint64 sample_sequence
+sensor_msgs/JointState joint_state
+geometry_msgs/PoseStamped object_pose
+geometry_msgs/TransformStamped world_to_hand_tcp
+bool left_finger_contact
+bool right_finger_contact
