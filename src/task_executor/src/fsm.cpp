@@ -216,7 +216,7 @@ FsmDecision step(const FsmInputs & in, const JointTarget & target, const FsmPara
 
     case Phase::kDone:
     case Phase::kFailed:
-      // Terminal: hold here forever. task_executor_node.cpp stops issuing new
+      // Terminal: hold here forever. EpisodeController stops issuing new
       // commands once it sees either, so returning in.phase is inert, not a bug.
       return {in.phase, ExitReason::kNone, false};
   }

@@ -14,35 +14,11 @@
 
 #pragma once
 
-#include <limits>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include <manipulation_interfaces/msg/episode_outcome.hpp>
+
+#include "task_executor/episode_telemetry_data.hpp"
 
 namespace task_executor
 {
-
-struct PhaseTelemetry
-{
-  std::string phase_name;
-  double duration_s = 0.0;
-  double target_tcp_x_m = std::numeric_limits<double>::quiet_NaN();
-  double target_tcp_y_m = std::numeric_limits<double>::quiet_NaN();
-  double target_tcp_z_m = std::numeric_limits<double>::quiet_NaN();
-  double ik_position_error_m = std::numeric_limits<double>::quiet_NaN();
-  double joint_tracking_error_rad = std::numeric_limits<double>::quiet_NaN();
-  double actual_tcp_position_error_m = std::numeric_limits<double>::quiet_NaN();
-};
-
-struct EpisodeTelemetry
-{
-  std::vector<PhaseTelemetry> phases;
-
-  void clear() {phases.clear();}
-  void append(PhaseTelemetry sample) {phases.push_back(std::move(sample));}
-  void appendTo(manipulation_interfaces::msg::EpisodeOutcome & outcome) const;
-};
 
 }  // namespace task_executor

@@ -23,7 +23,7 @@ namespace task_executor
 // state after too many RECOVER round-trips. There is deliberately no explicit
 // "idle" phase in this enum: task_executor_node.cpp's onTimer() treats kDone/kFailed
 // as terminal (stops publishing/deciding) until it receives ~/start_episode, which
-// jumps phase_ straight back to kHome without needing a phase of its own here.
+// starts a new controller episode at kHome without needing a phase of its own here.
 // (Stage I originally said the *process* boundary was the episode boundary -- that
 // assumption was replaced in Stage J once the episode runner needed to drive many
 // consecutive episodes against the same long-lived node instead of restarting it

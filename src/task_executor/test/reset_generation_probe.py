@@ -13,7 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Integration probe: stale observations must not drive a new episode.
+"""
+Integration probe: stale observations must not drive a new episode.
 
 Run after building and sourcing the workspace:
     /usr/bin/python3 src/task_executor/test/reset_generation_probe.py

@@ -10,7 +10,7 @@
     "repository": {
       "url": "git@github.com:tsh00k/robotic_manipulation_practice.git",
       "link_mode": "local-only",
-      "revision": "3e89528fef363180246e630de05b80ddf92ddb99"
+      "revision": "30fa8af79957d48666fc2802f14077992d62c9e2"
     },
     "views": [
       {
@@ -29,7 +29,7 @@
         "id": "unchanged-core",
         "label": "继续复用的核心",
         "focus": ["reusable-core", "arm-kinematics"],
-        "note": "FSM、策略接口、reset 门控和 IK 不因本次整理而改写。"
+        "note": "FSM、策略接口和 IK 能力继续复用；reset 生命周期已归入 EpisodeController。"
       }
     ]
   },
@@ -107,7 +107,7 @@
       "id": "reusable-core",
       "type": "backend",
       "label": "可复用控制核心",
-      "sublabel": "FSM · WaypointSource · ResetGate · Telemetry",
+      "sublabel": "FSM · WaypointSource · EpisodeTelemetry",
       "pos": [480, 405],
       "size": [300, 96],
       "sources": [
@@ -120,11 +120,6 @@
           "path": "src/task_executor/include/task_executor/waypoint_source.hpp",
           "line": 51,
           "label": "策略接口"
-        },
-        {
-          "path": "src/task_executor/include/task_executor/reset_gate.hpp",
-          "line": 23,
-          "label": "reset 门控"
         }
       ],
       "tag": "继续复用"
@@ -283,7 +278,7 @@
       "title": "保持不变",
       "items": [
         "ROS topic、service、参数和 EpisodeOutcome 契约",
-        "FSM、WaypointSource、ResetGate 和 FK/IK 能力"
+        "FSM、WaypointSource、EpisodeTelemetry 和 FK/IK 能力"
       ]
     }
   ]

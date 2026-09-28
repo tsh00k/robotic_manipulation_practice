@@ -222,7 +222,7 @@ Stage L 已在 [test_model_consistency.cpp](../src/mujoco_bridge/test/test_model
 
 **第二层目标配置**：`TaskExecutorConfig.task`（`PlacementTask`）表达 world-frame TCP 放置目标 XY、高度与工具旋转；`TaskExecutorConfig.verification`（`PlacementVerification`）表达 box 落点验收圆心和半径。`target.*` 与 `verify.*` 的参数名和默认值保持不变。`diff_ik` 模式启动时默认要求两组 XY 相等；故意不一致的实验必须显式设置 `verify.allow_target_mismatch:=true`，否则配置加载抛错。`keyframe` 不消费任务 Cartesian 目标，继续使用历史验收中心 `(0.43, 0.31)m`，免除此检查。启动和每个 episode 的日志均打印两组 XY；CSV 契约不变。决策见 [ADR 002](adr/002-placement-target-verification-contract.md)。
 
-**第三层 reset/观测契约**：`/mujoco_bridge/reset_with_generation`（`ResetScene.srv`）在每次成功 reset 后返回 bridge 会话标识和严格递增的 generation；原 `/mujoco_bridge/reset` Trigger 仍可用，也会使 generation 递增。会话标识在每次 bridge 启动时重建，防止重启后计数复用。`/mujoco_bridge/episode_observation`（`BridgeObservation.msg`）在一个物理步后打包会话、generation、单调样本序号、同一仿真时间戳的 9 关节状态、box pose、world-frame `hand_tcp` 变换和双指接触。executor 不再从旧话题及 TF buffer 混合取样；`ResetGate` 只放行本次 reset 会话与 generation 且序号递增的完整观测。旧会话或 generation 被拒绝，同会话下更高 generation 报 `RESET_SUPERSEDED`；服务或观测等待、运行中断流在 5s 墙钟看门狗下分别报 `RESET_UNAVAILABLE`、`RESET_FAILED` 或 `OBSERVATION_STALE`。旧观测话题继续给 RViz 和其他消费者使用。决策见 [ADR 003](adr/003-reset-generation-observation.md)。
+**第三层 reset/观测契约**：`/mujoco_bridge/reset_with_generation`（`ResetScene.srv`）在每次成功 reset 后返回 bridge 会话标识和严格递增的 generation；原 `/mujoco_bridge/reset` Trigger 仍可用，也会使 generation 递增。会话标识在每次 bridge 启动时重建，防止重启后计数复用。`/mujoco_bridge/episode_observation`（`BridgeObservation.msg`）在一个物理步后打包会话、generation、单调样本序号、同一仿真时间戳的 9 关节状态、box pose、world-frame `hand_tcp` 变换和双指接触。executor 不再从旧话题及 TF buffer 混合取样；P2 起由 `EpisodeController` 只放行本次 reset 会话与 generation 且序号递增的完整观测，旧 `ResetGate` 已删除。旧会话或 generation 被拒绝，同会话下更高 generation 报 `RESET_SUPERSEDED`；服务或观测等待、运行中断流在 5s 墙钟看门狗下分别报 `RESET_UNAVAILABLE`、`RESET_FAILED` 或 `OBSERVATION_STALE`。旧观测话题继续给 RViz 和其他消费者使用。原协议决策见 [ADR 003](adr/003-reset-generation-observation.md)。
 
 `task_executor` 是新 reset 服务的仓库内客户端；旧 Trigger 服务仍注册，供手动及可能的外部调用，两个服务共用同一 reset 实现。观测包的“同一步”来自 bridge 在一次物理步后读取同一份 `mjData`，不是对异步传感器做时间戳匹配。executor 使用包内的 world-frame TCP，不读取单独发布的 `/tf`；`/tf` 和 `/joint_states` 继续服务可视化链路，`episode_runner.py` 仍从独立的 `~/ground_truth/object_pose` 记录最终 box pose。保留这些旧输出会重复发布部分物理量，但旧话题的其他订阅者不会自动获得观测包的原子性保证。
 
@@ -289,3 +289,25 @@ Stage O 的最终 smoke 曾暴露 episode reset 竞态：reset 服务虽已成�
 P0 在未修改 `task_executor` 生产代码的情况下冻结了 episode 编排基线。当前 `onTimer()` 在调用 FSM `step()` 前发布当前 phase 的关节/夹爪目标；phase 未变化时继续重发目标，phase 变化时追加一条 telemetry；`DONE`/`FAILED` 后停止决策和发布，下一次 `start_episode` 才重新进入 `HOME`。episode 运行中再次收到 `start_episode` 也会立即清空本地状态、重新 reset 并从 `HOME` 开始；实测在 `CLOSE` 阶段抢占时 generation 从 `1` 增到 `2`。IK 异常直接发布 `IK_FAILED` 且不增加 retry；retry 会重新 reset 并使 generation 从旧值递增。
 
 实测基线为：默认 diff-IK 固定场景 **20/20 成功、0 retry**，最终 box 均值 `(0.497417, 0.295315)m`，放置误差均值 `5.352mm`；keyframe 固定场景 **1/1 成功**；物体沿 `+y` 偏移 `4cm` 时 diff-IK **1/1 成功**，keyframe **0/1** 并在 3 次 retry 后 `GRASP_EMPTY`；不可达放置目标在 `PREPLACE` 返回 `IK_FAILED`；错误验收中心的 retry 实验使 generation `1 → 2` 后以 `PLACE_MISSED` 失败；旧 generation 观测只得到 `OBSERVATION_STALE` 且没有关节命令。详细 CSV、命令和源码行为契约见 [week3.5 P0](../Job_guides/my_study/week3.5.md#10-p0现有行为基线)。
+
+### P1：ROS-free episode 控制对象
+
+P1 新增了 [`EpisodeController`](../src/task_executor/include/task_executor/episode_controller.hpp)。它接收 start、reset 发送确认与回执、带 session/generation/sequence 的观测和 timer tick，返回无 ROS 的 `EpisodeActions`。`ObservationFrame`、`ResetReceipt` 和 `EpisodeTelemetry` 数据位于不包含 ROS message 的头文件中。P1 尚未接入节点时的边界见 [week3.5 P1](../Job_guides/my_study/week3.5.md#11-p1最小-episode-控制对象)。
+
+### P2：reset 与观测生命周期接管
+
+节点已将 start、reset service 发送/回执、观测准入、5s 墙钟看门狗和 retry 计数交给 `EpisodeController`，并删除 `ResetGate` 的源码、测试和构建引用。service 未就绪时 controller 持续提供同一个 reset token；节点仅在 `async_send_request()` 成功提交后确认发送，旧 token 的回执不能修改当前 episode。节点仍按原 20 Hz timer 消费最新完整观测、设置 IK seed、求目标、执行 FSM、发布命令和填充阶段 telemetry；这些决策将在 P3 迁入 controller。P2 使用 `tickLifecycle()` 处理生命周期而不重复求 waypoint。ROS 话题、服务、参数与 `EpisodeOutcome` 字段未改；实跑覆盖固定成功、错误验收中心 retry、旧观测、service 失败/不可用、连续 start 和不可达 IK。详见 [week3.5 P2](../Job_guides/my_study/week3.5.md#12-p2接管-reset-与观测生命周期)。
+
+### P3：目标、FSM 与阶段诊断接管
+
+`EpisodeController::tick()` 在接受一份未消费的新观测后设置 diff-IK seed、求当前 phase 目标、调用纯 `step()` 并记录迁移 telemetry。动作批次可同时携带当前 phase 的 `TargetCommand`、迁移后的 `PhaseTransition`、reset 意图或一次性 outcome；ROS 节点按目标、日志、reset/outcome 的顺序执行。无新观测时不重发旧目标；每份新鲜观测在 phase 未变时仍会重发当前目标。controller 唯一持有 phase、retry、失败原因和 telemetry；节点仅做消息转换、service/topic 调用和日志格式化。阶段耗时采用 ROS 仿真时间，看门狗采用 steady clock；观测准入会先检查超时，再更新新鲜度。实跑覆盖正常 diff-IK、keyframe retry、不可达 IK 和旧 generation；详见 [week3.5 P3](../Job_guides/my_study/week3.5.md#13-p3迁移-tick-决策)。
+
+### P4：ROS 适配层收窄
+
+`TaskExecutorNode` 的动作执行已集中到 `executeActions()`。节点只负责 ROS entity、消息到 `ObservationEnvelope` 的转换、service/topic 调用、定时触发和日志格式化；它不再直接调用 `step()` 或 `jointTargetFor()`，也不再持有 phase、retry 或 telemetry。动作执行顺序保持为当前目标、迁移日志、reset、outcome，外部 topic、service、参数和 `EpisodeOutcome` 契约不变。正常 episode 与旧 generation 探针在 P4 后复测通过；详见 [week3.5 P4](../Job_guides/my_study/week3.5.md#14-p4收窄-ros-节点)。当前仍以单线程 executor 的串行回调为前提。
+
+### P5：最终回归与架构记录
+
+P5 新增 [ADR 004](adr/004-episode-controller-orchestration.md)，并更新重构前后架构图：[规格](task_executor_episode_orchestration.json) 和 [HTML](task_executor_episode_orchestration.html)。最终全工作区构建和测试为 5 packages、375 tests、0 failures；默认 diff-IK 固定场景连续 20 次全部成功、0 retry，平均放置误差为 5.251mm。旧 generation 探针仍返回 `OBSERVATION_STALE` 且不发布关节命令。该回归结果支持控制器迁移没有改变固定场景行为，但不代表随机姿态、视觉输入或真机线程模型已经验证。
+
+`EpisodeState` 是 reset/观测生命周期状态（Idle、ResetPending、AwaitingResetResponse、AwaitingObservation、Ready、Finished、Failed）；抓取任务的 `Phase` 是另一层状态，只在 Ready 的 FSM tick 中推进。`startEpisode()` 可以从任意状态开始新 reset，terminal 状态只产生一次 outcome。完整转移及动作见 [week3.5 的状态图](../Job_guides/my_study/week3.5.md#42-episodestate-整体状态转移)。

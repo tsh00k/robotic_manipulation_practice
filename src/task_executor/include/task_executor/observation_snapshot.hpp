@@ -14,18 +14,14 @@
 
 #pragma once
 
-#include <Eigen/Geometry>
-
 #include <array>
 #include <optional>
-#include <string>
 
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
 
-#include "task_executor/fsm.hpp"
-#include "task_executor/waypoint_source.hpp"
+#include "task_executor/observation_frame.hpp"
 
 namespace task_executor
 {
@@ -33,15 +29,7 @@ namespace task_executor
 inline constexpr std::array<const char *, 7> kArmJointNames = {
   "joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "joint7"};
 
-struct ObservationSnapshot
-{
-  ArmState arm;
-  double gripper_width_m = 0.0;
-  ObjectPose object_pose;
-  std::string object_frame_id;
-  mujoco_bridge::GraspSignals grasp_signals;
-  Eigen::Isometry3d world_to_hand_tcp = Eigen::Isometry3d::Identity();
-};
+using ObservationSnapshot = ObservationFrame;
 
 std::optional<ObservationSnapshot> makeObservationSnapshot(
   const sensor_msgs::msg::JointState & joints,

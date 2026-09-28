@@ -47,8 +47,8 @@ struct ArmState
   std::array<double, 7> velocities{};
 };
 
-// Everything one FSM tick needs. Assembled by task_executor_node.cpp from
-// /joint_states + mujoco_bridge's ~/ground_truth/* topics; deliberately not
+// Everything one FSM tick needs. Assembled by EpisodeController from an
+// admitted ObservationFrame; deliberately not
 // rclcpp::Time or any message type, so step() below stays Layer 1 (week2.md Stage
 // F's four-layer scheme) -- testable with hand-built structs, no node, no DDS, no
 // mjModel.
@@ -130,8 +130,8 @@ struct FsmDecision
 {
   Phase next_phase = Phase::kHome;
   ExitReason exit_reason = ExitReason::kNone;
-  // True exactly when next_phase re-enters kHome from kRecover: the glue
-  // (task_executor_node.cpp) uses this, not a phase comparison, to decide whether
+  // True exactly when next_phase re-enters kHome from kRecover: the controller
+  // uses this, not a phase comparison, to decide whether
   // to increment retry_count -- kHome is also the very first phase of an episode,
   // and that entry must NOT count against max_retries.
   bool is_retry = false;

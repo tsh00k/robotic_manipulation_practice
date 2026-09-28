@@ -1410,7 +1410,7 @@ PlacementVerification { box_target_xy, radius }
 
 > 这一层的组件，未来是否有复用的可能？我注意到它处理了时间戳对齐的问题？在通常的practice中，这种时间戳对齐的问题通常出自哪里又是如何解决的？
 
-可复用的是时序约束，不是 MuJoCo 的 ground truth 字段本身。[ResetGate](../../src/task_executor/src/reset_gate.cpp) 不依赖 ROS，只检查 reset 回执的会话、generation 与观测序号；以后若仍有“重置场景后开始任务”的流程，可沿用这一门控规则。[BridgeObservation.msg](../../src/manipulation_interfaces/msg/BridgeObservation.msg) 体现“把一次决策所需的同源观测作为一份数据交付”的思路，但它含有仿真 oracle 和接触真值，不能原样充当真机感知协议。
+可复用的是时序约束，不是 MuJoCo 的 ground truth 字段本身。当时的 `ResetGate` 不依赖 ROS，只检查 reset 回执的会话、generation 与观测序号；Week 3.5 P2 已将这套门控规则迁入 [EpisodeController](../../src/task_executor/src/episode_controller.cpp) 并删除旧类。以后若仍有“重置场景后开始任务”的流程，可沿用这一门控规则。[BridgeObservation.msg](../../src/manipulation_interfaces/msg/BridgeObservation.msg) 体现“把一次决策所需的同源观测作为一份数据交付”的思路，但它含有仿真 oracle 和接触真值，不能原样充当真机感知协议。
 
 这里要区分两类时间问题：generation 回答“属于哪次 reset”，仿真时间戳回答“物理上是什么时候”。旧节点分别接收不同速率、不同到达顺序的关节、box、无 stamp 的接触消息，再从 TF buffer 取 latest，拼出的状态未必属于同一物理步。新包由 bridge 在同一次 `mj_step` 后读取同一份 `mjData`；executor 检查会话、generation、递增序号，**没有**运行通用的多传感器时间戳匹配算法。实测旧 generation 持续到达时，约 5s 报 `OBSERVATION_STALE` 且没有关节命令；它验证 reset 新鲜度，不证明真机传感器已同步。
 

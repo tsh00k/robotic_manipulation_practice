@@ -26,8 +26,8 @@ add_executable(task_executor_node
   src/diff_ik_waypoint_source.cpp
   src/task_executor_config.cpp
   src/episode_telemetry.cpp
+  src/episode_controller.cpp
   src/observation_snapshot.cpp
-  src/reset_gate.cpp
 )
 target_include_directories(task_executor_node PRIVATE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -118,11 +118,16 @@ if(BUILD_TESTING)
     Eigen3::Eigen mujoco_bridge::grasp_criteria)
   ament_target_dependencies(test_observation_snapshot sensor_msgs geometry_msgs)
 
-  ament_add_gtest(test_reset_gate
-    test/test_reset_gate.cpp
-    src/reset_gate.cpp
+  ament_add_gtest(test_episode_controller
+    test/test_episode_controller.cpp
+    src/episode_controller.cpp
+    src/fsm.cpp
+    src/phase.cpp
+    src/diff_ik_waypoint_source.cpp
   )
-  target_include_directories(test_reset_gate PRIVATE include)
+  target_include_directories(test_episode_controller PRIVATE include)
+  target_link_libraries(test_episode_controller
+    mujoco_bridge::grasp_criteria Eigen3::Eigen arm_kinematics::arm_kinematics)
 
   find_package(ament_lint_auto REQUIRED)
   ament_lint_auto_find_test_dependencies()
