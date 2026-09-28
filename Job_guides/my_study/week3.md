@@ -1285,9 +1285,11 @@ Week 3 完成了从模型数学到任务执行的第一条可验证闭环：
 
 ### 12.2 第 4 周入口和边界
 
-第 4 周可以在 Stage O 的 Cartesian 契约上接 RGB-D/视觉估计和随机物体位姿，但必须先决定视觉输出的语义：world-frame 还是 camera-frame、是否带时间戳/置信度、物体四元数是否参与抓取。当前 ground-truth oracle 只能作为仿真验证源，不能伪装成视觉接口。
+第 4 周可以在 Stage O 的 Cartesian 契约上接 RGB-D/视觉估计和随机物体位姿，但必须先决定视觉输出的语义：world-frame 还是 camera-frame、是否带时间戳/置信度、物体四元数是否参与抓取。当前 ground-truth oracle 只能作为仿真验证源，不能伪装成视觉接口。详细计划见 [Week 4](week4.md)。
 
-第 4 周不应默认扩大 Stage O 的职责。MoveIt planner、碰撞规划、在线 Cartesian servo、真实抓取姿态生成和物体朝向验收分别是后续能力，只有触发条件到来时才进入接口重构。
+Week 4.5 单独处理策略无关的 observation/action/episode 契约、逐步数据记录、replay、LeRobot adapter 和容器交付，见 [Week 4.5](week4.5.md)。MoveIt planner 和 learned policy 是并行 execution backend；learned policy 可以自行承担 motion planning、碰撞规避和关节约束，MoveIt 不作为其接入前置条件。
+
+第 4 周仍不接入 MoveIt planner、VLA/RL/IL 运行时或障碍规划；这些后续能力消费 Week 4 和 Week 4.5 冻结的契约。
 
 Episode 编排的后续重构计划单独记录在 [Week 3.5](week3.5.md)：先冻结 `onTimer()` 的行为契约，再把控制流迁入可独立测试的 episode controller，最后收窄 ROS 节点为适配层。
 
@@ -1295,7 +1297,7 @@ Episode 编排的后续重构计划单独记录在 [Week 3.5](week3.5.md)：先�
 
 ### 13.0 现在的判断
 
-当前不做大范围重写。Stage O 刚建立 `CartesianWaypointSource -> DiffIkWaypointSource -> JointTarget` 的边界，先让视觉和随机化实验使用它，才能知道哪些字段是真正稳定的契约。过早把接口改成 ROS action、轨迹对象或在线 servo，会把尚未观测到的需求写死。
+当前不做大范围重写。Stage O 刚建立 `CartesianWaypointSource -> DiffIkWaypointSource -> JointTarget` 的边界，先让 Week 4 视觉实验使用它；Week 4.5 只冻结策略无关的 observation/action/episode 契约，不把 LeRobot、MoveIt 或某个模型的内部类型直接写进 C++ bridge。
 
 ### 13.1 现在值得做的局部重构
 

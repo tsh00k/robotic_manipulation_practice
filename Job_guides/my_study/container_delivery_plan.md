@@ -2,7 +2,7 @@
 
 本文记录如何把当前由人工维护的 Distrobox 开发环境，逐步转成可在 GitHub 上分发、由其他人复现和直接使用的容器环境。
 
-当前 `robotics-dev` 仍是个人开发环境，不是可交付产物。Distrobox 与宿主机共享 home，因此容器里看到的仓库、个人 `.bashrc`、pyenv、缓存和凭据可能来自宿主机挂载，不能假定它们会进入镜像，也不能把当前容器快照当作环境的唯一来源。
+当前 `robotics-dev` 仍是个人开发环境，不是可交付产物。Distrobox 默认会与宿主机共享 home，因此容器里看到的仓库、个人 `.bashrc`、pyenv、缓存和凭据可能来自宿主机挂载，不能假定它们会进入镜像，也不能把当前容器快照当作环境的唯一来源。正式验收必须使用专用容器 home，并把工作区作为显式 volume 挂载；不能把默认共享 home 作为复现前提。该决策见 [ADR 006](../../docs/adr/006-container-home-isolation.md)。
 
 ## 1. 目标交付形态
 
@@ -73,21 +73,37 @@ CMAKE_PREFIX_PATH=/opt/mujoco-3.3.7:<existing CMAKE_PREFIX_PATH>
 
 配置中不得写死 `/home/anby/...` 等个人路径。
 
+### 2.4 镜像 profile 与职责
+
+“分层”描述的是镜像职责，不是把所有依赖安装到同一个长期运行的 `robotics-dev` 容器：
+
+| profile | 内容 | 适用场景 |
+| --- | --- | --- |
+| `core` | ROS2、MuJoCo、C++、MoveIt、模型和测试工具 | 构建、单测、传统仿真和基础 demo |
+| `perception` | `core` 加 OpenCV/PCL 和 RGB-D 处理依赖 | Week 4 视觉实验 |
+| `policy` | `core`/`perception` 加 PyTorch、LeRobot 和具体模型依赖 | IL/RL/VLA 数据转换和推理 |
+
+`core` 必须能在没有 Python 深度学习依赖时独立构建和测试。`policy` profile 的版本、CUDA 运行时和模型权重单独锁定，不成为基础项目的安装前置条件。
+
 ## 3. 开发镜像与运行镜像
 
-第一阶段优先提供开发镜像。镜像包含工具链和系统依赖，但不烘焙工作区源码。使用者在宿主机 clone 仓库，由 Distrobox 把自己的仓库目录映射进容器：
+第一阶段优先提供开发镜像。镜像包含工具链和系统依赖，但不烘焙工作区源码，也不依赖宿主机完整 home。使用者在宿主机 clone 仓库，给 Distrobox 指定独立 home，并只把仓库映射到 `/workspace`：
 
 ```bash
 distrobox create \
   --name robotics-dev \
-  --image ghcr.io/<owner>/robotic-manipulation-practice:<version>
+  --image ghcr.io/<owner>/robotic-manipulation-practice:<version> \
+  --home "$HOME/.local/share/robotic-manipulation-practice/robotics-dev-home" \
+  --volume "$PWD:/workspace:rw"
 
 distrobox enter robotics-dev
-cd <repo_root>
+cd /workspace
 colcon build --symlink-install
 ```
 
-这种方式仍然使用 Distrobox 的共享 home，但共享的是使用者自己的 clone，不依赖原作者 home 中的任何文件。
+这里的 `--home` 是容器专用 home；它可以位于宿主机，但不能指向宿主机的完整 `$HOME`。源码、构建产物和实验 artifact 通过显式 volume 管理，镜像内的 shell 配置和环境变量由镜像自身提供。GUI、GPU 和相机设备映射可以按运行场景增加，但不应重新引入完整 home 挂载。
+
+CI 和最小复现测试优先直接使用 Docker/Podman 的显式 workspace mount，不依赖 Distrobox 的默认 home 行为。Distrobox 主要作为开发者体验入口。
 
 如果以后需要无需源码即可启动 Demo，再增加单独的运行镜像。运行镜像只携带已构建的 `install/` 工作区和运行时依赖，不携带编译器、测试工具或个人开发配置。开发镜像与运行镜像不混为一个交付目标。
 
@@ -99,7 +115,8 @@ GitHub Actions 最终应执行以下流水线：
 2. 在镜像内执行 `rosdep` 检查、`colcon build --symlink-install`、`colcon test` 和 `colcon test-result --all --verbose`。
 3. 执行不依赖人工交互的容器 smoke test，包括模型加载和关键节点启动检查。
 4. Stage L 完成后，把固定样例的 MuJoCo、MoveIt 与自写 FK/Jacobian 一致性测试纳入镜像验收。
-5. 全部通过后推送到 GHCR。
+5. 验证空 home、专用 home 和显式 `/workspace` 挂载下都不读取作者个人路径。
+6. 全部通过后推送到 GHCR。
 
 镜像应提供不可变或语义清晰的版本标签，例如：
 
@@ -141,7 +158,8 @@ Stage L 安装 MoveIt 时先执行第 1、2 步。首次建立容器交付基础
 容器化交付第一次完成时，至少满足：
 
 - 一台没有现有 `robotics-dev` 容器的新环境能从构建配方创建镜像；
-- 不读取原作者 `.bashrc`、pyenv 或 `/home/anby/...` 路径也能构建；
+- 不读取原作者 `.bashrc`、pyenv、完整 home 或 `/home/anby/...` 路径也能构建；
+- 使用专用容器 home 和显式 `/workspace` volume 可以完成构建和 demo；
 - `colcon build`、`colcon test` 和测试结果汇总全部通过；
 - MuJoCo 动态库、模型文件和 MoveIt Core 能被实际加载；
 - Stage L 的模型一致性测试通过；

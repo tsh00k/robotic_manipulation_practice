@@ -311,3 +311,45 @@ P1 新增了 [`EpisodeController`](../src/task_executor/include/task_executor/ep
 P5 新增 [ADR 004](adr/004-episode-controller-orchestration.md)，并更新重构前后架构图：[规格](task_executor_episode_orchestration.json) 和 [HTML](task_executor_episode_orchestration.html)。最终全工作区构建和测试为 5 packages、375 tests、0 failures；默认 diff-IK 固定场景连续 20 次全部成功、0 retry，平均放置误差为 5.251mm。旧 generation 探针仍返回 `OBSERVATION_STALE` 且不发布关节命令。该回归结果支持控制器迁移没有改变固定场景行为，但不代表随机姿态、视觉输入或真机线程模型已经验证。
 
 `EpisodeState` 是 reset/观测生命周期状态（Idle、ResetPending、AwaitingResetResponse、AwaitingObservation、Ready、Finished、Failed）；抓取任务的 `Phase` 是另一层状态，只在 Ready 的 FSM tick 中推进。`startEpisode()` 可以从任意状态开始新 reset，terminal 状态只产生一次 outcome。完整转移及动作见 [week3.5 的状态图](../Job_guides/my_study/week3.5.md#42-episodestate-整体状态转移)。
+
+## 12. 策略无关的 observation/action 契约与并行 motion backend
+
+Week 4.5 冻结以下扩展边界，完整决策见 [ADR 005](adr/005-policy-backends-and-data-contract.md)。
+
+```text
+observation bundle
+        -> scripted executor
+        -> MoveIt planner
+        -> learned policy (IL/RL/VLA/LeRobot)
+        -> trajectory or action chunk
+        -> execution interface
+```
+
+### 12.1 Observation
+
+策略 observation 至少包含：
+
+- `bridge_session`、`generation`、`sample_sequence` 和仿真时间戳；
+- 7 个机械臂关节的 position/velocity、夹爪状态和 TCP 状态；
+- RGB、depth、CameraInfo、相机 frame 和外参版本；
+- object pose、source（`oracle`/`vision`）、置信度和估计残差；
+- task id 或 instruction metadata；
+- 后续障碍实验需要的障碍几何或场景表示。
+
+oracle 和 vision 是 observation source，不是 policy backend。learned policy 可以消费 vision observation，也可以在调试或 RL 初期消费 oracle state；每个样本必须记录 source，不能把 oracle 默默混入 vision 数据。
+
+### 12.2 Action 与执行边界
+
+Action 支持 joint position/delta、Cartesian delta、joint trajectory/action chunk 和 gripper command，并携带 control duration、valid-until timestamp 和 source。learned policy 可以自己承担 motion planning、碰撞规避、关节限位、速度限制和动作时长；MoveIt 不属于 learned policy 的必经层。
+
+执行接口只做消息维度、NaN/Inf、时间有效性、通信超时和异常停止等进程级检查，不调用 MoveIt 替 learned policy 重新规划。MoveIt backend 的碰撞检查由 MoveIt backend 自己负责。
+
+### 12.3 数据与推理
+
+逐步数据同时记录 observation、policy action、applied action、延迟、phase、reward、terminal 状态、failure code 和 reset generation。原始数据先由 rosbag2 或项目中间格式保存，再转换成锁定版本的 LeRobot dataset；C++ bridge 不直接依赖 LeRobot Python 包。
+
+策略推理采用闭环 action chunk：低频策略重新观察和决策，高频执行接口执行短动作窗口。策略超时或动作过期必须有明确的停止、保持或失败语义；闭环重观测不等同于在线梯度更新。
+
+### 12.4 Backend 的定位
+
+现有 scripted/task executor 保留为 baseline。MoveIt 是传统规划、专家数据来源和对照实验的 backend；IL、RL、VLA 和 LeRobot 是可独立接入的 learned backend。当前空桌面只验证基础接口，障碍环境需要额外的场景表示、训练/评测数据和碰撞结果统计。
