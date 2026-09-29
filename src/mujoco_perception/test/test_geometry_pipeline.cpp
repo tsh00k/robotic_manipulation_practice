@@ -1,0 +1,184 @@
+// Copyright 2026 anby
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#include <gtest/gtest.h>
+#include <Eigen/Geometry>
+#include <pcl/point_cloud.h>
+#include <pcl/point_types.h>
+
+#include <cmath>
+#include <limits>
+
+#include <sensor_msgs/msg/camera_info.hpp>
+
+#include "mujoco_perception/geometry_pipeline.hpp"
+
+namespace mujoco_perception
+{
+namespace
+{
+
+pcl::PointCloud<pcl::PointXYZ> transformCloud(
+  const pcl::PointCloud<pcl::PointXYZ> & source,
+  const Eigen::Matrix3f & rotation,
+  const Eigen::Vector3f & translation)
+{
+  pcl::PointCloud<pcl::PointXYZ> target;
+  target.reserve(source.size());
+  for (const auto & point : source) {
+    const Eigen::Vector3f transformed = rotation * point.getVector3fMap() + translation;
+    target.emplace_back(transformed.x(), transformed.y(), transformed.z());
+  }
+  return target;
+}
+
+TEST(KnownCorrespondences, UsesPclSvdToRecoverRigidTransform)
+{
+  pcl::PointCloud<pcl::PointXYZ> source;
+  source.emplace_back(0.0F, 0.0F, 0.0F);
+  source.emplace_back(0.1F, 0.0F, 0.0F);
+  source.emplace_back(0.0F, 0.2F, 0.0F);
+  source.emplace_back(0.0F, 0.0F, 0.3F);
+  const Eigen::Matrix3f rotation = (
+    Eigen::AngleAxisf(0.4F, Eigen::Vector3f::UnitZ()) *
+    Eigen::AngleAxisf(-0.2F, Eigen::Vector3f::UnitY())).toRotationMatrix();
+  const Eigen::Vector3f translation(0.4F, -0.2F, 0.7F);
+  const auto target = transformCloud(source, rotation, translation);
+
+  const auto result = estimateKnownCorrespondences(source, target);
+  ASSERT_TRUE(result.valid);
+  const Eigen::Matrix3f recovered_rotation = result.transform.block<3, 3>(0, 0);
+  const Eigen::Vector3f recovered_translation = result.transform.block<3, 1>(0, 3);
+  EXPECT_TRUE(recovered_rotation.isApprox(rotation, 1e-5F));
+  EXPECT_TRUE(recovered_translation.isApprox(translation, 1e-5F));
+  EXPECT_NEAR(result.rms_residual_m, 0.0, 1e-6);
+}
+
+TEST(KnownCorrespondences, RejectsMismatchedPoints)
+{
+  pcl::PointCloud<pcl::PointXYZ> source;
+  pcl::PointCloud<pcl::PointXYZ> target;
+  source.emplace_back(0.0F, 0.0F, 0.0F);
+  source.emplace_back(1.0F, 0.0F, 0.0F);
+  target.emplace_back(0.0F, 1.0F, 0.0F);
+  const auto result = estimateKnownCorrespondences(source, target);
+  EXPECT_FALSE(result.valid);
+  EXPECT_EQ(result.rejection, RejectionReason::kInvalidInput);
+}
+
+TEST(KnownCorrespondences, RejectsCollinearPoints)
+{
+  pcl::PointCloud<pcl::PointXYZ> source;
+  pcl::PointCloud<pcl::PointXYZ> target;
+  source.emplace_back(0.0F, 0.0F, 0.0F);
+  source.emplace_back(0.1F, 0.0F, 0.0F);
+  source.emplace_back(0.2F, 0.0F, 0.0F);
+  target.emplace_back(0.0F, 0.1F, 0.0F);
+  target.emplace_back(0.0F, 0.2F, 0.0F);
+  target.emplace_back(0.0F, 0.3F, 0.0F);
+  const auto result = estimateKnownCorrespondences(source, target);
+  EXPECT_FALSE(result.valid);
+  EXPECT_EQ(result.rejection, RejectionReason::kDegenerateCorrespondence);
+}
+
+TEST(Segmentation, UsesPclPlaneAndEuclideanClusterStages)
+{
+  sensor_msgs::msg::CameraInfo info;
+  info.width = 10;
+  info.height = 8;
+  info.k[0] = 100.0;
+  info.k[4] = 100.0;
+  info.k[2] = 4.5;
+  info.k[5] = 3.5;
+  info.p[0] = 100.0;
+  info.p[2] = 4.5;
+  info.p[5] = 100.0;
+  info.p[6] = 3.5;
+  info.p[10] = 1.0;
+
+  std::vector<float> depth(static_cast<std::size_t>(info.width * info.height), 0.22F);
+  for (int v = 2; v <= 4; ++v) {
+    for (int u = 4; u <= 6; ++u) {
+      depth[static_cast<std::size_t>(v * info.width + u)] = 0.30F;
+    }
+  }
+  depth[0] = std::numeric_limits<float>::quiet_NaN();
+
+  SegmentationConfig config;
+  config.min_cluster_points = 4;
+  config.world_roi.x_min = -1.0;
+  config.world_roi.x_max = 1.0;
+  config.world_roi.y_min = -1.0;
+  config.world_roi.y_max = 1.0;
+  config.world_roi.z_min = 0.2;
+  config.world_roi.z_max = 0.5;
+  const auto result = segmentDepth(
+    depth, info, Eigen::Isometry3d::Identity(), config);
+
+  EXPECT_EQ(result.valid_depth_points, 79U);
+  EXPECT_EQ(result.plane_points, 70U);
+  EXPECT_EQ(result.target_cluster->size(), 9U);
+  EXPECT_EQ(result.rejection, RejectionReason::kNone);
+}
+
+TEST(BoxPose, UsesPclObbAndMarksCubeYawAmbiguous)
+{
+  pcl::PointCloud<pcl::PointXYZ> points;
+  for (const float x : {-0.02F, 0.02F}) {
+    for (const float y : {-0.02F, 0.02F}) {
+      for (const float z : {0.22F, 0.26F}) {
+        points.emplace_back(0.5F + x, y, z);
+      }
+    }
+  }
+  BoxModel model;
+  model.min_inlier_ratio = 0.9;
+  const auto result = estimateBoxPose(points, model, 0.22);
+
+  ASSERT_TRUE(result.accepted);
+  EXPECT_TRUE(result.orientation_ambiguous);
+  EXPECT_NEAR(result.position.x(), 0.5, 1e-4);
+  EXPECT_NEAR(result.position.y(), 0.0, 1e-4);
+  EXPECT_NEAR(result.position.z(), 0.24, 1e-4);
+  EXPECT_NEAR(result.residual_m, 0.0, 1e-5);
+}
+
+TEST(BoxPose, AcceptsVisibleTopFaceWithKnownThickness)
+{
+  pcl::PointCloud<pcl::PointXYZ> points;
+  for (const float x : {-0.02F, 0.0F, 0.02F}) {
+    for (const float y : {-0.02F, 0.0F, 0.02F}) {
+      points.emplace_back(0.5F + x, y, 0.26F);
+    }
+  }
+  const auto result = estimateBoxPose(points, BoxModel{}, 0.22);
+
+  ASSERT_TRUE(result.accepted);
+  EXPECT_NEAR(result.position.z(), 0.24, 1e-4);
+}
+
+TEST(BoxPose, RejectsAClusterWithWrongDimensions)
+{
+  pcl::PointCloud<pcl::PointXYZ> points;
+  points.emplace_back(0.45F, -0.05F, 0.22F);
+  points.emplace_back(0.55F, -0.05F, 0.22F);
+  points.emplace_back(0.45F, 0.05F, 0.22F);
+  points.emplace_back(0.55F, 0.05F, 0.22F);
+  const auto result = estimateBoxPose(points, BoxModel{}, 0.22);
+  EXPECT_FALSE(result.accepted);
+  EXPECT_EQ(result.rejection, RejectionReason::kModelExtentMismatch);
+}
+
+}  // namespace
+}  // namespace mujoco_perception

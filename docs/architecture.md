@@ -56,6 +56,20 @@
 
 默认 `camera_rate_hz=10`（每 50 个 0.002s 物理步），`tf_rate_hz=100`（每 5 步）。**同步契约**：图像使用标准 ROS 话题，不扩充 `BridgeObservation`；消费者按完全相等的仿真时间戳（最大允许差 `0 ns`）匹配 RGB、depth、CameraInfo 和 `~/episode_observation`。启用相机时 bridge 要求 camera decimation 是 TF/observation decimation 的整数倍，使每一帧相机图像必有同一步的 observation。匹配后从 observation 获取 `bridge_session`、`generation`、`sample_sequence`，按现有 reset 新鲜度规则拒绝旧 generation；ROS 话题送达次序不提供原子性，消费者须缓存并匹配，不能取各话题“最新一条”静默拼接。相机 TF 是静态的，可按该图像时间戳查询。Stage Q 的正式位姿输出必须经此 TF 变换到 `world`，不得发布在 camera frame 或覆盖 oracle topic。
 
+### 1.2 Stage Q 几何感知边界
+
+Stage Q 的感知算法位于独立的 `mujoco_perception` 包，不能加入 `mujoco_bridge` 的物理步进线程。bridge 只负责从 MuJoCo `mjData` 渲染 RGB-D、发布 CameraInfo/TF，并发布带 session、generation、sample sequence 的 `BridgeObservation`；感知节点按完全相等的仿真时间戳匹配这些输入，再查询静态 `world <- camera_optical_frame` TF。
+
+当前实现使用成熟组件：`image_geometry::PinholeCameraModel` 做像素反投影，PCL `PassThrough` 做 world ROI（Region of Interest，感兴趣区域）和已知桌面高度的确定性退化过滤，PCL `SACSegmentation` 做水平支持平面检测，PCL `EuclideanClusterExtraction` 做目标聚类，PCL `TransformationEstimationSVD` 保留已知对应点的刚体配准入口，PCL `MomentOfInertiaEstimation` 做盒体 OBB（Oriented Bounding Box，有向包围盒）基线。项目自有代码只负责参数组合、生命周期字段、失败原因和任务先验，不重新实现这些通用算法。
+
+当前默认运行路径是 `target cluster -> OBB -> object pose`。OBB 是根据点云主方向得到的有向几何包围盒，不是物体识别器；其中心、方向和尺寸提供已知立方体的姿态候选。SVD 入口的 `source` 应是物体模型/模板坐标系中的点，`target` 应是同一物理特征在 world 坐标中的观测点，二者必须有可靠的逐点对应关系。它目前只由几何单测验证，没有接入默认估计器；视觉模块计算这种刚体变换是为了输出物体相对于 world 的 pose，供任务层规划抓取，不是代替机械臂执行运动。
+
+输出为 `/object_pose_estimator/object_pose` 的 `manipulation_interfaces/msg/VisionObjectPose`，与 `~/ground_truth/object_pose` 完全分离。输出包含 `accepted`、`confidence`、`residual_m`、`inlier_ratio`、点数和结构化拒绝原因；拒绝样本也发布，任务层不得把上一帧 pose 当作新结果继续执行。
+
+当前默认任务先验是单个 4 cm 立方体和已知桌面。固定俯视相机通常只看到盒子的顶面，OBB 的隐藏 z 尺寸不能当作观测事实；当 `anchor_z_to_plane=true` 时，只检查两个可见主尺寸，中心 z 使用桌面高度加已知半高，立方体 yaw 标记为 90 度对称的不确定姿态。该基线不宣称支持任意形状、完整 6D yaw 或遮挡恢复。
+
+Stage Q 当前是逐帧几何估计器，不是抓取过程状态机：没有机器人点云 mask、跨帧跟踪、夹持中目标模型或掉落事件语义。机械臂与物体连成一个 cluster 时可能因尺寸/residual/inlier 检查而拒绝，也可能产生偏移结果；夹持抬升时 `anchor_z_to_plane` 仍会把 z 锚定到桌面先验；物体掉回桌面且仍在 ROI 内时会被当作普通可见目标重新接受。流程级鲁棒性需要后续加入 robot mask、目标跟踪、抓取状态和重新搜索/超时协议，不能由当前单帧 OBB 单独提供。
+
 Stage P 的几何检查由 `src/mujoco_bridge/test/camera_probe.py` 这个**运行时集成检查脚本**完成：它作为 ROS 2 Python 节点订阅 RGB-D、CameraInfo、TF、oracle 和 `BridgeObservation`，按完全相等的时间戳配成一帧，再检查消息契约并反投影两个已知像素。中心像素 `(160,120)` 深度 `0.8613 m`，反投影 world 点 `(0.5017,-0.0084,0.2605)m`，相对 oracle box 中心 XY 偏差 `8.6 mm`、box 顶面高度偏差 `0.6 mm`；桌面像素 `(160,180)` 反投影 `z=0.2206 m`，场景顶面为 `0.22 m`。reset 后 generation 从 `0` 增至 `1`，同一检查仍通过。这是仿真链路的 smoke test，不是传感器驱动或物体位姿估计算法；这些默认静态场景检查不代表真机标定、噪声或运动中动态同步已经完成评估。
 
 **`hand_tcp` 合成说明**：MuJoCo 的 `panda.xml` 里**没有** `hand_tcp` 这个 body/site。这个 frame 来自 URDF 侧 `franka_description/end_effectors/common/franka_hand.xacro` 的 `hand_tcp_joint`，是一个**空 link**（无 visual/collision/inertial），即纯粹的命名坐标系：不参与动力学、不参与碰撞、不占 DoF。偏移量 `xyz="0 0 0.1034"`, `rpy="0 0 0"`（相对 `hand`）。`mujoco_bridge` 额外手动合成一条 `hand -> hand_tcp` static TF，这样下游抓取/规划模块仍能拿到 `hand_tcp`。
