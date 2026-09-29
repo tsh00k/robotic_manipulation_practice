@@ -41,6 +41,8 @@ def generate_launch_description():
     tf_rate_hz_arg = DeclareLaunchArgument('tf_rate_hz', default_value='100.0')
     enable_debug_viewer_arg = DeclareLaunchArgument('enable_debug_viewer', default_value='false')
     debug_viewer_rate_hz_arg = DeclareLaunchArgument('debug_viewer_rate_hz', default_value='30.0')
+    enable_rgbd_camera_arg = DeclareLaunchArgument('enable_rgbd_camera', default_value='false')
+    camera_rate_hz_arg = DeclareLaunchArgument('camera_rate_hz', default_value='10.0')
 
     bridge_node = Node(
         package='mujoco_bridge',
@@ -58,6 +60,8 @@ def generate_launch_description():
             'tf_rate_hz': LaunchConfiguration('tf_rate_hz'),
             'enable_debug_viewer': LaunchConfiguration('enable_debug_viewer'),
             'debug_viewer_rate_hz': LaunchConfiguration('debug_viewer_rate_hz'),
+            'enable_rgbd_camera': LaunchConfiguration('enable_rgbd_camera'),
+            'camera_rate_hz': LaunchConfiguration('camera_rate_hz'),
         }],
         # Same fix, same reason as rviz_node's additional_env below: with
         # enable_debug_viewer:=true, this process also creates a GLFW/GL window
@@ -104,6 +108,8 @@ def generate_launch_description():
         tf_rate_hz_arg,
         enable_debug_viewer_arg,
         debug_viewer_rate_hz_arg,
+        enable_rgbd_camera_arg,
+        camera_rate_hz_arg,
         bridge_node,
         task_executor_node,
         rviz_node,

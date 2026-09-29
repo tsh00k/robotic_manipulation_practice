@@ -47,6 +47,7 @@ add_executable(mujoco_bridge_node
   src/state_ops.cpp
   src/grasp_state.cpp
   src/debug_viewer.cpp
+  src/rgbd_camera.cpp
 )
 target_include_directories(mujoco_bridge_node PRIVATE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -106,6 +107,9 @@ if(BUILD_TESTING)
   )
   target_include_directories(test_frame_math PRIVATE include ${MUJOCO_INCLUDE_DIRS})
   target_link_libraries(test_frame_math dl)
+
+  ament_add_gtest(test_camera_geometry test/test_camera_geometry.cpp)
+  target_include_directories(test_camera_geometry PRIVATE include)
 
   ament_add_gtest(test_state_ops
     test/test_state_ops.cpp

@@ -35,11 +35,12 @@
 
 | 标签 | 涉及的问答 |
 |---|---|
-| `#cpp_语言组织机制` | [namespace 与匿名 namespace](#namespace-与匿名-namespace)、[class 基础（以 MujocoBridgeNode 为例）](#class-基础以-mujocobridgenode-为例)、[头文件声明 vs .cpp 定义、无命名空间的 C 类型](#头文件声明-vs-cpp-定义无命名空间的-c-类型)、[单例初始化用匿名 lambda 的原因](#单例初始化用匿名-lambda-的原因)、[resolve 模板与 dlopen/dlsym](#resolve-模板与-dlopendlsym)、[虚函数与多态：以 `WaypointSource` 为例](#虚函数与多态以-waypointsource-为例)、[`static constexpr`：类作用域下的编译期常量](#static-constexpr类作用域下的编译期常量)、[GoogleTest fixture、作用域与所有权（以 Stage L 为例）](#googletest-fixture作用域与所有权以-stage-l-为例) |
-| `#cpp_更安全的默认写法` | [namespace 与匿名 namespace](#namespace-与匿名-namespace)、[class 基础（以 MujocoBridgeNode 为例）](#class-基础以-mujocobridgenode-为例)、[并发：data race 是 UB，以及为什么不要提前加锁](#并发data-race-是-ub以及为什么不要提前加锁)、[虚函数与多态：以 `WaypointSource` 为例](#虚函数与多态以-waypointsource-为例)、[`static constexpr`：类作用域下的编译期常量](#static-constexpr类作用域下的编译期常量)、[GoogleTest fixture、作用域与所有权（以 Stage L 为例）](#googletest-fixture作用域与所有权以-stage-l-为例) |
+| `#cpp_语言组织机制` | [namespace 与匿名 namespace](#namespace-与匿名-namespace)、[class 基础（以 MujocoBridgeNode 为例）](#class-基础以-mujocobridgenode-为例)、[头文件声明 vs .cpp 定义、无命名空间的 C 类型](#头文件声明-vs-cpp-定义无命名空间的-c-类型)、[头文件中的 inline 纯函数](#头文件中的-inline-纯函数以-camera_geometryhpp-为例)、[单例初始化用匿名 lambda 的原因](#单例初始化用匿名-lambda-的原因)、[resolve 模板与 dlopen/dlsym](#resolve-模板与-dlopendlsym)、[虚函数与多态：以 `WaypointSource` 为例](#虚函数与多态以-waypointsource-为例)、[`static constexpr`：类作用域下的编译期常量](#static-constexpr类作用域下的编译期常量)、[GoogleTest fixture、作用域与所有权（以 Stage L 为例）](#googletest-fixture作用域与所有权以-stage-l-为例) |
+| `#cpp_更安全的默认写法` | [namespace 与匿名 namespace](#namespace-与匿名-namespace)、[class 基础（以 MujocoBridgeNode 为例）](#class-基础以-mujocobridgenode-为例)、[头文件中的 inline 纯函数](#头文件中的-inline-纯函数以-camera_geometryhpp-为例)、[并发：data race 是 UB，以及为什么不要提前加锁](#并发data-race-是-ub以及为什么不要提前加锁)、[虚函数与多态：以 `WaypointSource` 为例](#虚函数与多态以-waypointsource-为例)、[`static constexpr`：类作用域下的编译期常量](#static-constexpr类作用域下的编译期常量)、[GoogleTest fixture、作用域与所有权（以 Stage L 为例）](#googletest-fixture作用域与所有权以-stage-l-为例) |
 | `#cpp_所有权明确化` | [class 基础（以 MujocoBridgeNode 为例）](#class-基础以-mujocobridgenode-为例)、[头文件声明 vs .cpp 定义、无命名空间的 C 类型](#头文件声明-vs-cpp-定义无命名空间的-c-类型)、[GoogleTest fixture、作用域与所有权（以 Stage L 为例）](#googletest-fixture作用域与所有权以-stage-l-为例) |
 | `#cpp_设计模式` | [单例初始化用匿名 lambda 的原因](#单例初始化用匿名-lambda-的原因) |
 | `#cpp_泛型与抽象增强` | [resolve 模板与 dlopen/dlsym](#resolve-模板与-dlopendlsym)、[虚函数与多态：以 `WaypointSource` 为例](#虚函数与多态以-waypointsource-为例) |
+| `#cpp_零成本抽象` | [头文件中的 inline 纯函数](#头文件中的-inline-纯函数以-camera_geometryhpp-为例)、[resolve 模板与 dlopen/dlsym](#resolve-模板与-dlopendlsym) |
 | `#cpp_并发与内存模型` | [并发：data race 是 UB，以及为什么不要提前加锁](#并发data-race-是-ub以及为什么不要提前加锁) |
 | `#cpp_资源自动管理` | [并发：data race 是 UB，以及为什么不要提前加锁](#并发data-race-是-ub以及为什么不要提前加锁)、[GoogleTest fixture、作用域与所有权（以 Stage L 为例）](#googletest-fixture作用域与所有权以-stage-l-为例) |
 | `#cpp_更强的类型表达能力` | [`std::optional`、`mutable` 与接口常量性（以 Stage N 为例）](#stdoptionalmutable-与接口常量性以-stage-n-为例) |
@@ -49,6 +50,7 @@
   - [namespace 与匿名 namespace](#namespace-与匿名-namespace)
   - [class 基础（以 MujocoBridgeNode 为例）](#class-基础以-mujocobridgenode-为例)
   - [头文件声明 vs .cpp 定义、无命名空间的 C 类型](#头文件声明-vs-cpp-定义无命名空间的-c-类型)
+  - [头文件中的 inline 纯函数（以 `camera_geometry.hpp` 为例）](#头文件中的-inline-纯函数以-camera_geometryhpp-为例)
   - [单例初始化用匿名 lambda 的原因](#单例初始化用匿名-lambda-的原因)
   - [resolve 模板与 dlopen/dlsym](#resolve-模板与-dlopendlsym)
   - [虚函数与多态：以 `WaypointSource` 为例](#虚函数与多态以-waypointsource-为例)
@@ -278,6 +280,111 @@ typedef struct mjData_  mjData;    // mjdata.h
 对比项目自己写的 `MujocoApi`——它被包进 `namespace mujoco_bridge { ... }`，外部要用得写 `mujoco_bridge::MujocoApi`。而 `mjModel`/`mjData` 从定义时就没被任何 `namespace` 块包裹，所以任何地方都能直接写，不需要、也没有前缀可加。
 
 一句话：是否需要命名空间前缀，完全取决于这个类型/函数**定义时**有没有被塞进某个 `namespace` 块，跟使用的位置无关。
+
+---
+
+### 头文件中的 inline 纯函数（以 `camera_geometry.hpp` 为例）
+
+`#cpp_语言组织机制` `#cpp_零成本抽象` `#cpp_更安全的默认写法`
+
+> Q: `camera_geometry.hpp` 里的 `metricDepth()` 和 `backproject()` 为什么直接写在 `.hpp` 里，还要加 `inline`？为什么不把它们的实现放到 `.cpp`？
+
+这两个函数分别完成：
+
+```cpp
+metricDepth(...)  // OpenGL 深度缓冲值 → 米单位的 z-depth
+backproject(...)  // 像素坐标 + z-depth → optical frame 三维点
+```
+
+它们有几个共同特点：
+
+- 是无状态的纯函数，只依赖参数，不访问 ROS、MuJoCo 或对象成员；
+- 公式很短，接口和实现放在一起更容易直接阅读；
+- `rgbd_camera.cpp` 的渲染路径和 `test_camera_geometry.cpp` 的单测都需要调用；
+- 它们代表一个需要被多个调用者共享的几何契约，而不是某个 `.cpp` 的私有辅助函数。
+
+因此这里选择一个小型 header-only 几何模块：调用者包含头文件即可使用，单测也可以直接针对公式测试，不需要为了两个公式再增加一个独立的链接边界。
+
+#### `inline` 主要解决什么问题？
+
+`camera_geometry.hpp` 会被多个编译单元包含，例如：
+
+```text
+rgbd_camera.cpp
+test_camera_geometry.cpp
+```
+
+如果头文件中写的是普通外部函数定义：
+
+```cpp
+// 错误示例：被多个 .cpp 包含后会有多个外部定义
+double metricDepth(double d, double near_m, double far_m)
+{
+  ...
+}
+```
+
+每个编译单元都会生成一份同名外部符号。链接器把这些目标文件合在一起时，可能报 `multiple definition`。这违反的是 C++ 的 ODR（One Definition Rule）：一个具有外部链接的普通函数通常只能在整个程序中有一个定义。
+
+加上：
+
+```cpp
+inline double metricDepth(...)
+{
+  ...
+}
+```
+
+表示这个函数允许在多个翻译单元中出现相同定义，只要这些定义完全一致；它们仍然代表同一个程序实体。`#pragma once` 只能防止同一个编译单元重复包含同一头文件，不能解决不同 `.cpp` 各自包含头文件的问题，所以 `#pragma once` 不能替代 `inline`。
+
+#### `inline` 不等于“强制内联机器码”
+
+`inline` 这个关键字的首要作用是链接和 ODR 规则，不是性能指令。编译器可以：
+
+- 即使没有 `inline`，也把一个小函数优化成内联代码；
+- 即使写了 `inline`，也因为调试、优化级别或代码形态而不内联。
+
+因此这里写 `inline` 的理由是“允许安全地在头文件定义”，不能表述成“保证函数调用没有开销”。
+
+#### 为什么不采用 `.hpp` 声明、`.cpp` 定义？
+
+完全可以采用普通的分离式写法：
+
+```cpp
+// camera_geometry.hpp
+double metricDepth(double, double, double);
+
+// camera_geometry.cpp
+double metricDepth(double d, double near_m, double far_m)
+{
+  ...
+}
+```
+
+这种写法由 `.cpp` 提供唯一外部定义，头文件只暴露接口，适合实现较大、经常变化、需要隐藏依赖或需要稳定 ABI 的函数。代价是必须把 `camera_geometry.cpp` 加入 CMake 目标并正确链接；如果漏加，就会出现 `undefined reference`。
+
+当前两个函数选择 header-only 是因为它们很短、依赖极少，而且测试和渲染实现都直接共享同一份公式。它不是“函数只能放在 hpp”的规则，而是针对小型纯函数的取舍。
+
+#### 为什么不用命名空间作用域的 `static`？
+
+也可以用 `static` 让每个编译单元各自拥有一份内部链接函数，但那会产生多个独立实体，失去共享同一外部 API 的语义，并可能增加代码体积。这里函数是公共的 `mujoco_bridge::` 几何接口，因此用 `inline` 表示“可以多处定义但仍是同一个接口”更合适。
+
+#### 这两个函数为什么适合单测？
+
+它们不需要启动 ROS 节点、不需要创建 OpenGL context、也不需要加载 MuJoCo 模型：
+
+```cpp
+EXPECT_DOUBLE_EQ(mujoco_bridge::metricDepth(0.0, 0.01, 10.0), 0.01);
+EXPECT_DOUBLE_EQ(point.z, 0.61);
+```
+
+测试可以独立检查：
+
+- 深度缓冲边界和无效值是否返回 NaN；
+- 主点反投影是否落在 `x=0,y=0`；
+- 像素向右移动时，光学 frame 的 `x` 是否为正。
+
+这体现了“纯公式放在可直接包含的头文件中，ROS/MuJoCo 胶水留在 `.cpp`”的分层：公式容易快速单测，渲染和消息发布再由集成测试验证。
 
 ---
 

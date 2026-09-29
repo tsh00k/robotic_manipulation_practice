@@ -61,6 +61,7 @@ DebugViewer::DebugViewer(const MujocoApi & api, mjModel * model)
 
 DebugViewer::~DebugViewer()
 {
+  glfwMakeContextCurrent(window_);
   api_.freeScene(&scn_);
   api_.freeContext(&con_);
   // glfwTerminate() after this destructor's window crashes on Linux with
@@ -84,6 +85,7 @@ bool DebugViewer::shouldClose() const
 
 void DebugViewer::render(mjData * data)
 {
+  glfwMakeContextCurrent(window_);
   mjrRect viewport = {0, 0, 0, 0};
   glfwGetFramebufferSize(window_, &viewport.width, &viewport.height);
 

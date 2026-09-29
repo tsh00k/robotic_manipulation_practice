@@ -38,6 +38,8 @@
 #include <rclcpp/rclcpp.hpp>
 #include <rosgraph_msgs/msg/clock.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
+#include <sensor_msgs/msg/image.hpp>
+#include <sensor_msgs/msg/camera_info.hpp>
 #include <std_msgs/msg/bool.hpp>
 #include <std_srvs/srv/trigger.hpp>
 #include <trajectory_msgs/msg/joint_trajectory.hpp>
@@ -47,6 +49,7 @@
 #include "mujoco_bridge/grasp_criteria.hpp"
 #include "mujoco_bridge/grasp_state.hpp"
 #include "mujoco_bridge/mujoco_dl.hpp"
+#include "mujoco_bridge/rgbd_camera.hpp"
 #include "mujoco_bridge/state_ops.hpp"
 
 namespace mujoco_bridge
@@ -101,6 +104,12 @@ constexpr const char * kObjectBodyName = "box";
 // section 4 (kHandBodyName's entry), not a new one.
 constexpr const char * kLeftFingerBodyName = "left_finger";
 constexpr const char * kRightFingerBodyName = "right_finger";
+// These names intentionally match the project-owned MJCF. They are not camera
+// calibration numbers: the lookup below turns them into MuJoCo IDs and verifies
+// that the RGB-D camera is attached to the expected body.
+constexpr const char * kCameraName = "workcell_rgbd";
+constexpr const char * kCameraBodyName = "camera_link";
+constexpr const char * kOpticalFrameName = "camera_optical_frame";
 
 uint64_t makeBridgeSession()
 {
@@ -163,6 +172,7 @@ public:
     joint_state_decimation_ =
       decimationFor("joint_state_rate_hz", "/joint_states", timestep_s);
     tf_decimation_ = decimationFor("tf_rate_hz", "/tf", timestep_s);
+    camera_decimation_ = decimationFor("camera_rate_hz", "RGB-D camera", timestep_s, 10.0);
     if (joint_state_decimation_ != tf_decimation_) {
       RCLCPP_WARN(
         get_logger(), "joint_state_rate_hz and tf_rate_hz decimate differently (%d vs %d "
@@ -179,6 +189,53 @@ public:
     if (declare_parameter("enable_debug_viewer", false)) {
       viewer_ = std::make_unique<DebugViewer>(api_, model_);
       RCLCPP_INFO(get_logger(), "Debug viewer enabled (GLFW window)");
+    }
+
+    if (declare_parameter("enable_rgbd_camera", false)) {
+      if (camera_decimation_ % tf_decimation_ != 0) {
+        throw std::runtime_error(
+                "camera_rate_hz must produce frames on episode_observation steps "
+                "(camera decimation must be a multiple of tf decimation)");
+      }
+      const int camera_id = api_.name2id(model_, mjOBJ_CAMERA, kCameraName);
+      const int camera_body_id = api_.name2id(model_, mjOBJ_BODY, kCameraBodyName);
+      if (camera_id < 0 || camera_body_id < 0 ||
+        model_->cam_bodyid[camera_id] != camera_body_id)
+      {
+        throw std::runtime_error(
+                "enable_rgbd_camera requires workcell_rgbd attached to camera_link");
+      }
+      const int width = model_->vis.global.offwidth;
+      const int height = model_->vis.global.offheight;
+      camera_ = std::make_unique<RgbdCamera>(api_, model_, camera_id, width, height);
+      const double fovy_rad = model_->cam_fovy[camera_id] * mjPI / 180.0;
+      const double focal = height / (2.0 * std::tan(fovy_rad / 2.0));
+      camera_info_.width = width;
+      camera_info_.height = height;
+      camera_info_.distortion_model = "plumb_bob";
+      camera_info_.d = {0.0, 0.0, 0.0, 0.0, 0.0};
+      camera_info_.k = {focal, 0.0, (width - 1) / 2.0,
+        0.0, focal, (height - 1) / 2.0,
+        0.0, 0.0, 1.0};
+      camera_info_.r = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
+      camera_info_.p = {focal, 0.0, (width - 1) / 2.0, 0.0,
+        0.0, focal, (height - 1) / 2.0, 0.0,
+        0.0, 0.0, 1.0, 0.0};
+      camera_info_.header.frame_id = kOpticalFrameName;
+      rgb_pub_ = create_publisher<sensor_msgs::msg::Image>(
+        "~/camera/color/image_raw",
+        rclcpp::SensorDataQoS());
+      depth_pub_ = create_publisher<sensor_msgs::msg::Image>(
+        "~/camera/depth/image_raw",
+        rclcpp::SensorDataQoS());
+      camera_info_pub_ = create_publisher<sensor_msgs::msg::CameraInfo>(
+        "~/camera/color/camera_info", rclcpp::SensorDataQoS());
+      depth_camera_info_pub_ = create_publisher<sensor_msgs::msg::CameraInfo>(
+        "~/camera/depth/camera_info", rclcpp::SensorDataQoS());
+      RCLCPP_INFO(
+        get_logger(), "RGB-D %dx%d at %.1f Hz, fovy=%.1f deg, fx=fy=%.3f px, depth=32FC1 metres",
+        width, height, 1.0 / (camera_decimation_ * timestep_s),
+        model_->cam_fovy[camera_id], focal);
     }
 
     // ClockQoS: best-effort, keep-last depth 1, volatile. Deliberately NOT reliable:
@@ -257,6 +314,7 @@ public:
     // Freed before model_/data_ (in reverse of the order they're needed) so no GL
     // teardown code runs against an already-deleted mjModel.
     viewer_.reset();
+    camera_.reset();
     if (data_) {
       api_.deleteData(data_);
     }
@@ -376,6 +434,13 @@ private:
       RCLCPP_WARN(
         get_logger(), "no `%s` body in model, not synthesizing %s",
         kHandBodyName, kTcpFrameName);
+    }
+
+    if (api_.name2id(model_, mjOBJ_BODY, kCameraBodyName) >= 0) {
+      const mjtNum optical_pos[3] = {0.0, 0.0, 0.0};
+      const mjtNum optical_quat[4] = {0.0, 1.0, 0.0, 0.0};
+      static_transforms_.push_back(
+        makeTransform(kCameraBodyName, kOpticalFrameName, optical_pos, optical_quat));
     }
 
     RCLCPP_INFO(
@@ -750,6 +815,9 @@ private:
       publishGripperContact();
       publishEpisodeObservation();
     }
+    if (camera_ && step_count_ % camera_decimation_ == 0) {
+      publishCamera();
+    }
 
     if (viewer_) {
       viewer_->pollEvents();
@@ -900,6 +968,45 @@ private:
     joint_state_pub_->publish(joint_state_msg_);
   }
 
+  void publishCamera()
+  {
+    // Capture first, then stamp every message from the same post-mj_step sim
+    // time. capture() fills CPU buffers only; this method adapts those buffers to
+    // standard ROS Image/CameraInfo messages.
+    camera_->capture(data_);
+    const auto stamp = simTime();
+    sensor_msgs::msg::Image rgb;
+    rgb.header.stamp = stamp;
+    rgb.header.frame_id = kOpticalFrameName;
+    rgb.height = camera_info_.height;
+    rgb.width = camera_info_.width;
+    rgb.encoding = "rgb8";
+    rgb.is_bigendian = false;
+    // rgb8 is tightly packed RGB: three uint8 channels per pixel and no row
+    // padding. The vector is already in ROS top-to-bottom row order.
+    rgb.step = rgb.width * 3;
+    rgb.data = camera_->rgb();
+    rgb_pub_->publish(rgb);
+
+    sensor_msgs::msg::Image depth;
+    depth.header = rgb.header;
+    depth.height = rgb.height;
+    depth.width = rgb.width;
+    depth.encoding = "32FC1";
+    depth.is_bigendian = false;
+    // 32FC1 is one float32 z-depth per pixel, in metres. Copy the byte view of
+    // the float vector into the ROS message without changing NaN values.
+    depth.step = depth.width * sizeof(float);
+    const auto & values = camera_->depth();
+    const auto * bytes = reinterpret_cast<const uint8_t *>(values.data());
+    depth.data.assign(bytes, bytes + values.size() * sizeof(float));
+    depth_pub_->publish(depth);
+
+    camera_info_.header.stamp = stamp;
+    camera_info_pub_->publish(camera_info_);
+    depth_camera_info_pub_->publish(camera_info_);
+  }
+
   void fillJointState()
   {
     joint_state_msg_.header.stamp = simTime();
@@ -983,6 +1090,13 @@ private:
   std::vector<geometry_msgs::msg::TransformStamped> tf_batch_;
   int joint_state_decimation_ = 1;
   int tf_decimation_ = 1;
+  int camera_decimation_ = 1;
+  std::unique_ptr<RgbdCamera> camera_;
+  sensor_msgs::msg::CameraInfo camera_info_;
+  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr rgb_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr depth_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr camera_info_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr depth_camera_info_pub_;
   int object_body_id_ = -1;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr object_pose_pub_;
   int hand_body_id_ = -1;

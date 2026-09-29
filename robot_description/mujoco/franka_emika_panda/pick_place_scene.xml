@@ -12,6 +12,10 @@
        than inventing a new one. -->
   <include file="scene.xml"/>
 
+  <visual>
+    <global offwidth="320" offheight="240"/>
+  </visual>
+
   <asset>
     <material name="table_material" rgba="0.55 0.4 0.25 1"/>
     <material name="cube_material" rgba="0.85 0.1 0.1 1"/>
@@ -19,6 +23,11 @@
   </asset>
 
   <worldbody>
+    <!-- MuJoCo camera axes: +X right, +Y up, -Z forward. The optical TF
+         below rotates 180 degrees about X to give +X right, +Y down, +Z forward. -->
+    <body name="camera_link" pos="0.5 -0.45 1.0" xyaxes="1 0 0 0 0.857 0.514">
+      <camera name="workcell_rgbd" fovy="50"/>
+    </body>
     <!-- Static: no joints, so buildFrameIndex (mujoco_bridge_node.cpp) never sees a
          "table" body at all - it is a geom directly on worldbody, same as "floor" in
          scene.xml. Top surface at z=0.22 (pos.z=0.2 + half-height 0.02). -->

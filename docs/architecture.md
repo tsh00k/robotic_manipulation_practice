@@ -37,7 +37,7 @@
 | `hand` | **`link7`** | 夹爪基座。**TF 里没有 `link8`**：MJCF 把 URDF 的 `link7→link8→hand` 两步合并成一步（`pos="0 0 0.107"` + 绕 z 转 −45°），数学上等价（已逐项核对，见 week1.md 4.3.3） | static（相对 `link7` 固定） |
 | `hand_tcp` | `hand` | 工具中心点（TCP），抓取位姿以此为参考 | static，由 `mujoco_bridge` **合成发布**（见下方说明，MJCF 里没有这个 frame） |
 | `left_finger` / `right_finger` | `hand` | 两指夹爪指尖 body，关节为 `finger_joint1`/`finger_joint2` | dynamic |
-| `camera_link` / `camera_optical_frame` | `world` 或固定支架 link | RGB-D 相机外参；只能由 TF 发布一份 | static |
+| `camera_link` / `camera_optical_frame` | `world` / `camera_link` | Stage P 固定 RGB-D 相机；外参由 bridge 的 TF 单点发布，见 1.1 节 | static |
 | `object` | `world` | 目标物体 ground-truth/估计位姿 | dynamic（free joint 的 body，由 `mujoco_bridge` 自动推导，无需额外代码） |
 
 规则：
@@ -47,6 +47,16 @@
   - **不得让 `robot_state_publisher` 发布 `/tf`**（它默认会发 `link0..link7` 这几条边，和 `mujoco_bridge` 直接冲突）。第6周接 MoveIt 时需要 `/robot_description`，届时应 remap 掉 rsp 的 `/tf`、`/tf_static`。职责划分：**URDF 负责"长什么样和怎么规划"，MuJoCo 负责"现在在哪"**。
 - ground truth 与视觉估计的 `object` frame 使用同一命名，但通过不同 topic 区分（oracle vs vision），不得混用。
 - 抓取/规划模块统一以 `hand_tcp` 作为末端参考 frame，不直接用 `hand`（TCP 已经把夹爪长度的偏移量算进去，避免每个模块各自加一遍）。
+
+### 1.1 Stage P 固定 RGB-D 相机
+
+`pick_place_scene.xml` 的项目自有 `<worldbody>` 增加固定 `camera_link` body 和其原点的 MuJoCo `workcell_rgbd` camera；vendor `scene.xml`/`panda.xml` 不变。`camera_link` 的 world 平移是 `(0.5, -0.45, 1.0)m`，`xyaxes="1 0 0 0 0.857 0.514"` 经 MuJoCo 正交化后定义从桌面负 Y 侧上方看向 box 的姿态：MuJoCo 相机局部 `+X` 向右、`+Y` 向上、`-Z` 向前。bridge 的现有静态 TF 生成器发布 `world -> camera_link`，同一生成器再合成 `camera_link -> camera_optical_frame`，旋转是绕 X 轴 180°（MuJoCo 四元数 `wxyz=(0,1,0,0)`）。光学 frame 因此为 `+X` 向右、`+Y` 向下、`+Z` 向前。感知节点不得再次发布这两条 TF 边。先后试过 `(0.8,0,0.85)m` 的斜视和 `(0.5,0,1.2)m` 的正上方安装，reset 回 home 后中心视线都被机械臂持续遮挡，故选择负 Y 侧上方；执行抓取时仍可能遮挡，不能将“中心像素必为 box”当成视觉算法不变量。
+
+相机通过 `enable_rgbd_camera:=true` 启用，默认关闭以保持无图形会话的 bridge 可运行；`demo.launch.py` 同名参数可覆盖。启用后 bridge 从同一份 `mjData` 的物理步快照渲染 RGB 和深度，发布到 `/mujoco_bridge/camera/color/image_raw` (`rgb8`)、`/mujoco_bridge/camera/depth/image_raw` (`32FC1`, **米，沿光轴的 z-depth**)，并在 `color/camera_info` 和 `depth/camera_info` 发布相同、零畸变的内参。两张图及两份 CameraInfo 的 `header.stamp` 完全相同，均是该次 `mj_step` 后的仿真时间；`frame_id=camera_optical_frame`。默认分辨率 320×240，MuJoCo `fovy=50°`，`fx=fy=257.34083046 px`，`cx=159.5`、`cy=119.5`。光学 frame 的反投影为 `[(u-cx)z/fx, (v-cy)z/fy, z]`。MuJoCo 的 OpenGL 深度缓冲先按近远裁剪平面转换为米，无效/远裁剪值写 NaN，不能把原始 0..1 缓冲值当成米。
+
+默认 `camera_rate_hz=10`（每 50 个 0.002s 物理步），`tf_rate_hz=100`（每 5 步）。**同步契约**：图像使用标准 ROS 话题，不扩充 `BridgeObservation`；消费者按完全相等的仿真时间戳（最大允许差 `0 ns`）匹配 RGB、depth、CameraInfo 和 `~/episode_observation`。启用相机时 bridge 要求 camera decimation 是 TF/observation decimation 的整数倍，使每一帧相机图像必有同一步的 observation。匹配后从 observation 获取 `bridge_session`、`generation`、`sample_sequence`，按现有 reset 新鲜度规则拒绝旧 generation；ROS 话题送达次序不提供原子性，消费者须缓存并匹配，不能取各话题“最新一条”静默拼接。相机 TF 是静态的，可按该图像时间戳查询。Stage Q 的正式位姿输出必须经此 TF 变换到 `world`，不得发布在 camera frame 或覆盖 oracle topic。
+
+Stage P 的几何检查由 `src/mujoco_bridge/test/camera_probe.py` 这个**运行时集成检查脚本**完成：它作为 ROS 2 Python 节点订阅 RGB-D、CameraInfo、TF、oracle 和 `BridgeObservation`，按完全相等的时间戳配成一帧，再检查消息契约并反投影两个已知像素。中心像素 `(160,120)` 深度 `0.8613 m`，反投影 world 点 `(0.5017,-0.0084,0.2605)m`，相对 oracle box 中心 XY 偏差 `8.6 mm`、box 顶面高度偏差 `0.6 mm`；桌面像素 `(160,180)` 反投影 `z=0.2206 m`，场景顶面为 `0.22 m`。reset 后 generation 从 `0` 增至 `1`，同一检查仍通过。这是仿真链路的 smoke test，不是传感器驱动或物体位姿估计算法；这些默认静态场景检查不代表真机标定、噪声或运动中动态同步已经完成评估。
 
 **`hand_tcp` 合成说明**：MuJoCo 的 `panda.xml` 里**没有** `hand_tcp` 这个 body/site。这个 frame 来自 URDF 侧 `franka_description/end_effectors/common/franka_hand.xacro` 的 `hand_tcp_joint`，是一个**空 link**（无 visual/collision/inertial），即纯粹的命名坐标系：不参与动力学、不参与碰撞、不占 DoF。偏移量 `xyz="0 0 0.1034"`, `rpy="0 0 0"`（相对 `hand`）。`mujoco_bridge` 额外手动合成一条 `hand -> hand_tcp` static TF，这样下游抓取/规划模块仍能拿到 `hand_tcp`。
 
@@ -149,7 +159,7 @@ Stage L 已在 [test_model_consistency.cpp](../src/mujoco_bridge/test/test_model
 - [ ] 第6周接 MoveIt 时决定 `robot_state_publisher` 的 TF remap 方案，并补一份 `docs/adr/`
 - [ ] **第6周决定"初始位姿"以 MJCF `home` 还是 SRDF `ready` 为权威**（见第 2.1 节），同样需要 ADR
 - [x] 定下 `~/reset` 的语义边界（复位状态不复位时间、仿真专有接口用私有名）——见第 2.2 节（Stage D）
-- [ ] 记录相机外参数值来源与标定方式（相机型号/安装位置尚未选定）
+- [x] 记录 Stage P 仿真相机外参数值来源：项目自有 MJCF 的固定 body 位姿，见 1.1 节；尚未进行真机标定
 - [x] 确认 URDF 与 MJCF 碰撞几何并非全身同一表示；相同与不同部分见第3节
 - [x] 编写自动三方测试：7组固定 `q`，逐 link 对比 MuJoCo、MoveIt 与自写 FK/Jacobian（Stage L）
 - [ ] keyframe 长度不匹配会被静默补零（不报错，见第 0.1 节）——需要至少一个 gtest 防止手滑改错 `qpos` 长度却没人发现（Stage G 实测，见 [week2.md 8.8](../Job_guides/my_study/week2.md#88-排查记录keyframe-名字冲突与长度不匹配是两件独立的事结论被推翻)）

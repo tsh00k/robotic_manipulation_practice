@@ -71,6 +71,8 @@ MujocoApi & loadMujocoApi()
       resolve(handle, "mjr_makeContext", api.makeContext);
       resolve(handle, "mjv_updateScene", api.updateScene);
       resolve(handle, "mjr_render", api.render);
+      resolve(handle, "mjr_setBuffer", api.setBuffer);
+      resolve(handle, "mjr_readPixels", api.readPixels);
       resolve(handle, "mjv_freeScene", api.freeScene);
       resolve(handle, "mjr_freeContext", api.freeContext);
       resolve(handle, "mjv_moveCamera", api.moveCamera);

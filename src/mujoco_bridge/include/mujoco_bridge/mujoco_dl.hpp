@@ -80,6 +80,8 @@ struct MujocoApi
   decltype(&mjr_makeContext) makeContext;
   decltype(&mjv_updateScene) updateScene;
   decltype(&mjr_render) render;
+  decltype(&mjr_setBuffer) setBuffer;
+  decltype(&mjr_readPixels) readPixels;
   decltype(&mjv_freeScene) freeScene;
   decltype(&mjr_freeContext) freeContext;
   decltype(&mjv_moveCamera) moveCamera;
