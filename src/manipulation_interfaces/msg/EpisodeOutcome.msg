@@ -14,6 +14,14 @@ bool success
 # which only ever means the retries ran out, not what kept failing.
 string failure_code
 
+# Observation selected for this episode. The source is never inferred from the
+# pose topic: it is recorded explicitly so oracle and vision runs stay separate.
+string observation_source
+float64 observation_confidence
+float64 observation_residual_m
+string observation_failure_layer
+string observation_failure_reason
+
 uint32 retries
 
 # Parallel arrays, one entry per phase the episode actually visited, in the

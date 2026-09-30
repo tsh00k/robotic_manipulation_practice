@@ -25,6 +25,11 @@ const char * waypointModeName(WaypointMode mode)
   return mode == WaypointMode::kDiffIk ? "diff_ik" : "keyframe";
 }
 
+const char * observationSourceName(ObservationSource source)
+{
+  return source == ObservationSource::kOracle ? "oracle" : "vision";
+}
+
 PickPlaceGeometry PlacementTask::geometry() const
 {
   PickPlaceGeometry result;
@@ -58,6 +63,20 @@ TaskExecutorConfig loadTaskExecutorConfig(rclcpp::Node & node)
   config.fsm.max_retries = node.declare_parameter("fsm.max_retries", 3);
 
   const std::string mode = node.declare_parameter("waypoint_source", "diff_ik");
+  const std::string observation_source = node.declare_parameter("observation_source", "oracle");
+  if (observation_source == "oracle") {
+    config.observation_source = ObservationSource::kOracle;
+  } else if (observation_source == "vision") {
+    config.observation_source = ObservationSource::kVision;
+  } else {
+    throw std::invalid_argument("observation_source must be oracle or vision");
+  }
+  config.vision_min_confidence = node.declare_parameter(
+    "vision.min_confidence", config.vision_min_confidence);
+  config.vision_max_residual_m = node.declare_parameter(
+    "vision.max_residual_m", config.vision_max_residual_m);
+  config.vision_min_inlier_ratio = node.declare_parameter(
+    "vision.min_inlier_ratio", config.vision_min_inlier_ratio);
   config.task.tcp_target_x_m = node.declare_parameter("target.place_x_m", 0.5);
   config.task.tcp_target_y_m = node.declare_parameter("target.place_y_m", 0.3);
   config.task.hover_height_m = node.declare_parameter("target.hover_height_m", 0.15);
@@ -104,6 +123,13 @@ void validateTaskExecutorConfig(const TaskExecutorConfig & config)
   }
   if (config.fsm.max_retries < 0 || config.fsm.phase_timeout_s <= 0.0) {
     throw std::invalid_argument("Task executor FSM configuration is invalid");
+  }
+  if (!finite(config.vision_min_confidence) || !finite(config.vision_max_residual_m) ||
+    !finite(config.vision_min_inlier_ratio) || config.vision_min_confidence < 0.0 ||
+    config.vision_min_confidence > 1.0 || config.vision_max_residual_m <= 0.0 ||
+    config.vision_min_inlier_ratio < 0.0 || config.vision_min_inlier_ratio > 1.0)
+  {
+    throw std::invalid_argument("Vision observation quality thresholds are invalid");
   }
   if (config.fsm.place_x_m != config.verification.box_target_x_m ||
     config.fsm.place_y_m != config.verification.box_target_y_m ||

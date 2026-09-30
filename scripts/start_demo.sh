@@ -6,6 +6,7 @@
 #   scripts/start_demo.sh --no-build
 #   scripts/start_demo.sh --packages-select mujoco_bridge task_executor
 #   scripts/start_demo.sh --no-build -- enable_debug_viewer:=true
+#   scripts/start_demo.sh --vision --viewer
 
 set -euo pipefail
 
@@ -20,10 +21,15 @@ Options:
   --no-build              Reuse the existing build/install spaces.
   --no-symlink-install    Do not pass --symlink-install to colcon build.
   --packages-select PKG   Build only selected packages (may be repeated).
+  --vision                Enable RGB-D, vision observations and the estimator.
+  --viewer                Open the MuJoCo debug viewer.
   -h, --help              Show this help.
 
 Everything after '--' is passed unchanged to demo.launch.py, for example:
   -- enable_debug_viewer:=true joint_state_rate_hz:=200
+
+For visual validation, run: scripts/start_demo.sh --vision --viewer
+The launch file also opens RViz; use rqt_image_view separately for camera images.
 EOF
 }
 
@@ -31,6 +37,8 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ROS_SETUP="/opt/ros/humble/setup.bash"
 DO_BUILD=1
 SYMLINK_INSTALL=1
+VISION=0
+VIEWER=0
 BUILD_ARGS=()
 LAUNCH_ARGS=()
 
@@ -47,6 +55,14 @@ while (($# > 0)); do
       ;;
     --no-symlink-install)
       SYMLINK_INSTALL=0
+      shift
+      ;;
+    --vision)
+      VISION=1
+      shift
+      ;;
+    --viewer)
+      VIEWER=1
       shift
       ;;
     --packages-select)
@@ -106,6 +122,15 @@ if [[ ! -f "$REPO_ROOT/install/local_setup.bash" ]]; then
 fi
 
 source_environment "$REPO_ROOT/install/local_setup.bash"
+
+PRESET_ARGS=()
+if ((VISION)); then
+  PRESET_ARGS+=(enable_rgbd_camera:=true observation_source:=vision)
+fi
+if ((VIEWER)); then
+  PRESET_ARGS+=(enable_debug_viewer:=true)
+fi
+LAUNCH_ARGS=("${PRESET_ARGS[@]}" "${LAUNCH_ARGS[@]}")
 
 echo "+ ros2 launch mujoco_bridge demo.launch.py ${LAUNCH_ARGS[*]}"
 exec ros2 launch mujoco_bridge demo.launch.py "${LAUNCH_ARGS[@]}"

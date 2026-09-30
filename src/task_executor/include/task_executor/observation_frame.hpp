@@ -36,6 +36,10 @@ struct ObservationFrame
   std::string object_frame_id;
   mujoco_bridge::GraspSignals grasp_signals;
   Eigen::Isometry3d world_to_hand_tcp = Eigen::Isometry3d::Identity();
+  std::string object_source = "oracle";
+  double object_confidence = 1.0;
+  double object_residual_m = 0.0;
+  std::string object_rejection_reason;
 };
 
 struct ObservationEnvelope

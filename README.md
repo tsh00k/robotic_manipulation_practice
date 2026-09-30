@@ -14,6 +14,5 @@ The learned-policy boundary allows IL, RL, VLA and LeRobot adapters to produce t
 - [Week 4: RGB-D and geometric pose estimation](Job_guides/my_study/week4.md)
 - [Week 4.5: policy/data boundary and delivery](Job_guides/my_study/week4.5.md)
 - [Container delivery plan](Job_guides/my_study/container_delivery_plan.md)
-- [ADR 005: policy backends and data contract](docs/adr/005-policy-backends-and-data-contract.md)
 
 The current Distrobox environment is a development aid, not the reproducible delivery artifact. Public container validation must use a dedicated container home and an explicit `/workspace` mount; it must not depend on the host's full home directory, shell configuration or pyenv state.

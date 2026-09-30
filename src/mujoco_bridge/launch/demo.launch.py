@@ -14,6 +14,7 @@
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
+from launch.conditions import LaunchConfigurationEquals
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
@@ -43,6 +44,10 @@ def generate_launch_description():
     debug_viewer_rate_hz_arg = DeclareLaunchArgument('debug_viewer_rate_hz', default_value='30.0')
     enable_rgbd_camera_arg = DeclareLaunchArgument('enable_rgbd_camera', default_value='false')
     camera_rate_hz_arg = DeclareLaunchArgument('camera_rate_hz', default_value='10.0')
+    observation_source_arg = DeclareLaunchArgument('observation_source', default_value='oracle')
+    vision_min_confidence_arg = DeclareLaunchArgument('vision_min_confidence', default_value='0.5')
+    vision_max_residual_arg = DeclareLaunchArgument('vision_max_residual_m', default_value='0.005')
+    vision_min_inlier_arg = DeclareLaunchArgument('vision_min_inlier_ratio', default_value='0.7')
 
     bridge_node = Node(
         package='mujoco_bridge',
@@ -84,6 +89,21 @@ def generate_launch_description():
         # node. Without this, fsm.cpp's phase_timeout_s (and every
         # elapsed_in_phase_s measurement it is compared against) would run on wall
         # time instead of sim time.
+        parameters=[{
+            'use_sim_time': True,
+            'observation_source': LaunchConfiguration('observation_source'),
+            'vision.min_confidence': LaunchConfiguration('vision_min_confidence'),
+            'vision.max_residual_m': LaunchConfiguration('vision_max_residual_m'),
+            'vision.min_inlier_ratio': LaunchConfiguration('vision_min_inlier_ratio'),
+        }],
+    )
+
+    perception_node = Node(
+        package='mujoco_perception',
+        executable='object_pose_estimator_node',
+        name='object_pose_estimator',
+        output='screen',
+        condition=LaunchConfigurationEquals('observation_source', 'vision'),
         parameters=[{'use_sim_time': True}],
     )
 
@@ -110,7 +130,12 @@ def generate_launch_description():
         debug_viewer_rate_hz_arg,
         enable_rgbd_camera_arg,
         camera_rate_hz_arg,
+        observation_source_arg,
+        vision_min_confidence_arg,
+        vision_max_residual_arg,
+        vision_min_inlier_arg,
         bridge_node,
         task_executor_node,
+        perception_node,
         rviz_node,
     ])

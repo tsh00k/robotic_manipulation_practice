@@ -18,6 +18,7 @@
 #include <chrono>
 #include <cmath>
 #include <limits>
+#include <map>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -26,8 +27,10 @@
 
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <control_msgs/msg/gripper_command.hpp>
+#include <geometry_msgs/msg/pose_stamped.hpp>
 #include <manipulation_interfaces/msg/bridge_observation.hpp>
 #include <manipulation_interfaces/msg/episode_outcome.hpp>
+#include <manipulation_interfaces/msg/vision_object_pose.hpp>
 #include <manipulation_interfaces/srv/reset_scene.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/empty.hpp>
@@ -75,6 +78,10 @@ public:
       *waypoint_source_, config_.fsm, diff_ik_source_.get());
     RCLCPP_INFO(get_logger(), "waypoint source: %s", waypointModeName(config_.waypoint_mode));
     RCLCPP_INFO(
+      get_logger(), "observation source: %s (vision confidence>=%.3f residual<=%.4fm inlier>=%.3f)",
+      observationSourceName(config_.observation_source), config_.vision_min_confidence,
+      config_.vision_max_residual_m, config_.vision_min_inlier_ratio);
+    RCLCPP_INFO(
       get_logger(),
       "placement configuration: task_tcp_xy=[%.5f %.5f] verify_box_xy=[%.5f %.5f] "
       "verify_radius=%.5fm allow_target_mismatch=%d",
@@ -91,6 +98,9 @@ public:
     observation_sub_ = create_subscription<manipulation_interfaces::msg::BridgeObservation>(
       "/mujoco_bridge/episode_observation", rclcpp::QoS(10),
       std::bind(&TaskExecutorNode::onObservation, this, std::placeholders::_1));
+    vision_sub_ = create_subscription<manipulation_interfaces::msg::VisionObjectPose>(
+      "/object_pose_estimator/object_pose", rclcpp::QoS(10),
+      std::bind(&TaskExecutorNode::onVisionObservation, this, std::placeholders::_1));
 
     // Private names, same reasoning as mujoco_bridge's ~/reset (architecture.md
     // 2.2): a capability of *this* node instance, not a system-wide singleton.
@@ -115,27 +125,98 @@ private:
   void onObservation(const manipulation_interfaces::msg::BridgeObservation::SharedPtr msg)
   {
     latest_observation_ = msg;
+    observation_cache_[msg->sample_sequence] = msg;
+    while (observation_cache_.size() > 30) {observation_cache_.erase(observation_cache_.begin());}
+  }
+
+  void onVisionObservation(
+    const manipulation_interfaces::msg::VisionObjectPose::SharedPtr msg)
+  {
+    latest_vision_observation_ = msg;
+    vision_cache_[msg->sample_sequence] = msg;
+    while (vision_cache_.size() > 30) {vision_cache_.erase(vision_cache_.begin());}
   }
 
   // Convert one bridge message and pass it through the controller's freshness gate.
   void collectObservation()
   {
-    if (!latest_observation_) {
-      return;
+    manipulation_interfaces::msg::BridgeObservation::SharedPtr bridge;
+    geometry_msgs::msg::PoseStamped object_pose;
+    std::string object_source = observationSourceName(config_.observation_source);
+    double confidence = config_.observation_source == ObservationSource::kOracle ? 1.0 : 0.0;
+    double residual_m = 0.0;
+    std::string rejection_reason;
+
+    if (config_.observation_source == ObservationSource::kOracle) {
+      bridge = latest_observation_;
+      if (!bridge) {return;}
+      object_pose = bridge->object_pose;
+    } else {
+      if (!latest_vision_observation_) {return;}
+      const auto vision = latest_vision_observation_;
+      const auto bridge_it = observation_cache_.find(vision->sample_sequence);
+      if (bridge_it == observation_cache_.end() ||
+        bridge_it->second->bridge_session != vision->bridge_session ||
+        bridge_it->second->generation != vision->generation ||
+        vision->sample_sequence <= last_vision_sequence_processed_)
+      {
+        return;
+      }
+      bridge = bridge_it->second;
+      last_vision_sequence_processed_ = vision->sample_sequence;
+      confidence = vision->confidence;
+      residual_m = vision->residual_m;
+      rejection_reason = vision->rejection_reason;
+      last_observation_source_ = object_source;
+      last_observation_confidence_ = confidence;
+      last_observation_residual_m_ = residual_m;
+      const bool quality_ok = vision->accepted &&
+        std::isfinite(vision->confidence) && vision->confidence >= config_.vision_min_confidence &&
+        std::isfinite(vision->residual_m) && vision->residual_m <= config_.vision_max_residual_m &&
+        std::isfinite(vision->inlier_ratio) &&
+        vision->inlier_ratio >= config_.vision_min_inlier_ratio;
+      const bool current_episode_sample =
+        controller_->state() != EpisodeState::kIdle &&
+        controller_->state() != EpisodeState::kFinished &&
+        controller_->state() != EpisodeState::kFailed &&
+        vision->bridge_session == controller_->bridgeSession() &&
+        vision->generation == controller_->generation();
+      if (!quality_ok) {
+        if (current_episode_sample) {
+          const std::string reason = vision->accepted ? "VISION_LOW_CONFIDENCE" :
+            "VISION_REJECTED";
+          last_observation_failure_reason_ = reason +
+            (vision->rejection_reason.empty() ? "" : ":" + vision->rejection_reason);
+          last_observation_rejected_ = true;
+          executeActions(controller_->finishEpisode(false, reason, true));
+        }
+        return;
+      }
+      object_pose.header = vision->header;
+      object_pose.pose = vision->pose;
+      object_pose.header.frame_id = "world";
     }
+
     auto snapshot = makeObservationSnapshot(
-      latest_observation_->joint_state, latest_observation_->object_pose,
-      latest_observation_->left_finger_contact, latest_observation_->right_finger_contact,
-      latest_observation_->world_to_hand_tcp);
+      bridge->joint_state, object_pose, bridge->left_finger_contact, bridge->right_finger_contact,
+      bridge->world_to_hand_tcp);
     if (!snapshot) {
       return;
     }
     ObservationEnvelope envelope;
     envelope.frame = *snapshot;
-    envelope.bridge_session = latest_observation_->bridge_session;
-    envelope.generation = latest_observation_->generation;
-    envelope.sample_sequence = latest_observation_->sample_sequence;
-    envelope.sim_time_s = rclcpp::Time(latest_observation_->joint_state.header.stamp).seconds();
+    envelope.bridge_session = bridge->bridge_session;
+    envelope.generation = bridge->generation;
+    envelope.sample_sequence = bridge->sample_sequence;
+    envelope.sim_time_s = rclcpp::Time(bridge->joint_state.header.stamp).seconds();
+    envelope.frame.object_source = object_source;
+    envelope.frame.object_confidence = confidence;
+    envelope.frame.object_residual_m = residual_m;
+    envelope.frame.object_rejection_reason = rejection_reason;
+    last_observation_source_ = object_source;
+    last_observation_confidence_ = confidence;
+    last_observation_residual_m_ = residual_m;
+    last_observation_rejected_ = false;
     const auto actions = controller_->onObservation(
       envelope, std::chrono::steady_clock::now(), get_clock()->now().seconds());
     // Admission can end the episode on timeout or supersession before tick runs.
@@ -215,6 +296,16 @@ private:
   void onStartEpisode(const std_msgs::msg::Empty::SharedPtr)
   {
     latest_observation_.reset();
+    latest_vision_observation_.reset();
+    observation_cache_.clear();
+    vision_cache_.clear();
+    last_vision_sequence_processed_ = 0;
+    last_observation_failure_reason_.clear();
+    last_observation_source_ = observationSourceName(config_.observation_source);
+    last_observation_confidence_ = config_.observation_source ==
+      ObservationSource::kOracle ? 1.0 : 0.0;
+    last_observation_residual_m_ = 0.0;
+    last_observation_rejected_ = false;
     observation_generation_logged_ = false;
     const auto actions = controller_->startEpisode(
       std::chrono::steady_clock::now(), get_clock()->now().seconds());
@@ -232,22 +323,28 @@ private:
     manipulation_interfaces::msg::EpisodeOutcome outcome;
     outcome.success = finished.success;
     outcome.failure_code = finished.failure_code;
+    outcome.observation_source = last_observation_source_;
+    outcome.observation_confidence = last_observation_confidence_;
+    outcome.observation_residual_m = last_observation_residual_m_;
+    outcome.observation_failure_layer = finished.success ? "" :
+      (finished.failure_code.rfind("VISION_", 0) == 0 ? "perception" : "execution");
+    outcome.observation_failure_reason = last_observation_failure_reason_;
     outcome.retries = finished.retry_count;
     finished.telemetry.appendTo(outcome);
     episode_outcome_pub_->publish(outcome);
     RCLCPP_INFO(
       get_logger(), "episode outcome published: success=%d failure_code=%s retries=%u",
       outcome.success, outcome.failure_code.c_str(), outcome.retries);
-    if (latest_observation_) {
-      const double dx = latest_observation_->object_pose.pose.position.x -
+    if (controller_->latestObservation() && !last_observation_rejected_) {
+      const auto & pose = controller_->latestObservation()->frame.object_pose;
+      const double dx = pose.x -
         config_.verification.box_target_x_m;
-      const double dy = latest_observation_->object_pose.pose.position.y -
+      const double dy = pose.y -
         config_.verification.box_target_y_m;
       RCLCPP_INFO(
         get_logger(),
         "final placement: box_xy=[%.5f %.5f] verify_xy=[%.5f %.5f] error=%.5fm",
-        latest_observation_->object_pose.pose.position.x,
-        latest_observation_->object_pose.pose.position.y,
+        pose.x, pose.y,
         config_.verification.box_target_x_m, config_.verification.box_target_y_m,
         std::hypot(dx, dy));
     }
@@ -303,7 +400,12 @@ private:
     // Drop the old ROS sample before submitting a new reset generation.
     if (actions.reset_request) {
       latest_observation_.reset();
+      latest_vision_observation_.reset();
+      observation_cache_.clear();
+      vision_cache_.clear();
+      last_vision_sequence_processed_ = 0;
       observation_generation_logged_ = false;
+      last_observation_rejected_ = false;
       requestReset(*actions.reset_request);
     }
     // The controller emits this only once; publish after any same-tick target.
@@ -344,8 +446,20 @@ private:
   rclcpp::Client<manipulation_interfaces::srv::ResetScene>::SharedPtr reset_client_;
   rclcpp::Subscription<manipulation_interfaces::msg::BridgeObservation>::SharedPtr
     observation_sub_;
+  rclcpp::Subscription<manipulation_interfaces::msg::VisionObjectPose>::SharedPtr
+    vision_sub_;
   rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr start_episode_sub_;
   manipulation_interfaces::msg::BridgeObservation::SharedPtr latest_observation_;
+  manipulation_interfaces::msg::VisionObjectPose::SharedPtr latest_vision_observation_;
+  std::map<uint64_t, manipulation_interfaces::msg::BridgeObservation::SharedPtr>
+  observation_cache_;
+  std::map<uint64_t, manipulation_interfaces::msg::VisionObjectPose::SharedPtr> vision_cache_;
+  uint64_t last_vision_sequence_processed_ = 0;
+  std::string last_observation_source_ = "oracle";
+  double last_observation_confidence_ = 1.0;
+  double last_observation_residual_m_ = 0.0;
+  bool last_observation_rejected_ = false;
+  std::string last_observation_failure_reason_;
 };
 
 }  // namespace task_executor

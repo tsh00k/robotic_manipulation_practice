@@ -1,6 +1,6 @@
 # Week 4.5 学习笔记
 
-> Week 4.5 是 Week 4 视觉主线和后续规划/策略实验之间的接口周。本文按 Stage S~U 记录计划、实现、验证、讲解和悬挂问题。它不承担 VLA/RL/IL 大模型训练，也不把 MoveIt 设为 learned policy 的前置依赖。
+> Week 4.5 是 Week 4 视觉主线和多物体 bin 任务、后续规划/策略实验之间的接口周。Stage 1 先把单目标基线扩展为多个不同色立方体和 bin，再冻结策略无关的 observation/action/episode 契约；Stage 2 记录可回放的多物体任务数据；Stage 3 接入多 backend。R1~R3 尚未完成时，本周不得把预测位姿当作实测观测。本文按 Stage 1~3 记录计划、实现、验证、讲解和悬挂问题。它不承担 VLA/RL/IL 大模型训练，也不把 MoveIt 设为 learned policy 的前置依赖。
 
 ## 学习重点范围
 
@@ -22,9 +22,9 @@ learned policy 可以自己承担 motion planning、碰撞规避、关节限位�
 
 - [1. 从 Week 4 继承的事实](#1-从-week-4-继承的事实)
 - [2. 本周 Stage 计划](#2-本周-stage-计划)
-  - [2.1 Stage S：策略无关的 observation/action/episode 契约](#21-stage-s策略无关的-observationactionepisode-契约)
-  - [2.2 Stage T：逐步数据记录、replay 和 LeRobot adapter](#22-stage-t逐步数据记录replay-和-lerobot-adapter)
-  - [2.3 Stage U：多 backend 接入和容器交付](#23-stage-u多-backend-接入和容器交付)
+  - [2.1 Stage 1：策略无关的 observation/action/episode 契约](#21-stage-1策略无关的-observationactionepisode-契约)
+  - [2.2 Stage 2：逐步数据记录、replay 和 LeRobot adapter](#22-stage-2逐步数据记录replay-和-lerobot-adapter)
+  - [2.3 Stage 3：多 backend 接入和容器交付](#23-stage-3多-backend-接入和容器交付)
 - [3. 训练和推理边界](#3-训练和推理边界)
 - [4. 本周验收标准](#4-本周验收标准)
 - [5. 失败模式和验证方法](#5-失败模式和验证方法)
@@ -35,25 +35,34 @@ learned policy 可以自己承担 motion planning、碰撞规避、关节限位�
 
 | 事实 | 本周处理 |
 | --- | --- |
-| oracle 和 vision 是 observation source | observation 中必须标记来源，训练和评测不能把 oracle 混入 vision 数据 |
+| oracle 和 vision 是 observation source | observation 中必须标记来源；R3 后还需保留 `MEASURED/PREDICTED/OCCLUDED/REJECTED`、最近实测时间和预测年龄，训练和评测不能把 oracle 或预测值混作 vision 实测数据 |
 | `BridgeObservation` 已有 session/generation/sequence | 这些字段进入数据记录的 episode identity 和样本排序 |
 | `EpisodeController` 管理 reset、过期观测和终止原因 | recorder 记录 reset event、applied action、terminal outcome，而不是只记录最终 CSV |
 | 当前执行链主要发布离散关节目标 | action contract 增加 trajectory/action chunk，但保留现有 baseline 适配器 |
+| Week 4 单目标 box 基线 | 本周扩展为多个不同颜色立方体和多个不同颜色 bin；颜色匹配、实例身份和 bin 内放置结果必须分别记录 |
 | 当前场景没有障碍 | 本周定义障碍字段和 backend 边界，不宣称已经验证 learned policy 的障碍规划 |
 
 ## 2. 本周 Stage 计划
 
-### 2.1 Stage S：策略无关的 observation/action/episode 契约
+### 2.1 Stage 1：策略无关的 observation/action/episode 契约
 
-定义一个不绑定 LeRobot、PyTorch 或 MoveIt 的领域契约。
+先定义一个不绑定 LeRobot、PyTorch 或 MoveIt 的领域契约，并覆盖多物体 bin 任务。
+
+**多物体任务至少包含：**
+
+- 两个以上不同颜色的立方体和 bin，以及稳定的 object/bin instance id；
+- 任务指令，例如“将红色立方体放入红色 bin”；
+- object candidate、bin candidate、颜色/实例置信度、world pose 和 rejection reason；
+- 颜色匹配结果与几何放置证据分开记录。颜色不是唯一安全条件，成功还要检查物体在正确 bin 的边界内并稳定停留。
 
 **Observation 至少包含：**
 
 - session、generation、sample sequence、simulation timestamp；
 - `q`、`dq`、夹爪状态和 TCP 状态；
 - RGB、depth、CameraInfo、相机 frame 和外参版本；
-- object pose、置信度、残差和 source（`oracle`/`vision`）；
+- object pose、置信度、残差和 source（`oracle`/`vision`）；视觉样本还需保留 R3 冻结的证据状态、最近实测时间/序号、预测年龄及不确定性；
 - task id 或 instruction metadata；
+- 多物体任务的 object/bin identity、颜色匹配和放置状态；
 - 可选的障碍几何/场景表示。
 
 **Action 至少支持：**
@@ -66,9 +75,9 @@ learned policy 可以自己承担 motion planning、碰撞规避、关节限位�
 
 策略输出的规划责任属于策略 backend。执行层只做消息完整性、NaN/Inf、过期动作和进程级异常检查，不替策略重新规划。
 
-### 2.2 Stage T：逐步数据记录、replay 和 LeRobot adapter
+### 2.2 Stage 2：逐步数据记录、replay 和 LeRobot adapter
 
-数据记录必须保存观测和**实际执行的动作**，而不是只保存策略名义输出。至少记录：
+数据记录必须保存观测和**实际执行的动作**，而不是只保存策略名义输出。多物体任务还要能重建“看到什么、选择了什么、放入哪个 bin、是否成功”。至少记录：
 
 ```text
 observation_t
@@ -77,13 +86,17 @@ applied_action_t
 timestamp_t / latency_t
 phase / reward / terminated / truncated
 failure_code / reset_generation
+object_candidates / bin_candidates / selected_object / selected_bin
+match_confidence / placement_evidence / source
 ```
 
 先用 rosbag2 或项目内部中间格式保存原始数据，再写 Python 转换器导出到固定版本的 LeRobot dataset。LeRobot 依赖和数据格式版本必须被锁定；C++ bridge 不直接链接 LeRobot Python 包。
 
 replay 需要验证：同一 bag 在相同仿真配置下能重建 observation 顺序、action 时间关系和 episode outcome。它既用于视觉回归，也用于远程训练前的数据检查。
 
-### 2.3 Stage U：多 backend 接入和容器交付
+第一版可以使用有限颜色集合和已知立方体/bin 模型，但必须保留原始 RGB-D；不能把离散颜色标签当作通用视觉能力，也不能让 oracle 标签混入 vision 训练数据。
+
+### 2.3 Stage 3：多 backend 接入和容器交付
 
 先实现一个 scripted backend 通过统一接口运行，证明策略接口不是只为某个模型定制。随后保留以下 backend 位置：
 
@@ -128,13 +141,15 @@ observation -> inference -> short action chunk -> re-observe -> inference
 
 ## 4. 本周验收标准
 
-1. observation、action、episode contract 写入 `docs/architecture.md` 和 ADR。
-2. scripted backend 能通过统一 policy gateway 完成一次 episode。
-3. 数据记录同时保存 observation、名义 action 和 applied action，并可 replay。
-4. 至少一个样本集可以导出为锁定版本的 LeRobot dataset，且不要求 C++ bridge 安装 Python 模型依赖。
-5. policy backend 可以输出 action chunk；gateway 能处理超时、过期、NaN/Inf 和错误维度。
-6. learned policy 路径不强制经过 MoveIt；MoveIt 在架构中作为并行 backend 和对照来源。
-7. core 容器在专用 home 和显式 workspace mount 下完成 build/test/smoke，不能读取作者个人 home。
+1. 场景至少有两个不同颜色立方体和两个不同颜色 bin，并可重复 reset。
+2. oracle 模式能完成至少两种颜色匹配任务，记录正确的 object/bin identity。
+3. observation、action、episode contract 写入 `docs/architecture.md`，包含候选、匹配和放置证据字段。
+4. scripted backend 能通过统一 policy gateway 完成一次 episode。
+5. 数据记录同时保存 RGB-D、instruction、候选/match、名义 action、applied action 和 outcome，并可 replay。
+6. 至少一个样本集可以导出为锁定版本的 LeRobot dataset，且不要求 C++ bridge 安装 Python 模型依赖。
+7. policy backend 可以输出 action chunk；gateway 能处理超时、过期、NaN/Inf 和错误维度。
+8. learned policy 路径不强制经过 MoveIt；MoveIt 在架构中作为并行 backend 和对照来源。
+9. core 容器在专用 home 和显式 workspace mount 下完成 build/test/smoke，不能读取作者个人 home。
 
 ## 5. 失败模式和验证方法
 
@@ -147,6 +162,9 @@ observation -> inference -> short action chunk -> re-observe -> inference
 | 策略输出越界或 NaN | 执行节点异常 | 单测和进程级故障注入 |
 | 容器依赖宿主 home | 换机器无法复现 | 使用专用 home、空 workspace 和最小环境 smoke test |
 | 把 MoveIt 当作 learned policy 必经层 | 策略接口被传统规划器限制 | 用 scripted 和 dummy learned backend 分别直连 execution interface |
+| 相同颜色实例交换 | 抓取错误物体或放入错误 bin | 回放 instance id、空间位置和颜色匹配结果 |
+| bin 被当作可抓物体 | 生成错误抓取目标 | 用几何区域和 candidate type 分开过滤 |
+| 物体部分进入 bin 但未放稳 | 误报成功 | 检查 bin 边界裕量、物体中心和最终稳定状态 |
 
 ## 6. 主动提示的问题
 
@@ -157,10 +175,9 @@ observation -> inference -> short action chunk -> re-observe -> inference
 
 ## 7. 悬挂问题和后续顺序
 
-- `PolicyObservation` 是 ROS message、多个标准 topic 的时间同步 bundle，还是 Python-side dataclass，需要 Stage S 结合图像带宽决定。
-- LeRobot dataset 的具体 schema 和版本需要在 Stage T 实际安装后冻结，不能提前依赖未验证的字段名称。
+- `PolicyObservation` 是 ROS message、多个标准 topic 的时间同步 bundle，还是 Python-side dataclass，需要 Stage 1 结合图像带宽决定。
+- LeRobot dataset 的具体 schema 和版本需要在 Stage 2 实际安装后冻结，不能提前依赖未验证的字段名称。
 - 障碍场景要在 learned policy 真正接入前加入，还是与 MoveIt 场景并行加入，属于后续实验计划，不在 Week 4.5 假设中解决。
 - 远程推理是否可用、模型是否必须量化以及 GPU 驱动兼容性，需要等第一个实际 checkpoint 后评估。
 
 后续建议顺序：先完成 IL 数据链和一个小模型，再做 RL 环境包装，最后选择一个 VLA adapter。MoveIt 和 learned policy 分别作为 backend 做对照，不建立硬依赖。
-

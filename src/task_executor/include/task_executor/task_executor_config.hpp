@@ -28,6 +28,12 @@ enum class WaypointMode
   kKeyframe
 };
 
+enum class ObservationSource
+{
+  kOracle,
+  kVision
+};
+
 struct PlacementVerification
 {
   double box_target_x_m = 0.5;
@@ -59,10 +65,15 @@ struct TaskExecutorConfig
   PlacementTask task;
   PlacementVerification verification;
   WaypointMode waypoint_mode = WaypointMode::kDiffIk;
+  ObservationSource observation_source = ObservationSource::kOracle;
+  double vision_min_confidence = 0.5;
+  double vision_max_residual_m = 0.005;
+  double vision_min_inlier_ratio = 0.7;
   bool allow_target_mismatch = false;
 };
 
 const char * waypointModeName(WaypointMode mode);
+const char * observationSourceName(ObservationSource source);
 TaskExecutorConfig loadTaskExecutorConfig(rclcpp::Node & node);
 void validateTaskExecutorConfig(const TaskExecutorConfig & config);
 

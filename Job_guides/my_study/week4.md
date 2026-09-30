@@ -1,6 +1,6 @@
 # Week 4 学习笔记
 
-> Stage P~R 已记录实现与实测；R1~R3 是视觉抓放尚待实施的后续计划，完成后再按同样流程追加代码、验证、讲解与追问。Week 4.5 的策略接口、数据链和容器交付不混入本周主线，见 [week4.5.md](week4.5.md)。
+> Stage P~R 已记录实现与实测；R1~R3 是视觉抓放尚待实施的后续计划，完成后再按同样流程追加代码、验证、讲解与追问。多色立方体到 bin 的任务、策略接口、数据链和容器交付统一见 [week4.5.md](week4.5.md)。
 
 ## 学习重点范围
 
@@ -57,15 +57,14 @@
 - [9. Stage R：oracle/vision 对照和任务接入](#9-stage-roraclevision-对照和任务接入)
   - [9.0 一句话总结](#90-一句话总结)
   - [9.1 改动清单与验证结果](#91-改动清单与验证结果)
-  - [9.2 原始提问与任务边界](#92-原始提问与任务边界)
-  - [9.3 两种 observation 如何共用任务执行链](#93-两种-observation-如何共用任务执行链)
-  - [9.4 视觉质量门与失败语义](#94-视觉质量门与失败语义)
+  - [9.2 两种 observation 共用任务执行链](#92-两种-observation-共用任务执行链)
+  - [9.3 视觉质量门与失败语义](#93-视觉质量门与失败语义)
+  - [9.4 rqt_image_view 的订阅与可视化](#94-rqt_image_view-的订阅与可视化)
   - [9.5 权衡与替代方案](#95-权衡与替代方案)
   - [9.6 失败模式与验证手段](#96-失败模式与验证手段)
   - [9.7 排查记录](#97-排查记录)
   - [9.8 你没问但值得注意的](#98-你没问但值得注意的)
-  - [9.9 本阶段边界与后续](#99-本阶段边界与后续)
-  - [9.10 视觉抓放缺口与后续决策](#910-视觉抓放缺口与后续决策)
+  - [9.9 本阶段边界与后续讨论](#99-本阶段边界与后续讨论)
 - [10. Week 4.5 交接](#10-week-45-交接)
 
 ## 1. 从前三周继承的事实和边界
@@ -814,23 +813,37 @@ Stage R 把 Stage Q 的视觉物体位姿接入已有任务执行器，同时保
 
 全量回归最终结果为 **428 tests，0 errors，0 failures，64 skipped**；6 个包构建通过，`task_executor/xmllint` 单独复核也通过。此前并行执行曾出现该 XML 检查偶发 timeout，重新读取结果并单独运行后结果稳定，因此没有把那次调度问题当作代码失败。
 
-### 9.2 原始提问与任务边界
+### 9.2 两种 observation 共用任务执行链
 
 > 你好，请看到week4.md，接下来是stageR的实现。
 
-这次提问没有另行指定新的消息格式或失败恢复策略，因此实现沿用 Week 4 计划中已经冻结的边界：Stage R 只接入 oracle/vision 对照，不改 Stage Q 几何算法，不接入 learned policy、MoveIt 或障碍规划。实现选择“拒绝并结束当前 episode”作为当前低质量视觉样本的明确语义；重新观察和跨帧跟踪留到后续阶段。
-
-### 9.3 两种 observation 如何共用任务执行链
+本阶段只接入 oracle/vision 对照，不改 Stage Q 几何算法，不接入 learned policy、MoveIt 或障碍规划；当前低质量视觉样本拒绝并结束 episode，重新观察和跨帧跟踪留到后续阶段。
 
 `BridgeObservation` 仍是任务状态的载体：它提供关节、接触信号、`world_to_hand_tcp` 以及生命周期字段。oracle 模式直接取其中的 ground-truth object pose。vision 模式只替换 object pose：节点从 `/object_pose_estimator/object_pose` 取得 pose 和质量指标，再从同 sample sequence 的 bridge observation 取得其余状态，最后构造同一个无 ROS 的 `ObservationEnvelope`。
 
 这样复用的是领域控制流程，而不是复用数据来源。`EpisodeController` 不知道 pose 来自 oracle 还是 vision，只消费已经通过准入的 `ObservationFrame`；`TaskExecutorNode` 负责 ROS 订阅、缓存、配对、质量判断和消息转换。FSM、Cartesian waypoint 几何和 diff-IK 求解都没有为视觉另写一份分支，因此对照结果的差异可以归因到观测链，而不是两套任务逻辑。
 
-### 9.4 视觉质量门与失败语义
+### 9.3 视觉质量门与失败语义
 
 默认阈值是 `confidence >= 0.5`、`residual_m <= 0.005` 和 `inlier_ratio >= 0.7`，同时要求 `accepted=true` 且数值有限。阈值是任务层准入条件，不是 estimator 内部的几何算法定义；这样可以在不改视觉节点的情况下做严格或宽松的对照实验。
 
 accepted 且通过三项阈值的样本会进入正常 FSM。`accepted=false` 的样本以 `VISION_REJECTED` 结束；accepted 但阈值不满足的样本以 `VISION_LOW_CONFIDENCE` 结束。两种情况都不调用 `EpisodeController::onObservation()`，所以不会产生新的 waypoint 或 joint command，也不会把上一次 accepted pose 复制到当前帧。`EpisodeOutcome` 记录 source、最后一次质量指标、`observation_failure_layer=perception` 和 estimator rejection reason，便于把感知失败与执行失败分开统计。
+
+### 9.4 rqt_image_view 的订阅与可视化
+
+> 我刚才看到了界面，可以选择查看 rgb 图还是深度图。是否只要满足 topic 命名规则，包里的节点就会自动订阅并可视化？
+
+不是只按名称自动订阅。ROS graph 负责发现话题，但还必须满足 `sensor_msgs/msg/Image` 类型、QoS 兼容并且存在发布者；用户在下拉菜单选择话题或通过参数指定后，`rqt_image_view` 才订阅显示。RViz 也需要启用相应 Display 并选择数据源。bridge 发布 `/mujoco_bridge/camera/color/image_raw`（`rgb8`）和 `/mujoco_bridge/camera/depth/image_raw`（`32FC1`），感知节点显式订阅它们，rqt 只是独立观察者。
+
+可复现命令：
+
+```bash
+scripts/start_demo.sh --no-build --vision
+source /opt/ros/humble/setup.bash
+LIBGL_ALWAYS_SOFTWARE=1 ros2 run rqt_image_view rqt_image_view /mujoco_bridge/camera/color/image_raw
+```
+
+GUI 中可切换深度话题；深度图的显示亮度不是米制值。此前未设置 `LIBGL_ALWAYS_SOFTWARE=1` 时窗口和 Ctrl+C 异常，设置后正常。验证时确认话题 publisher、类型、QoS 和 `/clock` publisher 数量。
 
 ### 9.5 权衡与替代方案
 
@@ -848,13 +861,15 @@ accepted 且通过三项阈值的样本会进入正常 FSM。`accepted=false` �
 | oracle/vision 统计混在一起 | outcome 没有来源或来源被推断 | 断言 `observation_source` 明确为 `oracle` 或 `vision`，按字段分组统计 |
 | 视觉质量字段为 NaN/Inf | 无效数值绕过比较 | `std::isfinite` 是质量门的一部分，并用配置单测覆盖非法阈值 |
 
-### 9.7 排查记录
-
 第一次 vision smoke 中，初始 accepted 样本能进入 `HOME` 和 `PREGRASP`，但抓取动作让机械臂与盒子在相机中连成不合法几何簇，estimator 发布 `MODEL_EXTENT_MISMATCH`。如果任务层只保存上一份 accepted pose，FSM 会继续执行一个视觉已经无法支持的目标。实际结果是 executor 收到新 rejected sample 后以 `VISION_REJECTED` 结束，未发布后续目标；这验证了“拒绝消息也是新观测”的语义。
 
 低置信度实验把阈值提高到 `0.99`。estimator 的约 `0.824` confidence 样本仍是 accepted，但 executor 在任务层质量门拒绝它并记录 `VISION_LOW_CONFIDENCE`。这说明 estimator 的 accepted 与任务层的可执行质量不是同一个概念，阈值必须在 outcome 中留下可追溯配置和指标。
 
 并行全量测试曾让 `xmllint` 偶发 timeout，单独运行通过。排查后将它视为测试调度/资源竞争信号，而不是 Stage R 逻辑失败；最终回归需要确认全量结果稳定后才能关闭本阶段。
+
+### 9.7 排查记录
+
+上述 vision smoke、低置信度和测试调度问题分别记录了现象、线索、根因和验证结果；它们共同说明拒绝消息必须作为新观测处理，不能静默复用旧 pose。
 
 ### 9.8 你没问但值得注意的
 
@@ -863,11 +878,9 @@ accepted 且通过三项阈值的样本会进入正常 FSM。`accepted=false` �
 3. **时间语义**：当前三字段匹配没有使用近似时间同步，适合 bridge 与 estimator 共享仿真 sample sequence 的场景。真实相机接入前必须测量采集和传输延迟，再决定是否引入近似同步及其最大年龄。
 4. **恢复策略**：当前拒绝直接结束 episode，避免旧 pose 误用，但没有“等待下一帧并重新观察”的状态。若要支持恢复，必须同时定义超时、最大尝试次数和 outcome 中的每次拒绝记录。
 
-### 9.9 本阶段边界与后续
+### 9.9 本阶段边界与后续讨论
 
-Stage R 验证的是观测来源选择、生命周期配对、质量门和停止语义，不证明视觉在动态遮挡、随机物体姿态、深度噪声或真实硬件上可靠。R1~R3 将分别处理机器人掩膜、跟踪状态和任务证据门；现有 `EpisodeController` 的生命周期边界保持不变，但 vision 模式的观测准入和 FSM 成功判据需要按新证据语义调整。Week 4.5 只消费 R3 验收后的观测契约，不重新解释视觉失败。
-
-### 9.10 视觉抓放缺口与后续决策
+Stage R 验证观测来源选择、生命周期配对、质量门和停止语义，不证明视觉在动态遮挡、随机物体姿态、深度噪声或真实硬件上可靠。R1~R3 将分别处理机器人掩膜、跟踪状态和任务证据门；Week 4.5 只消费 R3 验收后的观测契约。
 
 > 也就是说，当前现在视觉抓放还没能搞定？？？但是就我们当前无障碍的pick and place来说，不是只要object的初始位姿得到accept就可以了吗？有这个强先验还不够吗？？
 

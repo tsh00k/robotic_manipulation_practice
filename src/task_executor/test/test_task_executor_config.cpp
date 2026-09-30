@@ -31,6 +31,7 @@ TEST(TaskExecutorConfig, DefaultsAreValid)
 {
   const TaskExecutorConfig config{};
   EXPECT_STREQ(waypointModeName(config.waypoint_mode), "diff_ik");
+  EXPECT_STREQ(observationSourceName(config.observation_source), "oracle");
   EXPECT_NO_THROW(validateTaskExecutorConfig(config));
 }
 
@@ -79,16 +80,21 @@ TEST_F(LoadedTaskExecutorConfig, PreservesModeDefaultsAndOverrides)
   EXPECT_DOUBLE_EQ(defaults.fsm.place_y_m, defaults.verification.box_target_y_m);
   EXPECT_DOUBLE_EQ(defaults.fsm.place_region_radius_m, defaults.verification.radius_m);
   EXPECT_DOUBLE_EQ(defaults.fsm.close_settle_s, 2.0);
+  EXPECT_EQ(defaults.observation_source, ObservationSource::kOracle);
 
   rclcpp::NodeOptions options;
   options.parameter_overrides(
       {
         rclcpp::Parameter("waypoint_source", "keyframe"),
+        rclcpp::Parameter("observation_source", "vision"),
+        rclcpp::Parameter("vision.min_confidence", 0.8),
         rclcpp::Parameter("target.place_x_m", 0.6),
         rclcpp::Parameter("verify.place_region_radius_m", 0.03)});
   auto legacy_node = std::make_shared<rclcpp::Node>("config_legacy_test", options);
   const auto legacy = loadTaskExecutorConfig(*legacy_node);
   EXPECT_EQ(legacy.waypoint_mode, WaypointMode::kKeyframe);
+  EXPECT_EQ(legacy.observation_source, ObservationSource::kVision);
+  EXPECT_DOUBLE_EQ(legacy.vision_min_confidence, 0.8);
   EXPECT_DOUBLE_EQ(legacy.task.tcp_target_x_m, 0.6);
   EXPECT_DOUBLE_EQ(legacy.verification.box_target_x_m, 0.43);
   EXPECT_DOUBLE_EQ(legacy.verification.box_target_y_m, 0.31);
