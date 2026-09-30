@@ -72,6 +72,26 @@ Stage Q 当前是逐帧几何估计器，不是抓取过程状态机：没有机
 
 Stage P 的几何检查由 `src/mujoco_bridge/test/camera_probe.py` 这个**运行时集成检查脚本**完成：它作为 ROS 2 Python 节点订阅 RGB-D、CameraInfo、TF、oracle 和 `BridgeObservation`，按完全相等的时间戳配成一帧，再检查消息契约并反投影两个已知像素。中心像素 `(160,120)` 深度 `0.8613 m`，反投影 world 点 `(0.5017,-0.0084,0.2605)m`，相对 oracle box 中心 XY 偏差 `8.6 mm`、box 顶面高度偏差 `0.6 mm`；桌面像素 `(160,180)` 反投影 `z=0.2206 m`，场景顶面为 `0.22 m`。reset 后 generation 从 `0` 增至 `1`，同一检查仍通过。这是仿真链路的 smoke test，不是传感器驱动或物体位姿估计算法；这些默认静态场景检查不代表真机标定、噪声或运动中动态同步已经完成评估。
 
+### 1.3 Stage R oracle/vision 任务观测契约
+
+`task_executor` 的 `observation_source` 参数选择本次 episode 的唯一物体观测来源，默认值为 `oracle`。`oracle` 直接消费 `/mujoco_bridge/episode_observation` 中的 ground-truth pose；`vision` 消费 `/object_pose_estimator/object_pose` 的 `VisionObjectPose`，但关节、接触和 TCP 状态仍来自同一个 `BridgeObservation`。两种来源共用同一个 `EpisodeController`、FSM 和 waypoint source；一次 episode 不会把 oracle pose 和 vision pose 混在一起，也不会在视觉失败时回退到旧的 oracle 或旧的 accepted vision pose。
+
+`demo.launch.py` 在 `observation_source:=vision` 时自动启动 `object_pose_estimator_node`。`scripts/start_demo.sh --vision --viewer` 同时启用 RGB-D、vision 任务观测和 MuJoCo debug viewer；默认启动方式仍使用 oracle，且不启动 estimator。
+
+vision 消息只在以下三个字段与 bridge observation **完全相等**时配对：`bridge_session`、`generation`、`sample_sequence`。节点缓存有限数量的两类消息，拒绝缺少配对、session/generation 不一致或已经处理过的 sequence；ROS 话题的到达顺序不提供原子性，因此不能按各自“最新一条”静默拼接。`VisionObjectPose.accepted=false` 或质量阈值不满足时，节点不创建新的 observation snapshot，不发布新的 waypoint/joint command，并结束当前 episode。失败码分别为 `VISION_REJECTED`（估计器拒绝）和 `VISION_LOW_CONFIDENCE`（估计器 accepted 但质量阈值不满足）。拒绝消息仍记录其 rejection reason；任务层不会继续沿用上一份 accepted pose。
+
+vision 质量阈值由 launch 参数和节点参数共同暴露，默认值如下：
+
+| 参数 | 默认值 | 约束 |
+| --- | ---: | --- |
+| `vision.min_confidence` | `0.5` | `confidence >=` |
+| `vision.max_residual_m` | `0.005 m` | `residual_m <=` |
+| `vision.min_inlier_ratio` | `0.7` | `inlier_ratio >=` |
+
+`EpisodeOutcome` 额外记录 `observation_source`、`observation_confidence`、`observation_residual_m`、`observation_failure_layer` 和 `observation_failure_reason`。视觉失败的层级为 `perception`，执行失败仍为 `execution`；成功 episode 的失败层级和失败原因为空。该字段是结果契约的一部分，使 oracle 上限、vision 闭环和失败样本可以分开统计。
+
+Stage R 的运行时验证包括：默认 oracle episode 成功并报告 `confidence=1.0`、`residual=0.0`；vision episode 接受约 `0.824` confidence、约 `0.000676 m` residual 的样本并使用其 y 位置进入 `PREGRASP`，随后在抓取遮挡导致 `MODEL_EXTENT_MISMATCH` 时以 `VISION_REJECTED` 结束；将 `vision.min_confidence` 提高到 `0.99` 时以 `VISION_LOW_CONFIDENCE` 结束。上述验证证明来源选择、配对、质量门和停止语义在当前仿真场景成立，不代表遮挡恢复、跨帧跟踪或真实相机噪声已经解决。
+
 **`hand_tcp` 合成说明**：MuJoCo 的 `panda.xml` 里**没有** `hand_tcp` 这个 body/site。这个 frame 来自 URDF 侧 `franka_description/end_effectors/common/franka_hand.xacro` 的 `hand_tcp_joint`，是一个**空 link**（无 visual/collision/inertial），即纯粹的命名坐标系：不参与动力学、不参与碰撞、不占 DoF。偏移量 `xyz="0 0 0.1034"`, `rpy="0 0 0"`（相对 `hand`）。`mujoco_bridge` 额外手动合成一条 `hand -> hand_tcp` static TF，这样下游抓取/规划模块仍能拿到 `hand_tcp`。
 
 > **更正（Stage C）**：本文档此前写"TCP 已经把夹爪长度和**默认 45° 旋转**的偏移量算进去"，**这条是错的**。`tcp_rpy` 默认为 `0 0 0`，`hand_tcp` 是**纯 103.4mm 平移**；那个 −45° 的手腕旋转在 `hand_joint`（URDF 的 `link8→hand`）上，MJCF 里折进了 `hand` body 自己的 `quat`。
@@ -96,6 +116,12 @@ xacro $(ros2 pkg prefix franka_description)/share/franka_description/robots/fer/
 | `left_finger` / `right_finger` | `fer_leftfinger` / `fer_rightfinger` | 前缀 **且**无下划线 |
 
 任何需要跟 URDF 侧工具（MoveIt 配置等）对照的代码**必须显式处理这张表**，不能假设两边字符串相同。注意 `hand:=true` 参数下 URDF 会强制加 `fer_` 前缀而不管 `no_prefix` 设置。
+
+### 1.4 Stage R1~R3 目标契约（待实施）
+
+Stage R 的 vision episode 尚未完成抓放。按 [ADR 009](adr/009-robot-aware-stateful-vision.md)，后续 R1 在 `mujoco_perception` 中用同帧机器人 link 几何与深度建立 robot mask；R2 以目标关联和时序跟踪替代“最大簇即目标”，区分本帧实测、有时限预测、不可观测和拒绝。单相机完全遮挡期间没有新的物体测量，必须保留最近实测时间、预测年龄、不确定性及生命周期键，不能把预测当成新的 `accepted` 测量。离桌后的物体高度也不能继续由桌面先验固定。
+
+R3 才调整 vision 任务适配层：有界预测可支持运动，但物体抬升、滑落和最终落点不能只凭预测认定；最终成功需在释放并移开机械臂后重新测得物体位姿。vision 在线处理只使用相机、关节/夹爪状态、TF 与机器人几何；`BridgeObservation.object_pose` 和仿真接触位只用于离线 oracle 对照，不参与 vision 成功判定。现有逐帧拒绝即终止仍是当前实现，不要把本节目标契约读作已落地功能。具体阶段出口见 [week4.md](../Job_guides/my_study/week4.md#24-stage-r1同帧机器人几何掩膜)。
 
 ## 2. 关节命名与顺序
 
@@ -338,7 +364,7 @@ P5 新增 [ADR 004](adr/004-episode-controller-orchestration.md)，并更新重�
 
 ## 12. 策略无关的 observation/action 契约与并行 motion backend
 
-Week 4.5 冻结以下扩展边界，完整决策见 [ADR 005](adr/005-policy-backends-and-data-contract.md)。
+Week 4.5 冻结以下扩展边界。
 
 ```text
 observation bundle
