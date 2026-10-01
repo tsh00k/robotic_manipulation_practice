@@ -79,6 +79,7 @@ const char * rejectionReasonName(RejectionReason reason)
     case RejectionReason::kDegenerateCorrespondence: return "DEGENERATE_CORRESPONDENCE";
     case RejectionReason::kLowInlierRatio: return "LOW_INLIER_RATIO";
     case RejectionReason::kHighResidual: return "HIGH_RESIDUAL";
+    case RejectionReason::kMissingRobotTransform: return "MISSING_ROBOT_TRANSFORM";
   }
   return "UNKNOWN";
 }

@@ -121,11 +121,11 @@
 | **不得直接链接 MuJoCo** | 新用到的 `mj_*`/`mju_*` 必须先进 `MujocoApi`，再 `resolve()`，业务代码走 `api_.xxx()`。直接 `target_link_libraries(mujoco::mujoco)` 会因 tinyxml2 符号冲突段错误 | [week1.md 7.2](week1.md#72-调试时踩到的段错误符号冲突与-dlopen-隔离) |
 | **时间戳规则分两侧**（本周开周时修正，原先写成了"一律 `simTime()`"，那只对 bridge 成立） | **bridge 侧**：`simTime()` = `std::llround(data_->time * 1e9)`，**不能**用 `get_clock()->now()`——它*是* `/clock` 的源，读自己的钟只能拿到墙钟（`use_sim_time=false`）或上一步刚发布的旧值（`use_sim_time=true`），而且构造期 `/clock` 上还什么都没有。**下游侧**（executor、runner、测试脚本）：设 `use_sim_time=true`，然后正常用 `get_clock()->now()`——`TimeSource` 会订阅 `/clock` 替你更新。**两侧都禁止**的是第三种写法：`std::chrono` / `RCL_SYSTEM_TIME` / 不设 `use_sim_time` 却调 `now()`，那是绕过仿真时钟的墙钟 | [week1.md 8.2](week1.md#82-sim-time-vs-wall-time以及-use_sim_time)、[node 源码 365 行注释](../../src/mujoco_bridge/src/mujoco_bridge_node.cpp) |
 | **当前状态：全图没有一个节点设过 `use_sim_time`** | `demo.launch.py` 没给任何节点传参数，`sine_joint_test.py` / `gripper_test.py` 都在用未配置的 `get_clock().now()` 算 elapsed——**现在跑的是墙钟正弦**，只因 RTF≈1 才看不出来。Stage I 的 FSM 超时是第一个会被这件事真正咬到的地方（RTF≠1 时超时阈值的语义直接漂掉）。**Stage F 顺手修**：launch 加 `use_sim_time=true`，两个脚本一并改 | 本周开周核对发现 |
-| **frame 名 = MJCF 原生名** | 基座是 `link0`（不是 `base_link`），**没有 `link8`**，`hand` 的父是 `link7`，`hand_tcp` 是合成的纯 103.4mm 平移 | [architecture.md 第1节](../../docs/architecture.md) |
+| **frame 名 = MJCF 原生名** | 基座是 `link0`（不是 `base_link`），**没有 `link8`**，`hand` 的父是 `link7`，`hand_tcp` 是合成的纯 103.4mm 平移 | [architecture.md 3.1](../../docs/architecture.md) |
 | **static/dynamic 判据是结构而非名字** | `body_jntnum[i] == 0` → static。本周加的 `box`（带 freejoint）会**零代码改动**自动变成 `world -> box` 的 dynamic TF | [week1.md 9.4](week1.md#94-static--dynamic-怎么划分用结构而不是名字) |
-| **`~/reset` 复位状态但不复位时间** | `mj_resetDataKeyframe` 的全部作用域（含 `ctrl`）+ 显式保护 `mjData::time`。本周的 episode runner 完全依赖它 | [architecture.md 2.2](../../docs/architecture.md) |
+| **`~/reset` 复位状态但不复位时间** | `mj_resetDataKeyframe` 的全部作用域（含 `ctrl`）+ 显式保护 `mjData::time`。本周的 episode runner 完全依赖它 | [architecture.md 4.1](../../docs/architecture.md) |
 | **夹爪 `ctrl` 是 `0..255` 且经 tendon** | 写 `ctrl` 必须按 actuator id 索引，不能用 joint id；换算系数从模型两个 range 数组现算 | [week1.md 11.2](week1.md#112-buildactuatorindex关节驱动与-tendon-驱动的两种索引) |
-| **`home`(MJCF) ≠ `ready`(SRDF)** | 两个不同构型（joint7 连符号都相反）。本周挑基准位姿只用 MJCF `home`，第6周接 MoveIt 时才定权威 | [architecture.md 2.1](../../docs/architecture.md) |
+| **`home`(MJCF) ≠ `ready`(SRDF)** | 两个不同构型（joint7 连符号都相反）。本周挑基准位姿只用 MJCF `home`，第6周接 MoveIt 时才定权威 | [architecture.md 2.3](../../docs/architecture.md) |
 | **验证环境卫生** | `ps -eo pid,comm` + `ros2 topic info /clock` 是唯一权威判据；起后台节点直接跑可执行文件，不经 `ros2 run`；`ros2 node list`/`ros2 daemon` 都会骗人 | [STUDY_NOTES_GUIDE.md 3.1](../../STUDY_NOTES_GUIDE.md) |
 
 ## 2. 本周 Stage 计划
@@ -506,7 +506,7 @@ exit code: 1
 
 **改动**：
 
-- [pick_place_scene.xml](../../robot_description/mujoco/franka_emika_panda/pick_place_scene.xml)（新）：桌面 geom、`box`（`freejoint`）、放置区 marker、`pick_place_home` keyframe（详见 [docs/architecture.md 第5节](../../docs/architecture.md)）
+- [pick_place_scene.xml](../../robot_description/mujoco/franka_emika_panda/pick_place_scene.xml)（新）：桌面 geom、`box`（`freejoint`）、放置区 marker、`pick_place_home` keyframe（详见 [docs/architecture.md 2.2](../../docs/architecture.md)）
 - [mujoco_bridge_node.cpp](../../src/mujoco_bridge/src/mujoco_bridge_node.cpp)：`model_path`/`reset_keyframe_name` 声明为 ROS 参数；新增 `resolveObjectOracle()`/`publishObjectPose()`；启动日志加 `nv`
 
 **编译**：
@@ -651,7 +651,7 @@ box 被静默传送到接近世界原点（`(0,0,0,1,0,0,0)` 补零的结果）�
 **留下的经验**：
 
 1. **"编译报错了"不代表"报的是我以为的那个错误"**。第一次看到 `repeated name` 报错时没有细究"这到底是名字问题还是长度问题"，直接套用到了悬挂清单里现成的那个问题上——两者表面看起来很像（"keyframe 写坏了会怎样"），实际是完全不同的检查路径。
-2. **之前写下的结论已被推翻，教训记在这里，不做静默修改**：week2.md 5.1 第1条问题的真实答案不是"编译期硬错误"，是"**看具体是哪种坏法**：名字冲突→硬错误；长度不匹配→静默补零"。这个更细的答案已经同步进 [docs/architecture.md 第0.1节](../../docs/architecture.md)。
+2. **之前写下的结论已被推翻，教训记在这里，不做静默修改**：week2.md 5.1 第1条问题的真实答案不是"编译期硬错误"，是"**看具体是哪种坏法**：名字冲突→硬错误；长度不匹配→静默补零"。这个更细的答案已经同步进 [docs/architecture.md 2.1](../../docs/architecture.md)。
 3. 这次推翻是**因为多问了一步"给我看实际展开后的文件"**才发现的——再一次印证"质疑证据链优于质疑结论"（[STUDY_NOTES_GUIDE 4.4](../../STUDY_NOTES_GUIDE.md)）：第一次的结论表面自洽（有报错、看起来像回答了问题），只有去看原始展开文件才暴露出报错原因被张冠李戴。
 
 ## 9. Stage H：夹爪命令接口与抓取成功判据
@@ -745,7 +745,7 @@ MJCF 手指 actuator 是 `biastype="affine"` 的 PD 控制器（[week1 11.4](wee
 
 ### 9.5 `hand_tcp` 为什么要合成、为什么只有 z 轴有偏移
 
-TCP（工具中心点）本周第一次被真正用上——`publishGripperContact()` 里要算 `box_to_tcp_horizontal_m`，需要 TCP 的世界坐标。`hand_tcp` 是什么、偏移量 `0.1034` 从哪来、−45° 手腕旋转为什么不在这个变换里，[docs/architecture.md 第1节](../../docs/architecture.md) 已经是权威记录（Stage C 定的，含一次结论更正），这里不重复，只补两条这次讨论里新的、architecture.md 没写的推理：
+TCP（工具中心点）本周第一次被真正用上——`publishGripperContact()` 里要算 `box_to_tcp_horizontal_m`，需要 TCP 的世界坐标。`hand_tcp` 是什么、偏移量 `0.1034` 从哪来、−45° 手腕旋转为什么不在这个变换里，[docs/architecture.md 3.1](../../docs/architecture.md) 已经是权威记录（Stage C 定的，含一次结论更正），这里不重复，只补两条这次讨论里新的、architecture.md 没写的推理：
 
 **为什么必须合成，不能直接用 `hand`**：`hand` body 的原点是机械设计上的法兰/安装基准面，不是"两个指尖之间、真正发生抓取的那个点"。规划/判据代码要的目标始终是"TCP 到哪"，不是"法兰盘到哪"——不合成这一步，`box_to_tcp_horizontal_m` 这类计算就要在每个用到它的地方各自重复硬编码 `0.1034`，现在集中在 `buildFrameIndex`（TF 合成）和 `publishGripperContact`（数值计算，两处共享同一个 `kHandToTcpZ`）两处，第4周换视觉、第6周接 MoveIt 时下游代码不用再各自算一遍。
 
@@ -1180,7 +1180,7 @@ constexpr double kOpenEpsilonM = 0.02;
 - **需要在连续空间里实时决策，而不是在离散阶段间跳转**（比如力控接触任务、动态避障）——这类更适合基于反馈的连续控制器（MPC）或者学习到的策略（RL policy），FSM 的离散切换在连续控制问题里会产生生硬的目标跳变，而不是这次遇到的"稳态误差"这种可以靠 ε 容差解决的问题。
 - **状态本身有层次结构**（比如"抓取"这个大阶段内部还有"接近/闭合/确认"三个子阶段，且这种嵌套在多个大阶段里重复出现）——这时候**分层状态机**（Hierarchical State Machine，ROS1 生态常见的是 SMACH/SMACC）能把重复的子状态机封成一个可复用单元，避免每个大阶段都手写一遍相同的转移逻辑。
 
-**本项目现在选 FSM 而不是 BT 的理由**：计划书本身要求的形状就是"阶段划分、到位判据、失败码分层、恢复动作"（[2.4](#24-stage-i--fsm-与-waypointsource-抽象新包-task_executor)），这恰好是 FSM 的教科书场景——阶段数量小而固定（10 个 + 1 个 `RECOVER` 环），转移逻辑目前是一条线加一个统一的恢复出口，还没有出现"多种失败需要不同应对策略"的组合复杂度。这和 [architecture.md 6.2 复用 vs 自建的判断标准](../../docs/architecture.md#62-复用-vs-自建的判断标准) 是同一类判断的另一个维度——那张表回答"这段逻辑该自己写还是调库"，这次回答"该用哪种复杂度的表达工具"，两者的共同原则都是**先用能把当前问题说清楚的最简单工具，工具明显不够用了再换**，不要提前为"可能出现的组合爆炸"设计。[10.8](#108-task_executor-的可扩展性后续步骤会替换哪些部分) 第5点已经记了一条：如果 `RECOVER` 真的需要针对不同 `ExitReason` 走不同恢复策略，到那时候可能就是"FSM 不够用了"的第一个信号。
+**本项目现在选 FSM 而不是 BT 的理由**：计划书本身要求的形状就是"阶段划分、到位判据、失败码分层、恢复动作"（[2.4](#24-stage-i--fsm-与-waypointsource-抽象新包-task_executor)），这恰好是 FSM 的教科书场景——阶段数量小而固定（10 个 + 1 个 `RECOVER` 环），转移逻辑目前是一条线加一个统一的恢复出口，还没有出现"多种失败需要不同应对策略"的组合复杂度。这和 [10.8 的模块替换边界](#108-task_executor-的可扩展性后续步骤会替换哪些部分) 是同一类判断的另一个维度——模块边界回答"这段逻辑该自己写还是调库"，这次回答"该用哪种复杂度的表达工具"，两者的共同原则都是**先用能把当前问题说清楚的最简单工具，工具明显不够用了再换**，不要提前为"可能出现的组合爆炸"设计。[10.8](#108-task_executor-的可扩展性后续步骤会替换哪些部分) 第5点已经记了一条：如果 `RECOVER` 真的需要针对不同 `ExitReason` 走不同恢复策略，到那时候可能就是"FSM 不够用了"的第一个信号。
 
 ### 10.5 `WaypointSource` 接口设计：为什么现在只有一个查表实现
 
@@ -1192,7 +1192,7 @@ constexpr double kOpenEpsilonM = 0.02;
 
 > Q: keyframe_waypoint_source 中，你提到关节查找表是实测出来的，提醒我一下依据在哪里？如果没有对应文档就加一下。
 
-依据目前分散在三处：[keyframe_waypoint_source.hpp](../../src/task_executor/include/task_executor/keyframe_waypoint_source.hpp) 头部的三点定性发现（稳态误差随重力矩变化、直接跳跃会撞飞 box、`0.03` 撑不住侧摆需要改 `0.0`）、[docs/architecture.md 第7节](../../docs/architecture.md#7-task_executor-任务状态机stage-i) 的最终数值表、以及 [10.10.5](#10105-一次独立的物理调参夹爪闭合力度不够撑不住-kpreplace-的侧向摆动) 的闭合力度排查记录。**但这三处都只有"最终结论"，没有"怎么搜出来的"这个中间过程**——按 [STUDY_NOTES_GUIDE](../../STUDY_NOTES_GUIDE.md) "实测数据优先于叙述"的纪律，这是一个真实缺口，补在这里。
+依据目前分散在三处：[keyframe_waypoint_source.hpp](../../src/task_executor/include/task_executor/keyframe_waypoint_source.hpp) 头部的三点定性发现（稳态误差随重力矩变化、直接跳跃会撞飞 box、`0.03` 撑不住侧摆需要改 `0.0`）、[keyframe_waypoint_source.cpp](../../src/task_executor/src/keyframe_waypoint_source.cpp) 的最终关节目标、以及 [10.10.5](#10105-一次独立的物理调参夹爪闭合力度不够撑不住-kpreplace-的侧向摆动) 的闭合力度排查记录。**但这三处都只有"最终结论"，没有"怎么搜出来的"这个中间过程**——按 [STUDY_NOTES_GUIDE](../../STUDY_NOTES_GUIDE.md) "实测数据优先于叙述"的纪律，这是一个真实缺口，补在这里。
 
 **方法**：写一个一次性探测脚本（订阅 `~/reset` 服务 + 发布 `~/joint_command`，起 `tf2_ros::Buffer`/`TransformListener` 查 `world→hand_tcp`），对每个候选构型：`~/reset` 回到标称位姿 → 发送候选关节角 → 等待伺服稳定（下面会看到这个等待时长本身就是一项发现）→ 读回 `/tf` 的 `hand_tcp` 世界坐标和 `~/ground_truth/object_pose`。
 

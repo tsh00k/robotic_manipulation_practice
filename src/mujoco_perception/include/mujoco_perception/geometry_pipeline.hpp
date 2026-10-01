@@ -76,6 +76,7 @@ enum class RejectionReason
   kDegenerateCorrespondence,
   kLowInlierRatio,
   kHighResidual,
+  kMissingRobotTransform,
 };
 
 const char * rejectionReasonName(RejectionReason reason);

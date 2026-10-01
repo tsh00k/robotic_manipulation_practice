@@ -105,6 +105,7 @@ def generate_launch_description():
         output='screen',
         condition=LaunchConfigurationEquals('observation_source', 'vision'),
         parameters=[{'use_sim_time': True}],
+        additional_env={'LIBGL_ALWAYS_SOFTWARE': '1'},
     )
 
     rviz_node = Node(

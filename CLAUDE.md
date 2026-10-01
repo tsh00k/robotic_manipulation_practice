@@ -10,6 +10,12 @@
 
 ## 开发环境：distrobox
 
+### VS Code C++ 头文件索引
+
+C/C++ 扩展必须运行在 `robotics-dev` 容器窗口内，才能访问 `/opt/ros/humble` 和 MuJoCo 头文件。各 C++ 包的 CMake 默认启用 `CMAKE_EXPORT_COMPILE_COMMANDS`；普通 `colcon build --symlink-install` 即会生成各包的 `build/<package>/compile_commands.json`。本机 `.vscode/settings.json` 的 `C_Cpp.default.compileCommands` 使用这些文件的数组，不再依赖手动合并的 `build/compile_commands.json`，避免新增包或更新依赖后合并文件过期。新增 C++ 包时同时启用导出并将其数据库路径加入本机配置；新增依赖后执行构建更新编译参数。个人编辑器配置不提交。
+
+若构建后仍标红，在容器窗口执行 `C/C++: Log Diagnostics`，确认当前源文件使用所属包的编译数据库；若缓存尚未刷新，执行一次 `C/C++: Reset IntelliSense Database`。清缓存只能处理已更新配置的缓存问题，不能补齐缺失数据库或宿主机上的容器依赖。
+
 本项目的 ROS2/编译工具链不在宿主机上，而是在名为 `robotics-dev` 的 distrobox 容器（Ubuntu 22.04 + ROS2 Humble）里。
 
 **任何涉及 `ros2`、`colcon`、编译、运行仿真的命令，必须先进入这个容器，不要在宿主机上直接跑（宿主机没有安装 ROS2/colcon/MuJoCo）。**
@@ -70,7 +76,7 @@ distrobox enter robotics-dev -- bash -ic '
   注意：这些变量只在**交互式 shell**里生效（`.bashrc` 开头有非交互式 shell 直接 return 的 guard），用 `distrobox enter robotics-dev -- bash -lc '...'` 跑非交互命令时不会加载，需要用 `bash -ic '...'` 或者先手动 `source ~/.bashrc` / `export MUJOCO_DIR=...`。
 - 容器内网络访问正常（能连 github.com 等），此前判断"无网络"是误判。
 
-- **ROS2 机器人描述/MoveIt 包已装为系统包**（apt，Humble）：`ros-humble-franka-description`（官方 Panda/`fer` URDF+mesh）、`ros-humble-moveit-resources-panda-moveit-config`（现成 MoveIt SRDF/kinematics/planning 配置）、`ros-humble-moveit-core`、`ros-humble-moveit-kinematics`、`ros-humble-control-msgs`（`mujoco_bridge` 编译依赖）、`ros-humble-xacro`、`ros-humble-joint-state-publisher(-gui)`。模型来源和具体路径见 [docs/architecture.md](docs/architecture.md) 第0节。
+- **ROS2 机器人描述/MoveIt 包已装为系统包**（apt，Humble）：`ros-humble-franka-description`（官方 Panda/`fer` URDF+mesh）、`ros-humble-moveit-resources-panda-moveit-config`（现成 MoveIt SRDF/kinematics/planning 配置）、`ros-humble-moveit-core`、`ros-humble-moveit-kinematics`、`ros-humble-control-msgs`（`mujoco_bridge` 编译依赖）、`ros-humble-xacro`、`ros-humble-joint-state-publisher(-gui)`。Week 4 Stage 4 另安装了 `ros-humble-moveit-ros-perception`（含 `moveit_mesh_filter`）及其 `ros-humble-geometric-shapes` 依赖；新容器可执行 `apt-get install ros-humble-moveit-ros-perception` 复现。网格过滤器需可用 X11/OpenGL，上述 demo launch 已为感知节点设置 `LIBGL_ALWAYS_SOFTWARE=1`。模型来源和具体路径见 [docs/architecture.md](docs/architecture.md) [2.1 模型来源与组合](docs/architecture.md#21-模型来源与组合)。
 - MuJoCo MJCF（Panda + 平行夹爪）已从 [google-deepmind/mujoco_menagerie](https://github.com/google-deepmind/mujoco_menagerie) vendor 进 `robot_description/mujoco/franka_emika_panda/`（约33MB，含 mesh），不走 apt（没有对应包）。
 
 **重要坑：pyenv 会劫持 python3，有两个不同的变体。**

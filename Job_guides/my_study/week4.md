@@ -1,6 +1,12 @@
 # Week 4 学习笔记
 
-> Stage P~R 已记录实现与实测；R1~R3 是视觉抓放尚待实施的后续计划，完成后再按同样流程追加代码、验证、讲解与追问。多色立方体到 bin 的任务、策略接口、数据链和容器交付统一见 [week4.5.md](week4.5.md)。
+> Stage 1~4 已记录实现、实测与追问；Stage 5~6 是尚待实施的视觉抓放后续阶段。Stage 4 的机器人掩膜已完成，但 vision episode 尚未完成抓放。多色立方体到 bin 的任务、策略接口、数据链和容器交付统一见 [week4.5.md](week4.5.md)。
+
+**Stage 4 完成后的当前现象（2026-10-01）：** 用户启动 vision 模式并发送 episode start 后，观察到 `GRASP` 阶段机械臂遮挡物体，随后任务以 `VISION_LOW_CONFIDENCE` 停止，没有自动重试。机器人掩膜只能移除机器人表面，不能恢复被遮住的物体像素；当前仍未完成视觉抓放。
+
+源码核对表明，视觉质量门未通过时，任务节点直接调用 `finishEpisode(false, ...)`，绕过 FSM 的 `RECOVER → retry reset` 路径，因此增大 `max_retries` 不能改变这次停止行为。`VISION_LOW_CONFIDENCE` 表示估计器接受了该帧，但任务层的 confidence、residual 或 inlier ratio 检查未通过；具体触发指标尚未核实，遮挡是用户观察到的现象。
+
+后续 [Stage 5](#25-stage-5目标关联与遮挡状态估计)负责目标关联、实测/预测/不可观测状态与有界预测；[Stage 6](#26-stage-6任务证据门与完整抓放验收)负责按这些证据状态调整任务入口和失败策略。进入 `GRASP` 不等于已可靠夹持，不能立即假定物体随 TCP 运动；完全遮挡期间的预测也不能单独证明抓住、未滑落或放置成功，最终须重新实测验证。
 
 ## 学习重点范围
 
@@ -16,19 +22,20 @@
 
 ## 目录
 
+- [架构视图：数据流、函数调用流与模块边界（动态）](#架构视图数据流函数调用流与模块边界动态)
 - [1. 从前三周继承的事实和边界](#1-从前三周继承的事实和边界)
 - [2. 本周 Stage 计划](#2-本周-stage-计划)
-  - [2.1 Stage P：RGB-D 相机和世界坐标观测](#21-stage-prgb-d-相机和世界坐标观测)
-  - [2.2 Stage Q：几何分割和刚体位姿估计](#22-stage-q几何分割和刚体位姿估计)
-  - [2.3 Stage R：oracle/vision 对照和任务接入](#23-stage-roraclevision-对照和任务接入)
-  - [2.4 Stage R1：同帧机器人几何掩膜](#24-stage-r1同帧机器人几何掩膜)
-  - [2.5 Stage R2：目标关联与遮挡状态估计](#25-stage-r2目标关联与遮挡状态估计)
-  - [2.6 Stage R3：任务证据门与完整抓放验收](#26-stage-r3任务证据门与完整抓放验收)
+  - [2.1 Stage 1：RGB-D 相机和世界坐标观测](#21-stage-1rgb-d-相机和世界坐标观测)
+  - [2.2 Stage 2：几何分割和刚体位姿估计](#22-stage-2几何分割和刚体位姿估计)
+  - [2.3 Stage 3：oracle/vision 对照和任务接入](#23-stage-3oraclevision-对照和任务接入)
+  - [2.4 Stage 4：同帧机器人几何掩膜](#24-stage-4同帧机器人几何掩膜)
+  - [2.5 Stage 5：目标关联与遮挡状态估计](#25-stage-5目标关联与遮挡状态估计)
+  - [2.6 Stage 6：任务证据门与完整抓放验收](#26-stage-6任务证据门与完整抓放验收)
 - [3. 本周验收标准](#3-本周验收标准)
 - [4. 失败模式和验证方法](#4-失败模式和验证方法)
 - [5. 主动提示的问题](#5-主动提示的问题)
-- [6. 悬挂问题](#6-悬挂问题)
-- [7. Stage P 讲解与追问记录](#7-stage-p-讲解与追问记录)
+- [6. 开周悬挂问题快照](#6-开周悬挂问题快照)
+- [7. Stage 1 讲解与追问记录](#7-stage-1-讲解与追问记录)
   - [7.1 RGB-D 数据基础](#71-rgb-d-数据基础)
   - [7.2 坐标系、TF 和像素投影](#72-坐标系tf-和像素投影)
   - [7.3 相机摆放、遮挡和渲染坐标转换](#73-相机摆放遮挡和渲染坐标转换)
@@ -40,7 +47,7 @@
   - [7.6 物体识别和形状先验](#76-物体识别和形状先验)
   - [7.7 性能、实测结果和验证结论](#77-性能实测结果和验证结论)
   - [7.8 尚未解决但必须保留的问题](#78-尚未解决但必须保留的问题)
-- [8. Stage Q：几何分割和刚体位姿估计](#8-stage-q几何分割和刚体位姿估计)
+- [8. Stage 2：几何分割和刚体位姿估计](#8-stage-2几何分割和刚体位姿估计)
   - [8.0 一句话总结](#80-一句话总结)
   - [8.1 改动清单与验证结果](#81-改动清单与验证结果)
   - [8.2 完整输入管线和模块关系](#82-完整输入管线和模块关系)
@@ -54,7 +61,7 @@
   - [8.10 本阶段边界与后续](#810-本阶段边界与后续)
   - [8.11 不引入深度模型时的泛化讨论](#811-不引入深度模型时的泛化讨论)
   - [8.12 流程鲁棒性：从初始检测到抓取过程](#812-流程鲁棒性从初始检测到抓取过程)
-- [9. Stage R：oracle/vision 对照和任务接入](#9-stage-roraclevision-对照和任务接入)
+- [9. Stage 3：oracle/vision 对照和任务接入](#9-stage-3oraclevision-对照和任务接入)
   - [9.0 一句话总结](#90-一句话总结)
   - [9.1 改动清单与验证结果](#91-改动清单与验证结果)
   - [9.2 两种 observation 共用任务执行链](#92-两种-observation-共用任务执行链)
@@ -65,7 +72,102 @@
   - [9.7 排查记录](#97-排查记录)
   - [9.8 你没问但值得注意的](#98-你没问但值得注意的)
   - [9.9 本阶段边界与后续讨论](#99-本阶段边界与后续讨论)
-- [10. Week 4.5 交接](#10-week-45-交接)
+- [10. Stage 4：同帧机器人几何掩膜](#10-stage-4同帧机器人几何掩膜)
+  - [10.0 一句话总结](#100-一句话总结)
+  - [10.1 改动清单与验证结果](#101-改动清单与验证结果)
+  - [10.2 同帧掩膜如何工作](#102-同帧掩膜如何工作)
+  - [10.3 抓取过程中的遮挡处理](#103-抓取过程中的遮挡处理)
+  - [10.4 公开包、权衡与替代方案](#104-公开包权衡与替代方案)
+  - [10.5 失败模式与验证手段](#105-失败模式与验证手段)
+  - [10.6 排查记录](#106-排查记录)
+  - [10.7 你没问但值得注意的](#107-你没问但值得注意的)
+  - [10.8 本阶段边界与后续](#108-本阶段边界与后续)
+- [11. Week 4.5 交接](#11-week-45-交接)
+- [12. 悬挂问题与反向清单](#12-悬挂问题与反向清单)
+
+## 架构视图：数据流、函数调用流与模块边界（动态）
+
+本节是后续 Stage 5、Stage 6 共用的架构索引；新增处理步骤、状态或接口时先更新这里，再在对应 Stage 记录细节。
+
+### 当前模块边界
+
+```text
+object_pose_estimator_node
+  ROS2 输入、精确时间戳配对、TF、生命周期、结果发布
+       |
+       +--> robot_mask
+       |      用机器人可见网格预测深度并过滤自身像素
+       |
+       +--> geometry_pipeline
+              深度反投影、桌面/ROI 分割、聚类、盒体姿态估计
+```
+
+### 运行时数据流
+
+```mermaid
+flowchart TD
+  A[RGB / Depth / CameraInfo / Observation / TF] --> B[按时间戳缓存]
+  B --> C{输入齐全且机器人 TF 齐全?}
+  C -- 否 --> D[pending timer / 超时拒绝]
+  C -- 是 --> E[查询 world 与 link TF]
+  E --> F[RobotMaskFilter::filter]
+  F --> G[filtered_depth]
+  G --> H[segmentDepth]
+  H --> I[target_cluster]
+  I --> J[estimateBoxPose]
+  J --> K[VisionObjectPose]
+  F --> L[预测深度 / mask / diagnostics]
+  H --> M[foreground / target PointCloud2]
+```
+
+### 函数调用流
+
+```mermaid
+flowchart LR
+  N[ROS callbacks] --> T[tryProcess]
+  T --> R[RobotMaskFilter::filter]
+  R --> P[Impl::prepare]
+  R --> V[Impl::render]
+  T --> S[segmentDepth]
+  T --> O[estimateBoxPose]
+  T --> Q[publishEstimate / publishRejected]
+  T --> X[publish debug images, clouds, diagnostics]
+```
+
+### 函数职责速查
+
+以下注释刻意只写“做什么”，不展开实现细节。
+
+```cpp
+// geometry_pipeline
+rejectionReasonName();       // 将拒绝枚举转成消息字符串。
+segmentDepth();              // 将深度图分割成前景点和目标点簇。
+estimateKnownCorrespondences(); // 根据已知点对应关系估计刚体变换。
+estimateBoxPose();           // 根据目标点簇估计盒体位置、方向和质量。
+
+// robot_mask
+loadRobotVisualMeshes();     // 加载每个机器人 link 的可见网格。
+RobotMaskFilter::filter();   // 生成机器人预测深度并过滤匹配像素。
+Impl::prepare();             // 设置相机参数和当前 link 网格位姿。
+Impl::render();              // 渲染机器人模型深度图。
+
+// object_pose_estimator_node
+stampKey();                  // 将 ROS 时间转换成缓存键。
+eigenTransform();            // 将 ROS TF 转成 Eigen 变换。
+onRgb()/onDepth();           // 缓存图像并尝试处理对应帧。
+onColorInfo()/onDepthInfo(); // 缓存相机参数并尝试处理对应帧。
+onObservation();             // 缓存 observation 并处理 session/generation 变化。
+onTf();                      // 缓存该时间戳出现的机器人 frame。
+hasRobotTf();                // 检查动态机器人 TF 是否齐全。
+retryPending();              // 重试等待 TF 的帧，超时则拒绝。
+trim();                      // 限制时间戳缓存大小。
+tryProcess();                // 编排掩膜、分割、姿态估计和发布。
+publishMaskImages();         // 发布预测深度、mask 和过滤深度。
+publishCloud();              // 发布 world frame 点云。
+publishMaskDiagnostics();    // 发布掩膜和分割统计。
+publishRejected();           // 发布带拒绝原因的视觉结果。
+publishEstimate();           // 发布接受的盒体位姿和质量指标。
+```
 
 ## 1. 从前三周继承的事实和边界
 
@@ -82,7 +184,7 @@
 
 ## 2. 本周 Stage 计划
 
-### 2.1 Stage P：RGB-D 相机和世界坐标观测
+### 2.1 Stage 1：RGB-D 相机和世界坐标观测
 
 | 项 | 内容 |
 | --- | --- |
@@ -93,7 +195,7 @@
 
 相机观测和 `BridgeObservation` 的关系需要在实现时冻结：若图像和物理状态没有放入同一消息，就必须记录同步策略和允许的最大时间差。
 
-### 2.2 Stage Q：几何分割和刚体位姿估计
+### 2.2 Stage 2：几何分割和刚体位姿估计
 
 | 项 | 内容 |
 | --- | --- |
@@ -104,7 +206,7 @@
 
 已知方形 box 的对称性必须显式定义姿态误差。若当前任务只关心位置和工具方向，应记录“等价姿态”规则，不能把不可观测的 yaw 误差误报为算法失败。
 
-### 2.3 Stage R：oracle/vision 对照和任务接入
+### 2.3 Stage 3：oracle/vision 对照和任务接入
 
 | 项 | 内容 |
 | --- | --- |
@@ -113,18 +215,18 @@
 | 任务行为 | vision 低置信时重新观察或显式失败；不继续使用上一轮未经标记的旧 pose |
 | 边界 | 本周不要求 learned policy 成功，也不要求障碍环境；但输出字段必须能被 Week 4.5 的 policy observation adapter 消费 |
 
-Stage R 的已完成验证只覆盖 vision 样本进入 `PREGRASP` 和拒绝后的停止语义，**没有完成 vision 模式的抓放**。后续 R1~R3 采用 [ADR 009](../../docs/adr/009-robot-aware-stateful-vision.md) 的机器人感知与时序跟踪决策；以下均为待实现的阶段出口，不回写为 Stage R 的实测结论。
+Stage 3 的已完成验证只覆盖 vision 样本进入 `PREGRASP` 和拒绝后的停止语义，**没有完成 vision 模式的抓放**。Stage 4~6 采用 [ADR 009](../../docs/adr/009-robot-aware-stateful-vision.md) 的机器人感知与时序跟踪决策；下表保留阶段出口，Stage 4 的完成实测见第 10 节，不能回写为 Stage 3 的结果。
 
-### 2.4 Stage R1：同帧机器人几何掩膜
+### 2.4 Stage 4：同帧机器人几何掩膜
 
 | 项 | 计划与出口 |
 | --- | --- |
-| 输入边界 | 沿用 Stage Q 的 RGB-D、CameraInfo、同时间戳 `BridgeObservation` 和现有 TF；只取其关节/夹爪状态及生命周期字段，机器人 link 几何来自与仿真模型核对过的描述。在线分割不读取 `BridgeObservation.object_pose` 或仿真接触位。 |
+| 输入边界 | 沿用 Stage 2 的 RGB-D、CameraInfo、同时间戳 `BridgeObservation` 和现有 TF；只取其关节/夹爪状态及生命周期字段，机器人 link 几何来自与仿真模型核对过的描述。在线分割不读取 `BridgeObservation.object_pose` 或仿真接触位。 |
 | 实现 | 在感知包中把机器人各 link、手指的可见几何投影到相机，生成预测深度和 robot mask；用观测深度与预测表面深度的容差判断机器人像素，保留更靠近相机的非机器人点。掩膜在桌面去除、聚类之前应用；缺同帧 link 变换或几何失配时显式拒绝。 |
 | 可观测性 | 输出按 session/generation/sequence 关联的原始深度、预测机器人深度、mask、过滤后点云和候选簇调试 artifact；统计机器人残留、目标误删、mask 耗时及误差容差。 |
-| 验证出口 | 固定点云/图像 fixture 覆盖空场景、机械臂靠近、夹爪与盒体相接、盒体位于机械臂前方、TF 缺失和模型偏差；实际运行时检查相机图像与 mask 叠加，不再把机械臂和盒体的连通簇直接作为目标。`colcon build/test` 与运行时 smoke 均通过后进入 R2。 |
+| 验证出口 | 固定点云/图像 fixture 覆盖空场景、机械臂靠近、夹爪与盒体相接、盒体位于机械臂前方、TF 缺失和模型偏差；实际运行时检查相机图像与 mask 叠加，不再把机械臂和盒体的连通簇直接作为目标。`colcon build/test` 与运行时 smoke 均通过后进入 Stage 5。 |
 
-### 2.5 Stage R2：目标关联与遮挡状态估计
+### 2.5 Stage 5：目标关联与遮挡状态估计
 
 | 项 | 计划与出口 |
 | --- | --- |
@@ -134,11 +236,11 @@ Stage R 的已完成验证只覆盖 vision 样本进入 `PREGRASP` 和拒绝后�
 | 失败边界 | reset/bridge 重启清空轨迹；关联跳变、遮挡超时和模型不一致转入不可观测/拒绝，不能永久复用旧 pose，也不能把预测残差填成测量残差。完全遮挡时不宣称可以从单相机确认未滑落。 |
 | 验证出口 | ROS-free 序列测试覆盖接近遮挡、局部重见、完整遮挡、真实掉落、释放后重见、错误关联和跨 generation 旧帧；断言预测年龄/不确定性增长、状态转换和无 oracle 输入。记录每阶段的实测/预测/不可观测帧数及 p50/p95 延迟。 |
 
-### 2.6 Stage R3：任务证据门与完整抓放验收
+### 2.6 Stage 6：任务证据门与完整抓放验收
 
 | 项 | 计划与出口 |
 | --- | --- |
-| 接入 | 任务入口仍只有 `oracle`/`vision` 来源。vision 模式继续消费新鲜关节/TCP/夹爪状态，但按 R2 的状态和年龄决定运动或等待；短时 `PREDICTED` 只允许有界推进，超时、关联冲突或缺失测量进入明确失败。保持 `EpisodeController` 的 reset/generation/sequence 编排边界，调整依赖物体当前高度、滑落和最终落点的 FSM 证据门。 |
+| 接入 | 任务入口仍只有 `oracle`/`vision` 来源。vision 模式继续消费新鲜关节/TCP/夹爪状态，但按 Stage 5 的状态和年龄决定运动或等待；短时 `PREDICTED` 只允许有界推进，超时、关联冲突或缺失测量进入明确失败。保持 `EpisodeController` 的 reset/generation/sequence 编排边界，调整依赖物体当前高度、滑落和最终落点的 FSM 证据门。 |
 | 防止伪成功 | 当前 `BridgeObservation` 的物体真值和仿真接触位仅供离线评测，不作为 vision 模式的在线成功依据。预测位姿不能单独证明抬升、持物或落点；释放并移开机械臂后必须重新获得 `MEASURED` 的物体位姿，才能报告 vision 放置成功。无法重见则报告未能验证，不报成功。 |
 | 集成验证 | `colcon build/test`、运行时 oracle 回归、vision 固定场景连续抓放和相同 seed 的 held-out 位姿对照；注入遮挡、掉落、错误目标、TF/图像缺帧及 reset，检查没有旧 pose 命令或假成功。固定场景目标为 20/20 vision 完整 episode 成功，held-out 至少 20 次报告成功率、误差与失败码；保留可重放的成功和失败 RGB-D/状态记录。 |
 | 完成判据 | outcome 必须附带来源和最终实测证据；报告按 phase 划分的 `MEASURED/PREDICTED/OCCLUDED/REJECTED` 时长、最终落点误差、假成功次数和视觉端到端延迟。与 oracle 同任务对照后，再将观测契约交给 Week 4.5。 |
@@ -171,14 +273,14 @@ Stage R 的已完成验证只覆盖 vision 样本进入 `PREGRASP` 和拒绝后�
 3. **时间语义**：相机帧和 `BridgeObservation` 的最大允许时间差是多少？这个值应由实验测量，不应只写成实现细节。
 4. **姿态定义**：当前方形 box 的对称性和抓取工具 yaw 是否足以支撑后续 policy observation？如果不够，应在 Week 4.5 前冻结等价姿态规则。
 
-## 6. 悬挂问题
+## 6. 开周悬挂问题快照
 
-- 相机安装位姿和标定方式尚未确定，解锁条件是 Stage P 的实际相机配置。
-- 当前 `BridgeObservation` 没有图像字段。需要在 Stage P 决定使用原子 observation bundle 还是时间戳同步的标准话题集合，不能让 Week 4.5 再猜测。
+- 开周时相机安装位姿和标定方式尚未确定；Stage 1 已给出固定仿真相机配置与验证，见 [7.2](#72-坐标系tf-和像素投影)。
+- 开周时尚未决定图像与 `BridgeObservation` 的同步方式；Stage 1 已选择标准话题按完全相同时间戳配对，见 [7.4](#74-时间同步消息契约和多相机边界)。
 - 点云和图像的 rosbag 体积、压缩方式和是否进入 Git 尚未决定；大文件只能进入外部 artifact 存储。
-- 本周不决定是否使用 ICP、FoundationPose 或开放词汇分割；先完成可解释的几何基线。
+- 开周时暂不决定是否使用 ICP、FoundationPose 或开放词汇分割；Stage 2 已完成可解释的几何基线，后续是否扩展由 held-out 失败样本决定。
 
-## 7. Stage P 讲解与追问记录
+## 7. Stage 1 讲解与追问记录
 
 本节把两轮讲解按主题整理。原始问题包括：RGB-D 基础和相机摆放、单相机与多相机、oracle 接触与宽度判定、物体形状鲁棒性，以及 ROS optical frame 和两条相机 TF 是否属于先验。
 
@@ -205,7 +307,7 @@ RGB-D 相机同时提供彩色图和每像素深度。常见深度编码是 `16U
 → 去桌面、聚类和位姿估计
 ```
 
-常用 ROS 组件包括 `cv_bridge`、`image_transport`、`image_proc`、`depth_image_proc`、`tf2_ros`、`message_filters`、OpenCV 和 PCL。当前项目还没有接入真实相机、PCL、检测器或位姿估计器；Stage P 只完成了仿真 RGB-D 输出和坐标链验证。
+常用 ROS 组件包括 `cv_bridge`、`image_transport`、`image_proc`、`depth_image_proc`、`tf2_ros`、`message_filters`、OpenCV 和 PCL。当前项目还没有接入真实相机、PCL、检测器或位姿估计器；Stage 1 只完成了仿真 RGB-D 输出和坐标链验证。
 
 ### 7.2 坐标系、TF 和像素投影
 
@@ -256,6 +358,14 @@ p_world = T_world_camera_link
 验证只证明坐标链和消息契约在当前仿真中接通，不等于已经完成物体位姿估计。
 
 ### 7.3 相机摆放、遮挡和渲染坐标转换
+
+#### 从位姿到图像：机器人自过滤和视觉估计的方向
+
+自过滤是前向投影：已知机器人模型、姿态和相机参数，预测机器人在图像中的深度。视觉估计则是逆问题：从 RGB-D 反推出物体的三维位置和姿态，结果可能存在遮挡、对称性和数据不足造成的歧义。
+
+#### 深度缓冲的直观含义
+
+深度缓冲把网格投影到图像后，对每个像素保留相机方向上最近的表面深度，因此能够表达遮挡关系；它只生成几何深度，不负责识别物体。
 
 相机位置要在视野、工作距离、遮挡、入射角和分辨率之间折中。最初的斜视位置和随后尝试的正上方位置，在 reset 回 home 后都会让机械臂持续挡住中心视线；运行时集成检查脚本反投影出的点落在机械臂表面，而不是 box，这不是 TF 算错，而是传感器确实被遮挡。最终采用桌面负 Y 侧上方的 `(0.5,-0.45,1.0)m` 位姿，reset 前后都能看到 box；执行抓取时仍可能动态遮挡。
 
@@ -493,7 +603,7 @@ if matches:
 保留最近 30 个键；15 秒内没有完整交集就报告 timeout。静态 TF 不参与这组时间戳交集，
 脚本只确认 `camera_link` 和 `camera_optical_frame` 已收到，并按 child frame 保存变换。
 
-采用标准图像话题便于 RViz 和现有 ROS 工具消费，但 DDS 不保证跨话题到达顺序，也可能丢帧。消费者必须按时间戳精确匹配，不能从各话题分别取“最新一条”。图像本身没有 generation；匹配到 `BridgeObservation` 后才能取得 session、generation 和 sequence，并拒绝 reset 前的旧样本。运行时集成检查脚本在 generation 0 和 reset 后的 generation 1 都配对成功。延迟、丢帧时的等待上限和失败码仍属于 Stage Q 消费端工作。
+采用标准图像话题便于 RViz 和现有 ROS 工具消费，但 DDS 不保证跨话题到达顺序，也可能丢帧。消费者必须按时间戳精确匹配，不能从各话题分别取“最新一条”。图像本身没有 generation；匹配到 `BridgeObservation` 后才能取得 session、generation 和 sequence，并拒绝 reset 前的旧样本。运行时集成检查脚本在 generation 0 和 reset 后的 generation 1 都配对成功。延迟、丢帧时的等待上限和失败码仍属于 Stage 2 消费端工作。
 
 当前只有一个 `workcell_rgbd`、一组 RGB/depth/CameraInfo publisher 和一组相机 TF。底层可以扩展到多相机，但每台相机都要有独立的 MJCF camera、frame、topic、内参、渲染缓冲区和频率，还要处理多相机外参、同步、重叠视野、遮挡和融合置信度。当前代码不能声称已经支持任意多相机。
 
@@ -519,15 +629,15 @@ if matches:
 
 ### 7.6 物体识别和形状先验
 
-Stage P 没有物体识别，只验证固定 box 的深度反投影和坐标链。当前先验是：单个目标、固定 body 名 `box`、4 cm 立方体、已知桌面、已知相机参数和可用 MuJoCo oracle。因此当前不能称为对任意形状鲁棒。
+Stage 1 没有物体识别，只验证固定 box 的深度反投影和坐标链。当前先验是：单个目标、固定 body 名 `box`、4 cm 立方体、已知桌面、已知相机参数和可用 MuJoCo oracle。因此当前不能称为对任意形状鲁棒。
 
-立方体的 yaw 存在 90° 对称性。如果任务只关心抓取中心，应定义等价姿态；如果需要完整 6D pose，则必须显式处理对称性。Stage Q 再实现桌面去除、目标聚类和已知对应 SVD 配准，并输出 pose、残差、inlier ratio 和拒绝原因。
+立方体的 yaw 存在 90° 对称性。如果任务只关心抓取中心，应定义等价姿态；如果需要完整 6D pose，则必须显式处理对称性。Stage 2 再实现桌面去除、目标聚类和已知对应 SVD 配准，并输出 pose、残差、inlier ratio 和拒绝原因。
 
-Stage Q 将在独立章节记录几何感知包、输入同步、成熟视觉组件和位姿质量输出，不把这些内容混入 Stage P 的相机适配记录。
+Stage 2 将在独立章节记录几何感知包、输入同步、成熟视觉组件和位姿质量输出，不把这些内容混入 Stage 1 的相机适配记录。
 
 ### 7.7 性能、实测结果和验证结论
 
-当前默认相机频率是 **10 Hz 仿真时间**，运行日志的 RTF 约为 **0.5**，因此墙钟时间不能期待稳定收到 10 帧/秒。渲染、像素读回和消息发布与物理步进同一线程执行，慢渲染会拖慢整个仿真；目前没有分别测量三者耗时，不能把 RTF 下降精确归因到某一个环节。Stage Q 测量感知延迟时应同时记录仿真时间、墙钟时间和帧序号。
+当前默认相机频率是 **10 Hz 仿真时间**，运行日志的 RTF 约为 **0.5**，因此墙钟时间不能期待稳定收到 10 帧/秒。渲染、像素读回和消息发布与物理步进同一线程执行，慢渲染会拖慢整个仿真；目前没有分别测量三者耗时，不能把 RTF 下降精确归因到某一个环节。Stage 2 测量感知延迟时应同时记录仿真时间、墙钟时间和帧序号。
 
 已完成验证：
 
@@ -536,22 +646,22 @@ Stage Q 将在独立章节记录几何感知包、输入同步、成熟视觉组
 - box 顶面反投影高度误差约 `0.6mm`、XY 误差约 `8.6mm`；
 - 桌面反投影 `z≈0.2206m`，与场景顶面 `0.22m` 一致。
 
-`camera_probe.py` 在 `LIBGL_ALWAYS_SOFTWARE=1` 下重新通过：中心深度 `0.8613m`，box 顶面误差 `0.6mm`，桌面 `z=0.2206m`。未设置软件渲染时，当前 shell 的 GLFW context 创建会卡在图形环境中；这属于运行环境问题，排查时应先确认 DISPLAY/OpenGL，再判断相机代码。该检查只验证 Stage P 的仿真相机消息和坐标链，不验证 Stage Q 的点云和姿态算法。
+`camera_probe.py` 在 `LIBGL_ALWAYS_SOFTWARE=1` 下重新通过：中心深度 `0.8613m`，box 顶面误差 `0.6mm`，桌面 `z=0.2206m`。未设置软件渲染时，当前 shell 的 GLFW context 创建会卡在图形环境中；这属于运行环境问题，排查时应先确认 DISPLAY/OpenGL，再判断相机代码。该检查只验证 Stage 1 的仿真相机消息和坐标链，不验证 Stage 2 的点云和姿态算法。
 
-主要 Stage P 失败模式是外参父子方向错误导致镜像、翻转或整体偏移，以及把 OpenGL 原始深度当米导致尺度错误。时间同步、桌面分割、聚类和位姿质量属于 Stage Q 的验证范围。
+主要 Stage 1 失败模式是外参父子方向错误导致镜像、翻转或整体偏移，以及把 OpenGL 原始深度当米导致尺度错误。时间同步、桌面分割、聚类和位姿质量属于 Stage 2 的验证范围。
 
 ### 7.8 尚未解决但必须保留的问题
 
 - 仿真零畸变、无噪声不代表真机；真机需要重新标定并使用驱动内参。
-- Stage P 只验证仿真相机消息和坐标链，不证明真实相机标定、噪声或运动中同步。
-- Stage P 只支持当前单相机配置；多相机外参、重叠视野和融合策略留到后续。
-- Stage Q 的视觉输出质量、oracle/vision 接口隔离、遮挡时拒绝旧 pose，以及脱离 MuJoCo 重放点云和配准，见下一章。
+- Stage 1 只验证仿真相机消息和坐标链，不证明真实相机标定、噪声或运动中同步。
+- Stage 1 只支持当前单相机配置；多相机外参、重叠视野和融合策略留到后续。
+- Stage 2 的视觉输出质量、oracle/vision 接口隔离、遮挡时拒绝旧 pose，以及脱离 MuJoCo 重放点云和配准，见下一章。
 
-## 8. Stage Q：几何分割和刚体位姿估计
+## 8. Stage 2：几何分割和刚体位姿估计
 
 ### 8.0 一句话总结
 
-Stage Q 把 Stage P 发布的标准 RGB-D 输入转换成 world-frame 的目标物体位姿。它不把点云算法继续堆进 `mujoco_bridge_node`，而是在独立的 `mujoco_perception` 包中组合 `image_geometry` 和 PCL，并把时间戳、generation、质量指标和拒绝原因一起传给任务层。
+Stage 2 把 Stage 1 发布的标准 RGB-D 输入转换成 world-frame 的目标物体位姿。它不把点云算法继续堆进 `mujoco_bridge_node`，而是在独立的 `mujoco_perception` 包中组合 `image_geometry` 和 PCL，并把时间戳、generation、质量指标和拒绝原因一起传给任务层。
 
 ### 8.1 改动清单与验证结果
 
@@ -569,7 +679,7 @@ Stage Q 把 Stage P 发布的标准 RGB-D 输入转换成 world-frame 的目标�
 
 ### 8.2 完整输入管线和模块关系
 
-本节记录这次讲解的高层模型。Stage Q 不是把一个“大视觉函数”塞进 bridge，而是把仿真传感器、输入同步、几何处理和任务输出分成四层：
+本节记录这次讲解的高层模型。Stage 2 不是把一个“大视觉函数”塞进 bridge，而是把仿真传感器、输入同步、几何处理和任务输出分成四层：
 
 ```text
 MuJoCo mjData
@@ -583,7 +693,7 @@ MuJoCo mjData
 
 `mujoco_bridge` 仍拥有 MuJoCo 的 `mjData`。它的 `RgbdCamera` 是仿真专属适配层，负责从 MuJoCo 的离屏渲染缓冲区产生标准 ROS 图像；这部分不能直接由通用 ROS 视觉包替代。bridge 不负责点云聚类或物体姿态估计，也不订阅感知结果。
 
-如果继续把 Stage Q 写进 bridge，一个节点会同时承担物理步进、渲染、状态发布、reset、点云分割和姿态估计。这样视觉计算会直接占用物理线程，算法单测也会被 MuJoCo 和 OpenGL 环境绑住。拆包后的代价是多一个节点、需要处理跨 topic 同步、并引入 PCL 版本依赖；收益是几何算法可以脱离 MuJoCo 做固定 fixture 测试，也可以以后替换为真实 RGB-D 驱动。
+如果继续把 Stage 2 写进 bridge，一个节点会同时承担物理步进、渲染、状态发布、reset、点云分割和姿态估计。这样视觉计算会直接占用物理线程，算法单测也会被 MuJoCo 和 OpenGL 环境绑住。拆包后的代价是多一个节点、需要处理跨 topic 同步、并引入 PCL 版本依赖；收益是几何算法可以脱离 MuJoCo 做固定 fixture 测试，也可以以后替换为真实 RGB-D 驱动。
 
 `depth_image_proc` 和 `pcl_ros` 是常见 ROS 运行时组件，但当前容器没有安装它们。因此本阶段使用已安装的 `image_geometry` 和 PCL C++ API。自有代码只负责参数、输入契约、TF/时间戳、生命周期字段、置信度和拒绝码，不重新实现通用点云算法。
 
@@ -651,7 +761,7 @@ $$
 
 在当前实现中，`estimateKnownCorrespondences(source, target)` 并没有被默认的 `object_pose_estimator_node` 调用。真实运行路径是 `depth → world 点云 → target cluster → estimateBoxPose(OBB)`；SVD 单测使用人为构造的 source/target 对来验证这个通用配准入口。只有未来加入可靠的模型特征对应关系时，才适合把 SVD 接入主视觉路径。
 
-**为什么在这里保留 PCL SVD。** 这里的 SVD 指 Singular Value Decomposition，奇异值分解。Stage Q 不只是要让当前这个已知尺寸的立方体通过 OBB 工作，还需要保留一个可以复用于“模型点集 ↔ 观测点集”的标准刚体配准入口。这样，后续如果换成带角点、特征点或 CAD 采样点的物体，只要上游能够建立可靠的对应关系，就可以用成熟的 PCL 求解器直接估计完整的旋转和平移，而不必再在项目中维护一套 Kabsch/SVD 实现。当前 `TransformationEstimationSVD` 的测试同时验证了正常变换、点数不匹配和共线退化；但默认盒体运行路径仍主要使用 OBB，因为俯视 RGB-D 通常只有顶面点，没有稳定的逐点对应关系。
+**为什么在这里保留 PCL SVD。** 这里的 SVD 指 Singular Value Decomposition，奇异值分解。Stage 2 不只是要让当前这个已知尺寸的立方体通过 OBB 工作，还需要保留一个可以复用于“模型点集 ↔ 观测点集”的标准刚体配准入口。这样，后续如果换成带角点、特征点或 CAD 采样点的物体，只要上游能够建立可靠的对应关系，就可以用成熟的 PCL 求解器直接估计完整的旋转和平移，而不必再在项目中维护一套 Kabsch/SVD 实现。当前 `TransformationEstimationSVD` 的测试同时验证了正常变换、点数不匹配和共线退化；但默认盒体运行路径仍主要使用 OBB，因为俯视 RGB-D 通常只有顶面点，没有稳定的逐点对应关系。
 
 PCL 的 `TransformationEstimationSVD` 求解“已知对应点集合之间的最佳刚体变换”：先计算 source 和 target 的质心，再对去中心化点集建立协方差矩阵，对协方差做 SVD，利用左右奇异向量恢复旋转，最后由质心差得到平移。它求的是 `R/t` 刚体变换，不改变尺度，也不负责寻找对应关系、去除外点或识别物体。
 
@@ -737,9 +847,9 @@ $$
 
 ### 8.10 本阶段边界与后续
 
-Stage Q 当前是可解释的几何基线，不是通用物体识别系统。它支持单个已知尺寸立方体和已知桌面，不支持任意形状、完整可观测 6D yaw、随机遮挡恢复、多相机融合或真实相机噪声模型。
+Stage 2 当前是可解释的几何基线，不是通用物体识别系统。它支持单个已知尺寸立方体和已知桌面，不支持任意形状、完整可观测 6D yaw、随机遮挡恢复、多相机融合或真实相机噪声模型。
 
-尚未完成的评测包括随机物体位姿、深度噪声、局部遮挡、误分割、长时间延迟统计和 rosbag/fixed fixture 重放。Stage R 再决定如何把视觉输出接入 oracle/vision 对照和任务执行；在此之前不能把静态 smoke test 当成完整视觉验收。
+尚未完成的评测包括随机物体位姿、深度噪声、局部遮挡、误分割、长时间延迟统计和 rosbag/fixed fixture 重放。Stage 3 再决定如何把视觉输出接入 oracle/vision 对照和任务执行；在此之前不能把静态 smoke test 当成完整视觉验收。
 
 ### 8.11 不引入深度模型时的泛化讨论
 
@@ -756,7 +866,7 @@ Stage Q 当前是可解释的几何基线，不是通用物体识别系统。它
 
 ### 8.12 流程鲁棒性：从初始检测到抓取过程
 
-物体/环境泛化回答“换一个对象或场景还能不能识别”，流程鲁棒性回答“同一个任务进行到一半、观测条件变化后，系统会不会继续使用错误结果”。当前 Stage Q 主要是**逐帧的几何估计器**：每个完整同步帧独立执行 ROI、平面去除、聚类和 OBB，不维护目标轨迹，不知道机械臂是否正在夹持，也不拥有“抓取中/已掉落/等待重新观察”等任务状态。
+物体/环境泛化回答“换一个对象或场景还能不能识别”，流程鲁棒性回答“同一个任务进行到一半、观测条件变化后，系统会不会继续使用错误结果”。当前 Stage 2 主要是**逐帧的几何估计器**：每个完整同步帧独立执行 ROI、平面去除、聚类和 OBB，不维护目标轨迹，不知道机械臂是否正在夹持，也不拥有“抓取中/已掉落/等待重新观察”等任务状态。
 
 因此当前行为应按场景理解：
 
@@ -782,11 +892,17 @@ Stage Q 当前是可解释的几何基线，不是通用物体识别系统。它
 
 一个不依赖深度模型的可行流程是：初始阶段用桌面约束检测物体，夹持后切换到机器人 mask + 目标跟踪，抬升阶段用目标相对 TCP 的连续运动判断是否跟随，检测到遮挡或掉落时清除旧目标并重新搜索，最终用桌面重新出现和放置区域验证结果。这个方案能显著减少“机械臂混入”和“掉落后仍沿用旧目标”的风险，但仍不能从视觉单帧可靠推断接触力、滑落瞬间或完全遮挡下的真实姿态。
 
-## 9. Stage R：oracle/vision 对照和任务接入
+#### 夹爪遮挡与卡尔曼滤波
+
+卡尔曼滤波可以在短暂遮挡期间预测位置并平滑噪声，但不能从完全遮挡的图像恢复真实姿态。确认夹持后，更强的约束是记录 `T_gripper_object`，用当前夹爪 TF 预测物体位姿；重新看见物体时再与预测比较，检查滑动或掉落。
+
+先定义“可见、夹持、丢失、重新观测”等状态，再加入滤波器。否则错误检测也可能被滤波器平滑成看似稳定的轨迹。
+
+## 9. Stage 3：oracle/vision 对照和任务接入
 
 ### 9.0 一句话总结
 
-Stage R 把 Stage Q 的视觉物体位姿接入已有任务执行器，同时保留 oracle 作为可比较的控制上限。`observation_source` 决定一个 episode 使用哪一种物体观测；两种来源共用 `EpisodeController`、FSM 和 waypoint source，不在视觉失败时偷偷回退到旧 pose。vision 样本必须和 bridge observation 的 `bridge_session`、`generation`、`sample_sequence` 三个字段精确匹配，并通过 confidence、residual 和 inlier ratio 质量门；拒绝或低质量样本结束 episode 且不发布新的运动目标。
+Stage 3 把 Stage 2 的视觉物体位姿接入已有任务执行器，同时保留 oracle 作为可比较的控制上限。`observation_source` 决定一个 episode 使用哪一种物体观测；两种来源共用 `EpisodeController`、FSM 和 waypoint source，不在视觉失败时偷偷回退到旧 pose。vision 样本必须和 bridge observation 的 `bridge_session`、`generation`、`sample_sequence` 三个字段精确匹配，并通过 confidence、residual 和 inlier ratio 质量门；拒绝或低质量样本结束 episode 且不发布新的运动目标。
 
 ### 9.1 改动清单与验证结果
 
@@ -817,7 +933,7 @@ Stage R 把 Stage Q 的视觉物体位姿接入已有任务执行器，同时保
 
 > 你好，请看到week4.md，接下来是stageR的实现。
 
-本阶段只接入 oracle/vision 对照，不改 Stage Q 几何算法，不接入 learned policy、MoveIt 或障碍规划；当前低质量视觉样本拒绝并结束 episode，重新观察和跨帧跟踪留到后续阶段。
+本阶段只接入 oracle/vision 对照，不改 Stage 2 几何算法，不接入 learned policy、MoveIt 或障碍规划；当前低质量视觉样本拒绝并结束 episode，重新观察和跨帧跟踪留到后续阶段。
 
 `BridgeObservation` 仍是任务状态的载体：它提供关节、接触信号、`world_to_hand_tcp` 以及生命周期字段。oracle 模式直接取其中的 ground-truth object pose。vision 模式只替换 object pose：节点从 `/object_pose_estimator/object_pose` 取得 pose 和质量指标，再从同 sample sequence 的 bridge observation 取得其余状态，最后构造同一个无 ROS 的 `ObservationEnvelope`。
 
@@ -865,7 +981,7 @@ GUI 中可切换深度话题；深度图的显示亮度不是米制值。此前�
 
 低置信度实验把阈值提高到 `0.99`。estimator 的约 `0.824` confidence 样本仍是 accepted，但 executor 在任务层质量门拒绝它并记录 `VISION_LOW_CONFIDENCE`。这说明 estimator 的 accepted 与任务层的可执行质量不是同一个概念，阈值必须在 outcome 中留下可追溯配置和指标。
 
-并行全量测试曾让 `xmllint` 偶发 timeout，单独运行通过。排查后将它视为测试调度/资源竞争信号，而不是 Stage R 逻辑失败；最终回归需要确认全量结果稳定后才能关闭本阶段。
+并行全量测试曾让 `xmllint` 偶发 timeout，单独运行通过。排查后将它视为测试调度/资源竞争信号，而不是 Stage 3 逻辑失败；最终回归需要确认全量结果稳定后才能关闭本阶段。
 
 ### 9.7 排查记录
 
@@ -880,7 +996,7 @@ GUI 中可切换深度话题；深度图的显示亮度不是米制值。此前�
 
 ### 9.9 本阶段边界与后续讨论
 
-Stage R 验证观测来源选择、生命周期配对、质量门和停止语义，不证明视觉在动态遮挡、随机物体姿态、深度噪声或真实硬件上可靠。R1~R3 将分别处理机器人掩膜、跟踪状态和任务证据门；Week 4.5 只消费 R3 验收后的观测契约。
+Stage 3 验证观测来源选择、生命周期配对、质量门和停止语义，不证明视觉在动态遮挡、随机物体姿态、深度噪声或真实硬件上可靠。Stage 4~6 将分别处理机器人掩膜、跟踪状态和任务证据门；Week 4.5 只消费 Stage 6 验收后的观测契约。
 
 > 也就是说，当前现在视觉抓放还没能搞定？？？但是就我们当前无障碍的pick and place来说，不是只要object的初始位姿得到accept就可以了吗？有这个强先验还不够吗？？
 
@@ -888,8 +1004,134 @@ Stage R 验证观测来源选择、生命周期配对、质量门和停止语义
 
 > 请你对本week的后续阶段进行设计，并且填入文档，如何划分阶段由你决定。这属于较为重大的架构决策，所以需要你写一份adr文档。
 
-当前 vision smoke 在 `PREGRASP` 后因机器人/盒体混簇报 `MODEL_EXTENT_MISMATCH`，只验证了拒绝即停止，没有证明视觉抓放成功。单次初始位姿足以为静止盒体生成抓取目标，但不能证明后续盒体已抬升、未滑落和最终落点；现有 `makeObservationSnapshot()` 又把当前物体 pose 同时用作规划与这些验收信号。用户选择从视觉端解决遮挡和目标身份问题，因此 R1~R2 负责机器人几何过滤与时序估计，R3 只改任务层必须识别的证据状态和成功门，不把旧 pose 或仿真 oracle 伪装成实测。决策依据、替代方案和限制见 [ADR 009](../../docs/adr/009-robot-aware-stateful-vision.md)。本节是设计记录；R1~R3 尚未实现或验证。
+Stage 3 的 vision smoke 在 `PREGRASP` 后因机器人/盒体混簇报 `MODEL_EXTENT_MISMATCH`，当时只验证了拒绝即停止，没有证明视觉抓放成功。单次初始位姿足以为静止盒体生成抓取目标，但不能证明后续盒体已抬升、未滑落和最终落点；现有 `makeObservationSnapshot()` 又把当前物体 pose 同时用作规划与这些验收信号。用户选择从视觉端解决遮挡和目标身份问题，因此 Stage 4~5 负责机器人几何过滤与时序估计，Stage 6 只改任务层必须识别的证据状态和成功门，不把旧 pose 或仿真 oracle 伪装成实测。决策依据、替代方案和限制见 [ADR 009](../../docs/adr/009-robot-aware-stateful-vision.md)。本节保留当时的设计讨论；Stage 4 的实现与实测见第 10 节，Stage 5~6 尚未实现。
 
-## 10. Week 4.5 交接
+## 10. Stage 4：同帧机器人几何掩膜
 
-R1~R3 完成并通过完整视觉抓放验收后，Week 4.5 接收三类稳定输入：带证据状态的视觉 observation、oracle observation 和 episode 生命周期事件。Week 4.5 不改变视觉算法，而是定义这些输入怎样被记录、回放并交给传统规划器或 learned policy。具体计划见 [week4.5.md](week4.5.md)。
+### 10.0 一句话总结
+
+Stage 4 在 Stage 2 的桌面去除和聚类之前，使用同一图像时刻的机器人 TF 与可见网格生成预测深度，只去掉与机器人表面深度吻合的像素。最初手写 OBJ 解析和 CPU 栅格化，追问后改为 `geometric_shapes`/Assimp 和 MoveIt 2 的 `moveit_mesh_filter`，保留项目特有的时间戳、深度比较与诊断。固定几何测试、全量构建和运行时 oracle 探针均通过；vision episode 仍因 `VISION_LOW_CONFIDENCE` 停止，不能算完整视觉抓放。
+
+### 10.1 改动清单与验证结果
+
+| 改动 | 文件与职责 |
+| --- | --- |
+| 网格加载、预测深度与保守掩膜 | [robot_mask.hpp](../../src/mujoco_perception/include/mujoco_perception/robot_mask.hpp)、[robot_mask.cpp](../../src/mujoco_perception/src/robot_mask.cpp)：加载 58 份 Panda 可见 OBJ，以持久化 MoveIt 过滤器渲染；只在观测与预测深度相近时掩掉像素 |
+| 同帧输入、拒绝与调试输出 | [object_pose_estimator_node.cpp](../../src/mujoco_perception/src/object_pose_estimator_node.cpp)、[RobotMaskDiagnostics.msg](../../src/manipulation_interfaces/msg/RobotMaskDiagnostics.msg)：按图像时间戳查 TF，掩膜先于分割，输出深度、mask、点云及 session/generation/sequence 诊断 |
+| 依赖与运行条件 | [CMakeLists.txt](../../src/mujoco_perception/CMakeLists.txt)、[package.xml](../../src/mujoco_perception/package.xml)、[demo.launch.py](../../src/mujoco_bridge/launch/demo.launch.py)：声明 MoveIt/`geometric_shapes`/GLUT，感知节点使用软件 OpenGL |
+| 固定几何与独立 oracle 评测 | [test_robot_mask.cpp](../../src/mujoco_perception/test/test_robot_mask.cpp)、[robot_mask_probe.py](../../src/mujoco_perception/test/robot_mask_probe.py)：测试前方物体、表面匹配、模型冲突、缺 TF、空深度、下一帧 link 位姿和标定变化；oracle 只在离线探针中给像素打标签 |
+| 项目事实与决策 | [architecture.md](../../docs/architecture.md)、[ADR 009](../../docs/adr/009-robot-aware-stateful-vision.md)、[CLAUDE.md](../../CLAUDE.md)：记录数据契约、库选型与容器依赖 |
+
+| 验证 | 实测结果 | 限制 |
+| --- | --- | --- |
+| `colcon build --symlink-install`；`LIBGL_ALWAYS_SOFTWARE=1 colcon test --ctest-args -j1` | 6 个包构建成功；451 tests、0 errors、0 failures、67 skipped | 并行 CTest 的 `xmllint` 曾 60 秒超时；串行复跑通过 |
+| MoveIt 最小渲染探针 | 1 m 处 0.2 m 盒体的前表面预测深度为 `0.900 m`；未关闭默认 padding 时为约 `0.8845 m` | 因而项目将网格 padding 设为零，由像素比较单独控制 `0.012 m` 容差 |
+| 手写版早期运行记录 | 13 个配对帧，mask 耗时 `5.84..16.31 ms`；缺 `/tf` 注入得到 `MISSING_ROBOT_TRANSFORM` | 这是替换前基线，不作为 MoveIt 版本的性能数值 |
+| MoveIt 版同场景独立 oracle 探针 | 49 个配对帧、8110 个盒体像素、误掩 0；动态帧每帧预测 9484..13440 个机器人像素、掩掉 9334..13281 个，mask 耗时 `7.37..11.56 ms` | 盒体包络外前景点累计 2489 个；该代理指标本身不能判明每个点的来源 |
+| 移除整帧比例门后复测 | 6 个包构建成功；全量 451 tests、0 errors、0 failures、67 skipped；运行时 52 帧、8622 个盒体像素误掩 0 | 包络外前景点 2608 个；当前单盒包络指标不能直接用于 bin/多 box 场景 |
+| 恢复诊断计数复测（2026-10-01） | 6 个包构建成功；本次感知包串行测试通过（汇总含其他包历史结果仍为 451 tests、0 errors、0 failures、67 skipped）；43 帧、7480 个盒体像素误掩 0；`/clock` 一个 publisher | 每帧比较像素 3515..13455、冲突 29..126、比例 0.71%..1.05%；包络外点 1979；episode 仍为 `VISION_LOW_CONFIDENCE`；未做 TF/标定偏差注入 |
+| vision episode | 机械臂接近后以 `VISION_LOW_CONFIDENCE` 结束 | 掩膜已工作，但 Stage 5 的目标关联和遮挡状态尚未完成 |
+
+### 10.2 同帧掩膜如何工作
+
+#### Visual mesh、collision mesh 与 OBJ
+
+Visual mesh 和 collision mesh 都可以用 OBJ/STL 表示三角形表面；前者追求外观和相机可见轮廓，后者追求碰撞检测的速度和保守性。OBJ 主要列出顶点 `v`、法线 `vn`、纹理坐标 `vt` 和面 `f`；`f` 用索引把三个顶点组成一个三角形。
+
+OBJ 通常为三角形的三个角分别指定法线，渲染器可以在角之间插值表现平滑曲面；硬棱边则可以让相邻三角形使用不同法线。深度主要由顶点位置和遮挡关系决定，法线主要影响光照外观。
+
+Panda 的 `panda.xml` 将多个 visual OBJ 挂到同一个 link，并将 `.stl` 或带 `collision` 名称的网格用于碰撞。自过滤使用 visual mesh，因为目标是预测相机看到的机器人表面。
+
+#### `observed`、`predicted` 与误删
+
+`observed` 是相机实际测到的最近表面深度；`predicted` 是根据机器人网格、当前 TF 和相机参数预测的机器人表面深度。两者相差不超过容差时，像素被当作机器人并删除；更近的物体通常保留。
+
+物体完全被夹爪挡住时，本来就没有可恢复的观测。露出的物体若与预测夹爪表面只差几毫米，过大的深度容差会把它误判成夹爪，因此容差应同时用“机器人残留”和“目标误删”两项指标校准。
+
+同帧掩膜的完整处理流程如下：
+
+1. RGB、深度、两份 CameraInfo 与 `BridgeObservation` 先按完全相等的仿真时间戳配对；`session/generation/sequence` 来自配对后的 observation。再用该图像时间戳查询相机和 `link0..link7`、`hand`、两指的 TF。缺动态 link TF 超时后输出 `MISSING_ROBOT_TRANSFORM`，不沿用上一帧位姿。
+2. `geometric_shapes`/Assimp 读取 MJCF 所用的 58 份可见 OBJ；`moveit_mesh_filter` 用 CameraInfo 内参、每个网格的相机相对位姿和深度缓冲得到最近机器人表面深度 `d_model`。MoveIt 的默认 mesh padding 会改变表面位置，故这里设为零。
+3. 对有效观测深度 `d_obs`，若 `|d_obs - d_model| <= 0.012 m`，判为机器人表面并从深度图删掉；更近或更远的像素都保留。在有效预测与有效观测同时存在的像素中累加 `comparison_pixels`；其中 `d_obs > d_model + 0.012 m` 时累加 `mismatch_pixels`，仅作为诊断，不触发整帧拒绝。过滤后的深度才进入桌面去除、点云聚类和盒体位姿估计。
+4. 发布预测深度、`mono8` mask（255 表示被删）、过滤深度、前景点云、目标簇与 `RobotMaskDiagnostics`。所有输出带图像时间戳，诊断再带生命周期键、像素数、容差和耗时，便于把“模型投影错”“掩膜误删”“后续聚类失败”区分开。
+
+### 10.3 抓取过程中的遮挡处理
+
+抓取过程中应把遮挡当作观测状态变化，而不是直接把当前帧当成目标消失或新目标。可以按以下规则处理：
+
+1. **短暂局部遮挡**：保留最近一次可信位姿，同时用夹爪 TF 和已记录的 `T_gripper_object` 做有界预测；预测只能在短时间窗口内有效，并逐步增大不确定度。
+2. **完全遮挡**：不从当前 RGB-D 伪造新位姿，也不把旧位姿永久当作当前事实；等待重新观测或使用夹持状态专用的运动学预测。
+3. **重新看见**：将新观测与预测的位置、尺寸和速度比较。差异过大时先标记可能滑动/掉落，不能直接覆盖跟踪状态。
+4. **确认掉落**：清除夹持中的相对位姿，切换回桌面目标搜索；超时则发布明确的不可见或重新搜索状态。
+
+卡尔曼滤波可以平滑噪声和短时遮挡，但不能解决目标身份、夹持失效或完全遮挡。实现时应先冻结状态、超时和证据契约，再选择滤波器；否则错误检测也可能被平滑成稳定轨迹。
+
+### 10.4 公开包、权衡与替代方案
+
+> 这些处理没有公开的包可以做到吗，我看你又是尝试自己实现的。
+>
+> 不止humble里现成的，可以另外安装的也行。
+
+先前直接手写 OBJ 解析与 CPU 三角形栅格化，漏了可额外安装依赖的选型检查。容器中已执行 `apt-get install ros-humble-moveit-ros-perception`；该包导出 `moveit_mesh_filter` 库，`geometric_shapes` 用 Assimp 读取 OBJ。库接收网格、每个网格的位姿回调、`32FC1` 深度图，可返回模型预测深度；项目仍需适配同帧 TF 和业务诊断，因为 Humble 没有能直接满足这套时间戳/生命周期契约的独立 ROS 2 self-filter 节点。
+
+| 候选 | 适合的部分 | 本场景取舍 |
+| --- | --- | --- |
+| MoveIt `moveit_mesh_filter` + `geometric_shapes` | 可见网格加载、OpenGL 深度渲染 | 已采用；减少自维护解析器与栅格器，但引入 X11/OpenGL、GLUT 和固定相机标定约束 |
+| `robot_body_filter` | 基于 URDF collision 几何对点云做 containment/ray 过滤 | 几何基准与当前可见 OBJ 深度比较不同；调查时 ROS 2 分支仍有 ROS 1 依赖，不能直接当作可用的 Humble 节点 |
+| `depth_image_proc`、PCL | 深度转点云和通用几何过滤 | 不提供本题需要的“同帧机器人可见表面预测深度” |
+| 手写 CPU 渲染器 | 不依赖显示服务，单元测试直接 | 可作为早期原型；要自行维护 OBJ 边界、投影、遮挡和近裁剪，已被公开库替换 |
+
+### 10.5 失败模式与验证手段
+
+| 失败模式 | 可观察现象 | 验证/防护与实际覆盖 |
+| --- | --- | --- |
+| TF 缺失或用了旧 link 位姿 | 掩膜偏移、机械臂点留在前景 | 同时间戳查 TF；缺 `/tf` 注入曾得到 `MISSING_ROBOT_TRANSFORM`；固定测试覆盖缺变换与下一帧位姿更新 |
+| 相机参数或网格投影错位 | 机器人表面大量留在前景，或盒体被误删 | 对照预测深度/原图与 oracle 像素；MoveIt 版 49 帧的 8110 个盒体像素误掩为 0；标定变化被显式拒绝 |
+| 观测比预测机器人更远 | `mismatch_pixels` 增加，深度仍保留 | 固定几何测试以 `1.2 m` 深度覆盖预测 `~1.0 m` 表面，断言全部可比较像素计冲突、仍允许处理；这是合成投影冲突，不是后方物体可穿过机器人遮挡的正常观测 |
+| TF/标定偏差导致机器人残留 | 前景点或目标簇混入机器人点 | 缺 TF 显式拒绝，标定变化显式拒绝；其余偏差用同帧调试图、oracle 标签和残余点分布定位 |
+| 物体位于机器人前方 | 用轮廓 mask 会误删真实物体 | 固定几何测试把前方深度设为 `0.8 m`，确认保留；独立 oracle 探针计数误掩 |
+| 无 X11/OpenGL 或硬件 GL 创建卡住 | MoveIt 过滤器无法正常渲染，节点不可用 | 容器中用 `LIBGL_ALWAYS_SOFTWARE=1` 和显示服务验证；无头部署仍需虚拟 X 或不同渲染后端 |
+| 掩膜后目标仍低置信 | robot mask 已输出，但 episode 中止 | 运行时 outcome 为 `VISION_LOW_CONFIDENCE`；Stage 5 要处理残余前景、目标关联和局部遮挡 |
+
+### 10.6 排查记录
+
+1. **库选型被追问后修正。** 现象是代码含手写 OBJ 解析和三角形循环；调查发现 MoveIt 2 的公开库可安装、可提供预测深度，而独立 ROS 2 节点缺少本项目契约。最小盒体探针用软件 GL 成功输出 `0.900 m` 前表面深度，于是替换渲染核心。默认 padding 曾使同一探针输出约 `0.8845 m`；关掉 padding 后由本项目的 `0.012 m` 容差负责过滤。
+2. **固定测试与 GL 渲染约定。** 原来 9×9 单面方片在 MoveIt 下没有可用投影，改成 64×64 的封闭薄盒后，表面、前方物体和后方冲突测试通过。构建时 CMake 还缺 `GLUT::GLUT` 目标，补 `find_package(GLUT REQUIRED)` 后通过。
+3. **运行中标定变化。** 同尺寸连续帧的 link 横移符合内参预测；把相机改成 96×96 后，测试中的网格投影列落在 56..58，而预期约第 68 列。不能只断言“掩膜非空”，于是当前适配器在初次渲染后遇到尺寸或内参变化直接抛错，节点把该帧记为 `INVALID_INPUT`。动态重标定需要独立设计与验证。
+4. **测试调度。** 并行 CTest 曾让 `xmllint` 在 60 秒内无结果，单独复跑约 1.8 秒通过；最终采用串行 CTest，全量 451 项测试 0 失败。该失败不证明感知算法有误，但需要在 CI 中保留可重跑日志。
+5. **整帧失配门被追问后移除。** 原设计按可比较像素中的冲突比例拒绝。第一次修正连诊断计数一起删除，运行时 52 帧中 8622 个盒体像素误掩 0、包络外前景点 2608 个。这项实测不能证明删除计数的理由成立；用户再次指出遮挡关系后，恢复计数，保持未标定的整帧阈值关闭。
+
+### 10.7 你没问但值得注意的
+
+讲解后曾主动提示三项问题，按“手边能否验证”分流：
+
+1. **可观测性：投影偏差怎样定位？** 同帧预测深度、mask、原始深度和 oracle 标签可定位异常区域；整帧比例门不作为当前掩膜的准入条件。
+2. **可测试性：没有显示服务时这套渲染如何验收？** 当前只验证了容器的 X11 + 软件 GL；在目标无头环境部署前应启动虚拟显示并运行固定几何测试和一帧运行时仿真 RGB-D smoke。这是可立即做的环境实验，记入末尾反向清单，不作为抽象悬挂问题。
+3. **可观测性：盒体包络外前景点究竟来自哪里？** oracle 探针只给出累计 2489 点，不能把它们全认作未掩净的机械臂。下一步应按同一 sample sequence 保存原深度、预测深度、mask、过滤点云及 oracle 标签，定位这些点的图像区域和 world 坐标；这也是眼前可做的回放实验。
+
+这次修正后还需核查两个可立即实验的问题：后方保留深度是否进入目标候选；多 box/bin 时如何用逐实例标签替代单盒“包络外点数”指标。两者都归入下面的反向清单，不因缺参照系而悬挂。
+
+恢复计数后还需注意两项：零比较像素不能解释为投影正确，固定测试已断言无效深度的两个计数均为零；正常冲突是否集中在轮廓边缘，需要按同帧像素位置检查，不能仅凭汇总比例确定根因。
+
+### 10.8 本阶段边界与后续
+
+Stage 4 只解决同帧机器人可见表面过滤及其诊断；它不建立跨帧目标身份，不把局部遮挡变成可靠测量，不证明盒体已抬升、未滑落或最终放置。当前 episode 仍以 `VISION_LOW_CONFIDENCE` 停止。Stage 5 需处理目标关联和有界预测，Stage 6 才能按新的实测证据完成完整视觉抓放验收；两者完成前不能把本阶段的掩膜成功写成任务成功。
+
+## 11. Week 4.5 交接
+
+Stage 4 已提供带同帧机器人掩膜的视觉输入；Stage 5~6 完成并通过完整视觉抓放验收后，Week 4.5 才接收三类稳定输入：带证据状态的视觉 observation、oracle observation 和 episode 生命周期事件。Week 4.5 不改变视觉算法，而是定义这些输入怎样被记录、回放并交给传统规划器或 learned policy。具体计划见 [week4.5.md](week4.5.md)。
+
+## 12. 悬挂问题与反向清单
+
+| 真正悬挂的问题 | 现在缺少的参照系 | 解锁动作 |
+| --- | --- | --- |
+| 仿真相机标定与真实 RGB-D 设备标定的误差怎样比较 | 尚无接入的真实设备及标定样本 | 接入真实相机后采集标定板和机器人多姿态图像，对照重投影误差与掩膜误删率 |
+
+| 眼前可做的反向清单 | 验证动作 |
+| --- | --- |
+| 剩余盒体包络外前景点的来源 | 用同一 sample sequence 的深度、预测深度、mask、点云和 oracle 标签做逐帧叠加与坐标分布检查 |
+| 后方保留深度是否进入目标候选 | 回放包含机器人后方背景和多个物体的深度帧，记录过滤后点云、候选簇与拒绝原因 |
+| 冲突诊断能否区分正常边缘误差与投影异常 | 保存同帧冲突像素位置；对照正常分布，注入 TF 时间偏差与内外参偏差；阈值验证前保持诊断用途 |
+| bin/多 box 场景的误掩与残留指标 | 给各实例和 bin 分别打 oracle 标签，按实例统计误掩和残留，避免沿用单盒包络外点数 |
+| 无 X11/OpenGL 的部署失败语义 | 在无显示服务和虚拟 X 两种环境分别跑固定几何测试与一帧运行时仿真 RGB-D smoke，记录启动失败和恢复条件 |
+| RGB-D rosbag 体积与压缩选择 | 录制固定 20 秒图像、深度与诊断样本，测量体积和回放速率后决定外部 artifact 存储格式；不提交大文件到 Git |
