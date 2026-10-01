@@ -177,6 +177,15 @@ SegmentationResult segmentDepth(
   pcl::PointIndices::Ptr plane_indices(new pcl::PointIndices());
   pcl::ModelCoefficients::Ptr plane_coefficients(new pcl::ModelCoefficients());
   plane.segment(*plane_indices, *plane_coefficients);
+  // Only remove the configured support plane, never an elevated box face.
+  if (plane_coefficients->values.size() >= 4 &&
+    (std::abs(plane_coefficients->values[2]) < 1e-6F ||
+    std::abs(
+      -plane_coefficients->values[3] / plane_coefficients->values[2] -
+      config.plane_z_m) > config.plane_tolerance_m))
+  {
+    plane_indices->indices.clear();
+  }
   result.plane_points = plane_indices->indices.size();
 
   pcl::PointCloud<pcl::PointXYZ>::Ptr foreground(new pcl::PointCloud<pcl::PointXYZ>());
@@ -218,17 +227,16 @@ SegmentationResult segmentDepth(
   clustering.setInputCloud(foreground);
   std::vector<pcl::PointIndices> clusters;
   clustering.extract(clusters);
+  for (const auto & indices : clusters) {
+    pcl::PointCloud<pcl::PointXYZ>::Ptr candidate(new pcl::PointCloud<pcl::PointXYZ>());
+    for (const int index : indices.indices) {
+      candidate->push_back((*foreground)[static_cast<std::size_t>(index)]);
+    }
+    result.candidate_clusters.push_back(candidate);
+  }
   if (clusters.empty()) {
     result.rejection = RejectionReason::kNoTargetCluster;
     return result;
-  }
-  const auto largest = std::max_element(
-    clusters.begin(), clusters.end(), [](const auto & left, const auto & right) {
-      return left.indices.size() < right.indices.size();
-    });
-  result.target_cluster->reserve(largest->indices.size());
-  for (const int index : largest->indices) {
-    result.target_cluster->push_back((*foreground)[static_cast<std::size_t>(index)]);
   }
   return result;
 }
@@ -323,6 +331,10 @@ PoseEstimate estimateBoxPose(
     (max_point.getVector3fMap() - min_point.getVector3fMap()).cast<double>().cwiseAbs();
   const std::vector<double> measured = sortedValues(obb_extent);
   const std::vector<double> expected = sortedValues(2.0 * model.half_extents);
+  for (std::size_t i = 0; i < measured.size(); ++i) {
+    result.model_conflict = result.model_conflict ||
+      measured[i] > expected[i] + model.extent_tolerance_m;
+  }
   // A fixed overhead camera often observes only the top face. When z is
   // anchored to the support plane, the hidden thickness is supplied by the
   // known model and only the two visible principal dimensions are checked.

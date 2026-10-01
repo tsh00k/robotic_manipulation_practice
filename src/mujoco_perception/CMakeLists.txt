@@ -10,7 +10,7 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(GLUT REQUIRED)
-find_package(PCL REQUIRED COMPONENTS common features filters registration search segmentation)
+find_package(PCL REQUIRED COMPONENTS common features filters io registration search segmentation)
 find_package(image_geometry REQUIRED)
 find_package(geometric_shapes REQUIRED)
 find_package(moveit_ros_perception REQUIRED)
@@ -24,7 +24,8 @@ find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_msgs REQUIRED)
 
-add_library(mujoco_perception_geometry src/geometry_pipeline.cpp src/robot_mask.cpp)
+add_library(mujoco_perception_geometry
+  src/geometry_pipeline.cpp src/robot_mask.cpp src/object_tracker.cpp)
 target_include_directories(mujoco_perception_geometry PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
@@ -62,7 +63,11 @@ install(TARGETS mujoco_perception_geometry object_pose_estimator_node
 install(DIRECTORY include/ DESTINATION include)
 
 if(BUILD_TESTING)
+  add_executable(compare_registration test/compare_registration.cpp)
+  target_link_libraries(compare_registration mujoco_perception_geometry)
   find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_object_tracker test/test_object_tracker.cpp)
+  target_link_libraries(test_object_tracker mujoco_perception_geometry)
 
   ament_add_gtest(test_geometry_pipeline
     test/test_geometry_pipeline.cpp
@@ -72,6 +77,7 @@ if(BUILD_TESTING)
   target_link_libraries(test_geometry_pipeline mujoco_perception_geometry Eigen3::Eigen ${PCL_LIBRARIES})
 
   ament_add_gtest(test_robot_mask test/test_robot_mask.cpp)
+  set_tests_properties(test_robot_mask PROPERTIES ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1")
   target_include_directories(test_robot_mask PRIVATE include)
   target_link_libraries(test_robot_mask mujoco_perception_geometry Eigen3::Eigen ${PCL_LIBRARIES}
     geometric_shapes::geometric_shapes)

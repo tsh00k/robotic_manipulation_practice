@@ -87,6 +87,7 @@ struct SegmentationResult
     new pcl::PointCloud<pcl::PointXYZ>()};
   pcl::PointCloud<pcl::PointXYZ>::Ptr target_cluster{
     new pcl::PointCloud<pcl::PointXYZ>()};
+  std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr> candidate_clusters;
   std::size_t valid_depth_points = 0;
   std::size_t plane_points = 0;
   RejectionReason rejection = RejectionReason::kNone;
@@ -110,11 +111,13 @@ struct PoseEstimate
   double confidence = 0.0;
   std::size_t point_count = 0;
   bool orientation_ambiguous = false;
+  bool model_conflict = false;
   RejectionReason rejection = RejectionReason::kNone;
 };
 
 // Uses image_geometry for camera projection, PCL PassThrough/SACSegmentation for
-// ROI and support-plane removal, and PCL EuclideanClusterExtraction for the target.
+// ROI/support-plane removal and PCL EuclideanClusterExtraction for candidates.
+// Target identity is assigned by ObjectTracker, never by cluster size.
 SegmentationResult segmentDepth(
   const std::vector<float> & depth,
   const sensor_msgs::msg::CameraInfo & camera_info,

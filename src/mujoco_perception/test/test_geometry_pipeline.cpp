@@ -128,7 +128,9 @@ TEST(Segmentation, UsesPclPlaneAndEuclideanClusterStages)
 
   EXPECT_EQ(result.valid_depth_points, 79U);
   EXPECT_EQ(result.plane_points, 70U);
-  EXPECT_EQ(result.target_cluster->size(), 9U);
+  EXPECT_TRUE(result.target_cluster->empty());
+  ASSERT_EQ(result.candidate_clusters.size(), 1U);
+  EXPECT_EQ(result.candidate_clusters.front()->size(), 9U);
   EXPECT_EQ(result.rejection, RejectionReason::kNone);
 }
 
@@ -178,6 +180,46 @@ TEST(BoxPose, RejectsAClusterWithWrongDimensions)
   const auto result = estimateBoxPose(points, BoxModel{}, 0.22);
   EXPECT_FALSE(result.accepted);
   EXPECT_EQ(result.rejection, RejectionReason::kModelExtentMismatch);
+}
+
+TEST(Segmentation, DoesNotRemoveElevatedHorizontalObjectAsSupport)
+{
+  sensor_msgs::msg::CameraInfo info;
+  info.width = 8;
+  info.height = 8;
+  info.k = {100.0, 0.0, 3.5, 0.0, 100.0, 3.5, 0.0, 0.0, 1.0};
+  info.p = {100.0, 0.0, 3.5, 0.0, 0.0, 100.0, 3.5, 0.0, 0.0, 0.0, 1.0, 0.0};
+  SegmentationConfig config;
+  config.world_roi.x_min = -1.0;
+  config.world_roi.x_max = 1.0;
+  config.world_roi.y_min = -1.0;
+  config.world_roi.y_max = 1.0;
+  const auto result = segmentDepth(
+    std::vector<float>(64, 0.36F), info, Eigen::Isometry3d::Identity(), config);
+  EXPECT_EQ(result.plane_points, 0U);
+  EXPECT_EQ(result.foreground_points->size(), 64U);
+  EXPECT_EQ(result.candidate_clusters.size(), 1U);
+}
+
+TEST(BoxPose, ElevatedFullGeometryDisablesSupportAnchorAndTopOnlyCannotMeasure)
+{
+  pcl::PointCloud<pcl::PointXYZ> points;
+  for (const float x : {-0.02F, 0.02F}) {
+    for (const float y : {-0.02F, 0.02F}) {
+      for (const float z : {0.32F, 0.36F}) {
+        points.emplace_back(0.5F + x, y, z);
+      }
+    }
+  }
+  BoxModel model;
+  model.anchor_z_to_plane = false;
+  const auto result = estimateBoxPose(points, model, 0.22);
+  ASSERT_TRUE(result.accepted);
+  EXPECT_NEAR(result.position.z(), 0.34, 1e-4);
+  for (auto & point : points) {
+    point.z = 0.36F;
+  }
+  EXPECT_FALSE(estimateBoxPose(points, model, 0.22).accepted);
 }
 
 }  // namespace
