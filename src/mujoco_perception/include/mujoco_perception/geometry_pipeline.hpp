@@ -59,6 +59,9 @@ struct BoxModel
 {
   Eigen::Vector3d half_extents{0.02, 0.02, 0.02};
   double extent_tolerance_m = 0.015;
+  // Supported partial views need spatial coverage, not full model dimensions.
+  double min_visible_extent_m = 0.008;
+  double confidence_reference_points = 40.0;
   double inlier_tolerance_m = 0.006;
   double max_residual_m = 0.008;
   double min_inlier_ratio = 0.70;
@@ -103,7 +106,8 @@ struct RigidTransformResult
 
 struct PoseEstimate
 {
-  bool accepted = false;
+  // Candidate passed the geometry quality gates; this is not task acceptance.
+  bool geometry_valid = false;
   Eigen::Vector3d position = Eigen::Vector3d::Zero();
   Eigen::Quaterniond orientation = Eigen::Quaterniond::Identity();
   double residual_m = 0.0;

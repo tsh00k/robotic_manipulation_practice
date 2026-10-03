@@ -57,6 +57,12 @@ struct GraspCriteria
   double region_radius_m;
 };
 
+// Pre-lift attachment confirmation: width, bilateral contact and TCP proximity.
+// Object height is deliberately excluded: CLOSE must confirm before LIFT starts.
+// This is not a lift-success or slip detector.
+bool confirmsAttachment(const GraspSignals & signals, const GraspCriteria & criteria);
+
+
 // Pure function, single-instant classification. Deliberately does not look at
 // whether a ~/gripper_command was ever sent -- outcome is judged from physical state,
 // never from "did we issue the right command" (that asymmetry is what "success ==
@@ -71,6 +77,7 @@ struct GraspCriteria
 // then slipped" from "never got lifted in the first place" -- Stage I's FSM has to
 // bring phase/history to tell those apart; this function only reports "the grip
 // looked right a moment ago (width+contact) but the position criteria are not met".
+
 GraspOutcome classifyGrasp(const GraspSignals & signals, const GraspCriteria & criteria);
 
 }  // namespace mujoco_bridge

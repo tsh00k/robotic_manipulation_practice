@@ -124,6 +124,21 @@ private:
   // Keep the newest ROS sample; the timer performs conversion and admission.
   void onObservation(const manipulation_interfaces::msg::BridgeObservation::SharedPtr msg)
   {
+    if (bridge_attachment_known_ &&
+      last_bridge_attachment_state_ ==
+      manipulation_interfaces::msg::BridgeObservation::ATTACHMENT_ATTACHED &&
+      msg->attachment_state !=
+      manipulation_interfaces::msg::BridgeObservation::ATTACHMENT_ATTACHED)
+    {
+      // A release ends the previous visual pose's validity. The estimator will
+      // publish a fresh MEASURED result after it resumes.
+      latest_vision_observation_.reset();
+      last_accepted_vision_observation_.reset();
+      last_vision_sequence_processed_ = 0;
+      vision_cache_.clear();
+    }
+    bridge_attachment_known_ = true;
+    last_bridge_attachment_state_ = msg->attachment_state;
     latest_observation_ = msg;
     observation_cache_[msg->sample_sequence] = msg;
     while (observation_cache_.size() > 30) {observation_cache_.erase(observation_cache_.begin());}
@@ -145,12 +160,30 @@ private:
     std::string object_source = observationSourceName(config_.observation_source);
     double confidence = config_.observation_source == ObservationSource::kOracle ? 1.0 : 0.0;
     double residual_m = 0.0;
-    std::string rejection_reason;
+    std::string state_reason;
 
+    bridge = latest_observation_;
+    if (!bridge) {return;}
+    const bool bridge_attached = bridge->attachment_state ==
+      manipulation_interfaces::msg::BridgeObservation::ATTACHMENT_ATTACHED;
     if (config_.observation_source == ObservationSource::kOracle) {
-      bridge = latest_observation_;
-      if (!bridge) {return;}
       object_pose = bridge->object_pose;
+    } else if (bridge_attached) {
+      // Vision intentionally publishes nothing while the bridge owns the
+      // attachment. Reuse the last accepted visual pose with current robot state.
+      if (!last_accepted_vision_observation_ ||
+        last_accepted_vision_observation_->bridge_session != bridge->bridge_session ||
+        last_accepted_vision_observation_->generation != bridge->generation)
+      {
+        return;
+      }
+      const auto vision = last_accepted_vision_observation_;
+      object_pose.header = bridge->joint_state.header;
+      object_pose.header.frame_id = "world";
+      object_pose.pose = vision->pose;
+      confidence = vision->confidence;
+      residual_m = vision->residual_m;
+      state_reason = "BRIDGE_ATTACHMENT_ATTACHED";
     } else {
       if (!latest_vision_observation_) {return;}
       const auto vision = latest_vision_observation_;
@@ -166,11 +199,13 @@ private:
       last_vision_sequence_processed_ = vision->sample_sequence;
       confidence = vision->confidence;
       residual_m = vision->residual_m;
-      rejection_reason = vision->rejection_reason;
+      state_reason = vision->state_reason;
       last_observation_source_ = object_source;
       last_observation_confidence_ = confidence;
       last_observation_residual_m_ = residual_m;
-      const bool quality_ok = vision->accepted &&
+      const bool measured = vision->evidence_state ==
+        manipulation_interfaces::msg::VisionObjectPose::MEASURED;
+      const bool quality_ok = measured &&
         std::isfinite(vision->confidence) && vision->confidence >= config_.vision_min_confidence &&
         std::isfinite(vision->residual_m) && vision->residual_m <= config_.vision_max_residual_m &&
         std::isfinite(vision->inlier_ratio) &&
@@ -183,15 +218,19 @@ private:
         vision->generation == controller_->generation();
       if (!quality_ok) {
         if (current_episode_sample) {
-          const std::string reason = vision->accepted ? "VISION_LOW_CONFIDENCE" :
+          const std::string reason = measured ? "VISION_LOW_CONFIDENCE" :
             "VISION_REJECTED";
           last_observation_failure_reason_ = reason +
-            (vision->rejection_reason.empty() ? "" : ":" + vision->rejection_reason);
+            (state_reason.empty() ? "" : ":" + state_reason);
           last_observation_rejected_ = true;
-          executeActions(controller_->finishEpisode(false, reason, true));
+          RCLCPP_WARN_THROTTLE(
+            get_logger(), *get_clock(), 2000,
+            "vision sample is not usable (%s); waiting for a fresh MEASURED sample",
+            last_observation_failure_reason_.c_str());
         }
         return;
       }
+      last_accepted_vision_observation_ = vision;
       object_pose.header = vision->header;
       object_pose.pose = vision->pose;
       object_pose.header.frame_id = "world";
@@ -212,7 +251,8 @@ private:
     envelope.frame.object_source = object_source;
     envelope.frame.object_confidence = confidence;
     envelope.frame.object_residual_m = residual_m;
-    envelope.frame.object_rejection_reason = rejection_reason;
+    envelope.frame.object_state_reason = state_reason;
+    envelope.frame.attachment_state = bridge->attachment_state;
     last_observation_source_ = object_source;
     last_observation_confidence_ = confidence;
     last_observation_residual_m_ = residual_m;
@@ -297,9 +337,13 @@ private:
   {
     latest_observation_.reset();
     latest_vision_observation_.reset();
+    last_accepted_vision_observation_.reset();
     observation_cache_.clear();
     vision_cache_.clear();
     last_vision_sequence_processed_ = 0;
+    bridge_attachment_known_ = false;
+    last_bridge_attachment_state_ =
+      manipulation_interfaces::msg::BridgeObservation::ATTACHMENT_NOT_ATTACHED;
     last_observation_failure_reason_.clear();
     last_observation_source_ = observationSourceName(config_.observation_source);
     last_observation_confidence_ = config_.observation_source ==
@@ -401,9 +445,13 @@ private:
     if (actions.reset_request) {
       latest_observation_.reset();
       latest_vision_observation_.reset();
+      last_accepted_vision_observation_.reset();
       observation_cache_.clear();
       vision_cache_.clear();
       last_vision_sequence_processed_ = 0;
+      bridge_attachment_known_ = false;
+      last_bridge_attachment_state_ =
+        manipulation_interfaces::msg::BridgeObservation::ATTACHMENT_NOT_ATTACHED;
       observation_generation_logged_ = false;
       last_observation_rejected_ = false;
       requestReset(*actions.reset_request);
@@ -451,10 +499,14 @@ private:
   rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr start_episode_sub_;
   manipulation_interfaces::msg::BridgeObservation::SharedPtr latest_observation_;
   manipulation_interfaces::msg::VisionObjectPose::SharedPtr latest_vision_observation_;
+  manipulation_interfaces::msg::VisionObjectPose::SharedPtr last_accepted_vision_observation_;
   std::map<uint64_t, manipulation_interfaces::msg::BridgeObservation::SharedPtr>
   observation_cache_;
   std::map<uint64_t, manipulation_interfaces::msg::VisionObjectPose::SharedPtr> vision_cache_;
   uint64_t last_vision_sequence_processed_ = 0;
+  bool bridge_attachment_known_ = false;
+  uint8_t last_bridge_attachment_state_ =
+    manipulation_interfaces::msg::BridgeObservation::ATTACHMENT_NOT_ATTACHED;
   std::string last_observation_source_ = "oracle";
   double last_observation_confidence_ = 1.0;
   double last_observation_residual_m_ = 0.0;

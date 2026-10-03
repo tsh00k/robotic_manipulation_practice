@@ -14,6 +14,8 @@
 
 #include <gtest/gtest.h>
 
+#include <limits>
+
 #include "mujoco_bridge/grasp_criteria.hpp"
 
 namespace
@@ -120,4 +122,34 @@ TEST(ClassifyGrasp, WidthJustOutsideEpsilonIsNotBracketed)
       s,
       kCriteria),
     mujoco_bridge::GraspOutcome::kUnexpectedContact);
+}
+
+TEST(AttachmentConfirmation, GripOnTableCanConfirmBeforeLift)
+{
+  auto s = AllGood();
+  s.box_height_m = 0.24;
+  EXPECT_EQ(mujoco_bridge::classifyGrasp(s, kCriteria), mujoco_bridge::GraspOutcome::kSlip);
+  EXPECT_TRUE(mujoco_bridge::confirmsAttachment(s, kCriteria));
+}
+
+TEST(AttachmentConfirmation, RequiresWidthBothContactsAndProximity)
+{
+  auto s = AllGood();
+  s.left_finger_contact = false;
+  EXPECT_FALSE(mujoco_bridge::confirmsAttachment(s, kCriteria));
+  s = AllGood();
+  s.right_finger_contact = false;
+  EXPECT_FALSE(mujoco_bridge::confirmsAttachment(s, kCriteria));
+  s = AllGood();
+  s.gripper_width_m = 0.0;
+  EXPECT_FALSE(mujoco_bridge::confirmsAttachment(s, kCriteria));
+  s = AllGood();
+  s.box_to_tcp_horizontal_m = 0.2;
+  EXPECT_FALSE(mujoco_bridge::confirmsAttachment(s, kCriteria));
+  s = AllGood();
+  s.gripper_width_m = std::numeric_limits<double>::quiet_NaN();
+  EXPECT_FALSE(mujoco_bridge::confirmsAttachment(s, kCriteria));
+  s = AllGood();
+  s.box_to_tcp_horizontal_m = std::numeric_limits<double>::quiet_NaN();
+  EXPECT_FALSE(mujoco_bridge::confirmsAttachment(s, kCriteria));
 }

@@ -243,6 +243,7 @@ EpisodeActions EpisodeController::tick(double sim_time_s, TimePoint wall_now)
   in.arm = frame.arm;
   in.gripper_width_m = frame.gripper_width_m;
   in.grasp_signals = frame.grasp_signals;
+  in.attachment_state = frame.attachment_state;
   in.box_x_m = frame.object_pose.x;
   in.box_y_m = frame.object_pose.y;
   in.elapsed_in_phase_s = sim_time_s - phase_start_sim_time_s_;

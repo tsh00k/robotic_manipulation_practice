@@ -1,6 +1,10 @@
 uint64 bridge_session
 uint64 generation
 uint64 sample_sequence
+uint8 ATTACHMENT_NOT_ATTACHED=0
+uint8 ATTACHMENT_ATTACHED=1
+uint8 ATTACHMENT_RELEASED=2
+uint8 attachment_state
 sensor_msgs/JointState joint_state
 geometry_msgs/PoseStamped object_pose
 geometry_msgs/TransformStamped world_to_hand_tcp

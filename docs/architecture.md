@@ -17,9 +17,9 @@
 | 模块 | 当前职责 | 边界 |
 | --- | --- | --- |
 | `robot_description` | vendor MJCF/mesh 与项目自有场景 | 官方 URDF 从系统包读取 |
-| `mujoco_bridge` | 物理步进、命令执行、reset、clock、TF、同一步观测与 RGB-D | 仿真 ground truth 的唯一发布者，不执行视觉估计 |
+| `mujoco_bridge` | 物理步进、命令执行、reset、clock、TF、同一步观测、RGB-D 与附着生命周期 | 仿真 ground truth 的唯一发布者，不执行视觉估计 |
 | `manipulation_interfaces` | 观测、视觉、结果和 reset 消息/服务 | ROS 数据契约 |
-| `mujoco_perception` | 同帧机器人掩膜、候选关联、夹持证据门与物体状态估计 | 在线不读取 oracle pose 或仿真接触位；夹持为条件性判断 |
+| `mujoco_perception` | 同帧机器人掩膜、几何候选检查与视觉证据 | 不读取物体真值/接触，不推断夹持或生成预测 |
 | `arm_kinematics` | FK/Jacobian、加权 DLS 与离线 IK | 纯 C++/Eigen/yaml-cpp，不依赖 ROS、MoveIt、MuJoCo |
 | `task_executor` | 观测适配、episode 编排、FSM、waypoint 与结果发布 | ROS 节点适配纯 C++ 控制器，当前单线程 executor |
 
@@ -27,9 +27,9 @@
 
 成熟算法复用现有库；自写运动学作为独立学习/验证模块，项目自有代码集中在生命周期、契约适配与可测试的任务判断。选型理由进入 ADR 或周记，不在此重复平台与公开项目比较。
 
-默认使用 `oracle` 观测与 `diff_ik` waypoint，`keyframe` 保留为对照。固定场景 oracle 抓放已回归；vision 已接质量门和机器人掩膜，但仍因局部可见目标置信度不足而停止，**尚未完成视觉抓放**。
+默认使用 oracle 观测与 diff_ik waypoint，keyframe 保留对照。固定 oracle 场景曾通过回归；完整 vision 抓放尚未验收。
 
-Stage 5 已完成候选关联、独立夹持证据门、TCP 附着和四态协议的实现、构建、序列测试及运行时遮挡实验，并完成讲解、追问和正式笔记，见 [Week 4 Stage 5](../Job_guides/my_study/week4.md#11-stage-5目标关联与夹持条件下的状态估计)。oracle 驱动下曾观察到附着预测及抬升期间几何冲突后解除，仍无完整视觉成功证据。Stage 6 的任务适配与最终证据门待实现。策略依据见 [ADR 010](adr/010-grasp-conditioned-object-state.md) 和 [ADR 009](adr/009-robot-aware-stateful-vision.md)；MoveIt 规划与 learned policy 接口仍未实现。
+当前 Stage 5 已简化为 bridge 权威附着、视觉暂停/释放重测与 executor 缓存准入，见 [Week 4 Stage 5](../Job_guides/my_study/week4.md#stage-5视觉接口收紧与简化状态机)。四包构建/测试通过；2026-10-03 修复抬升前附着循环依赖并补 LIFT 到位门，见 [ADR 012](adr/012-prelift-attachment-confirmation.md)。oracle 持续注入视觉拒绝的真实回归为 20/20 成功、零重试，两包 build/test 通过（工作区汇总 492 tests、0 errors、0 failures、71 skipped）；详情见 Week 4 Stage 5；当前接口 replay 和完整 vision episode 未执行。旧独立夹持与 TCP 预测实验只作为历史证据；[ADR 009](adr/009-robot-aware-stateful-vision.md)、[ADR 010](adr/010-grasp-conditioned-object-state.md)、[ADR 011](adr/011-vision-object-pose-contract-tightening.md) 保留当时决策快照，不能代替下文当前契约。Stage 6 联调验收、MoveIt 规划与 learned policy 尚未完成。
 
 ## 2. 模型与场景
 
@@ -132,7 +132,7 @@ URDF hand:=true 强制加 fer_ 前缀，跨库代码须显式映射。下表采�
 
 ### 4.2 同一步观测与 oracle
 
-`/mujoco_bridge/episode_observation`（BridgeObservation）在同一次物理步后读取同一份 mjData，打包 session/generation/sequence、仿真 stamp、9 关节状态、box pose、world-frame TCP 与双指接触。executor 不再混用独立 joint_states 和 TF 作决策输入。
+`/mujoco_bridge/episode_observation`（BridgeObservation）在同一次物理步后读取同一份 mjData，打包 session/generation/sequence、仿真 stamp、9 关节状态、box pose、world-frame TCP、双指接触与 attachment_state。executor 不再混用独立 joint_states 和 TF 作决策输入。
 
 独立 joint_states、TF、ground truth 继续服务可视化与评测，但其他消费者不会自动获得 bundle 原子性。
 
@@ -166,13 +166,17 @@ URDF hand:=true 强制加 fer_ 前缀，跨库代码须显式映射。下表采�
 
 此旧锚点保留供 ADR 快照引用，历史评测见 [Week 4 Stage 4](../Job_guides/my_study/week4.md#10-stage-4同帧机器人几何掩膜)。
 
-掩膜用 vendor 58 份可见 OBJ 网格，frame 为 link0..link7、hand、两指。geometric_shapes/Assimp 读网格，MoveIt moveit_mesh_filter 渲染预测深度，padding=0。动态机器人 TF 必须在图像同一 stamp；缺失超过 0.5 s 报 MISSING_ROBOT_TRANSFORM，不复用旧 TF。
+掩膜用 vendor 58 份可见 OBJ 网格，frame 为 link0..link7、hand、两指。geometric_shapes/Assimp 读网格，MoveIt moveit_mesh_filter 渲染预测深度，padding=0。动态机器人 TF 必须在图像同一 stamp；等待超过 0.5 s 且 depth/observation 仍在缓存时发布 MISSING_ROBOT_TRANSFORM；输入已淘汰则警告，不复用旧 TF。
 
 有效观测/预测深度差绝对值 <= robot_mask.depth_tolerance_m=0.012 m 才过滤该像素，更近/更远有效深度均保留。无效输入或同过滤器生命周期中相机尺寸/内参变化报 INVALID_INPUT。当前无整帧冲突比例门，不发布 ROBOT_MODEL_MISMATCH。
 
-管线：同帧配对/TF -> 反投影与掩膜 -> world ROI/桌面过滤 -> 水平支持平面 -> 全部候选簇 OBB -> ObjectTracker 关联/状态估计 -> VisionObjectPose。只去除配置桌面高度附近的平面，不把离桌盒体表面删作桌面；在线不再以最大簇决定目标，调试 target_cluster 是实际接受的候选。通用算法来自 image_geometry/PCL；SVD 已知对应点配准入口仍仅有单测。
+管线：同帧配对/TF -> 反投影与掩膜 -> world ROI/桌面过滤 -> 水平支持平面 -> 全部候选簇 OBB 覆盖检查/已知盒体表面拟合 -> ObjectTracker 候选有效性/唯一性检查 -> VisionObjectPose。只去除配置桌面高度附近的平面，不把离桌盒体表面删作桌面；在线不再以最大簇决定目标，调试 target_cluster 是实际接受的候选。通用算法来自 image_geometry/PCL；SVD 已知对应点配准入口仍仅有单测。
 
-先验为单个 4 cm 立方体与已知桌面。anchor_z_to_plane=true 时检查两个可见主尺寸，中心 z 为桌面加半高，yaw 为 90° 对称不确定姿态。附着/离桌时禁用支撑锚定；实际夹爪充分张开（宽度至少 55 mm）后允许重新尝试支撑测量，包括几何冲突导致附着失效后的路径，不依赖必须处于 RELEASED 状态。候选最高点超过桌面+盒体全高+support_tolerance_m 时仍禁用。张爪不直接生成测量、恢复附着或绕过关联门；尺寸不足可表示局部可见，过大、残差或内点冲突不能被预测掩盖。OBB 不提供任意形状识别或完全遮挡恢复。
+先验为单个 4 cm 立方体与已知桌面。配置 anchor_z_to_plane=true 且 bridge 非 ATTACHED 时允许支撑锚定，两个较大 OBB 主尺寸各 ≥`box_min_visible_extent_m=0.008 m`，全部主尺寸 ≤边长加 `box_extent_tolerance_m=0.015 m`（默认 55 mm），中心 z 补为桌面加半高；立方体姿态为对称不确定的规范代表值。当前没有旧 55 mm 张爪门、Supported/Transport 模型，也没有恢复旧最高点支撑判定；新增低水平点片拒绝只过滤残留，是否真的落桌仍须验证。尺寸、残差与内点质量不能证明支撑接触。ATTACHED 时暂停正常处理链，退出附着后清缓存并重新测量。OBB 不提供任意形状识别或完全遮挡恢复。
+
+支撑锚定下，规范立方体 XY 各枚举可见 AABB 中点、最小边界加半宽、最大边界减半宽，组合 9 个中心，选择点到已知盒体表面的平方残差和最小者；等代价优先保留局部中点。仅局部顶面仍不能唯一恢复真实 XY，残差不等于真实位姿误差；当前不支持任意 yaw 的完整搜索。水平厚度 ≤6 mm 且最高点低于模型中心的点片拒绝，防止支撑面残留被拟合为盒底。未锚定模式仍检查三个主尺寸的完整下限。
+
+聚类最少 20 点；confidence=`min(n/box_confidence_reference_points,1) × inlier_ratio × clamp(1-residual/max_residual_m,0,1)`，点数参考值默认 40，残差上限 8 mm，内点比例下限 0.7。tracker confidence 门为 0.20；executor 仍要求 confidence ≥0.5、residual ≤5 mm、inlier ≥0.7。该分数不是校准后的统计概率。几何无效或低于 tracker confidence 门时记录每秒节流的原始候选质量日志；拒绝消息不暴露可用 pose/质量。决策见 [ADR 013](adr/013-partial-cube-geometry-admission.md)，默认场景实测见 [Week 4 Stage 5](../Job_guides/my_study/week4.md#582-排查记录局部候选尺寸与中心偏差)。
 
 PCL ICP/GICP 已在离线真值标注点云与平面 fixture 上比较，仅作为评测工具；默认保持 OBB。当前全表面模型到局部点云的 ICP 可收敛但有约 20 mm 平面偏差，GICP 的运行成本与遮挡退化尚不满足默认在线要求；此结果不否定采用可见面模型等其他配准配置。评测入口为 `registration_benchmark.py` / `compare_registration`，oracle 标签只用于离线选取评测目标像素与计算误差。
 
@@ -182,38 +186,54 @@ comparison_pixels 为有效预测/观测重合数；mismatch_pixels 仅统计观
 
 moveit_mesh_filter 依赖 X11/OpenGL，demo 为感知设置 LIBGL_ALWAYS_SOFTWARE=1。无显示部署需虚拟 X 或经过验证的无头后端；当前不支持运行中改变相机标定。
 
-### 5.3 任务观测来源与质量门
+### 5.3 视觉消息与原因契约
 
-observation_source 每个 episode 选唯一来源，默认 oracle。vision 消费 /object_pose_estimator/object_pose（VisionObjectPose），关节/接触/TCP 仍来自 BridgeObservation；不回退 oracle 或沿用旧 accepted pose。demo 在 vision 模式启动 estimator，scripts/start_demo.sh --vision --viewer 同时启用相机/viewer。
+主结果 `/object_pose_estimator/object_pose` 类型为 VisionObjectPose，header 表达 world 与图像 stamp，携带 bridge_session/generation/sample_sequence。当前生产 evidence_state 为 REJECTED=0、MEASURED=1、OCCLUDED=3；PREDICTED=2 常量仍在，但当前无生产路径。MEASURED 要求恰好一个有效候选，不排除同时存在无效候选。
 
-vision/bridge 的 **bridge_session、generation、sample_sequence 完全相等**才配对；缓存有界，拒绝不匹配或已处理样本。拒绝样本也发布：accepted=false 终止为 VISION_REJECTED，accepted 但质量不足终止为 VISION_LOW_CONFIDENCE，均不创建新 snapshot、不发布新运动命令。
+有效性检查为 geometry_valid、至少 3 点、有限位置与四元数、范数误差 ≤1e-3、有限且 confidence ≥tracking.min_confidence（默认 0.20），以及有限 residual/inlier。当前没有历史运动门、速度预测、TCP 附着校正或视觉滑移检测。无测量时 residual_m/inlier_ratio 为 NaN、point_count 为 0，默认 pose 不可执行；last_measurement_sequence 只表示最近实测序号。orientation_ambiguous 标记姿态代表值歧义，processing_ms 不含配对等待或相机渲染。
+
+`state_reason` 是视觉原因的唯一字段，诊断名对应 `DIAGNOSTIC_*` 常量：
+
+| state_reason | evidence_state | diagnostic_stage | 触发条件与检查方向 |
+| --- | --- | --- | --- |
+| 空字符串 | MEASURED | NONE | 恰好一个合格候选；任务层仍需检查质量门 |
+| NO_CANDIDATE | OCCLUDED | GEOMETRY | 候选为空；检查遮挡、深度、掩膜与聚类 |
+| CANDIDATE_INVALID | REJECTED | GEOMETRY | 有候选但无合格候选；检查尺寸、点数和质量 |
+| MULTIPLE_CANDIDATES | REJECTED | ASSOCIATION | 两个或更多合格候选；不靠历史运动门挑目标 |
+| INVALID_INPUT | REJECTED | INPUT | 图像/掩膜/分割输入无效，或 tracker 序号为零、时间非法 |
+| MISSING_ROBOT_TRANSFORM | REJECTED | INPUT | 同帧机器人 TF 超时或查询失败 |
+| LIFECYCLE_MISMATCH | REJECTED | LIFECYCLE | tracker 的 session/generation 不匹配 |
+| OUT_OF_ORDER | REJECTED | LIFECYCLE | sequence 或 stamp 小于或等于上一已处理样本 |
+
+正常原因是空字符串，不是字符串 NONE。INPUT/GEOMETRY/ASSOCIATION/LIFECYCLE 用于当前原因，PREDICTION/GRASP 常量保留但不用于当前正常路径。节点入口过滤已退休 session 和旧 generation；LIFECYCLE_MISMATCH 是 tracker 拒绝契约，不保证每个旧消息都有结果。sequence 和 stamp 必须严格递增，相等也拒绝。
+
+candidate_count/eligible_candidate_count 表示全部/合格候选数；support_prior_used 表示配置与生命周期允许支撑先验，不证明接触。grasp_state（GRASP_NOT_ATTACHED=0、GRASP_HELD=1、GRASP_RELEASED=2）与 attachment_valid 尚存在，直接映射 bridge 状态；这是派生副本，权威仍是 BridgeObservation，且附着期旧视觉消息不代表当前反馈。消息不再携带宽度、预测年龄、不确定性、关联距离/门限或 grasp_reason；不承诺旧布局兼容。
+
+### 5.4 bridge 附着生命周期与视觉暂停
+
+BridgeObservation.attachment_state 为唯一权威：ATTACHMENT_NOT_ATTACHED=0、ATTACHMENT_ATTACHED=1、ATTACHMENT_RELEASED=2。启动/reset 为 NOT_ATTACHED；bridge 用实际两指位置之和、物体真值高度、物体到 TCP 的 XY 距离及双指接触构造 GraspSignals，confirmsAttachment 在宽度差 <10 mm、双指接触、有限且非负的 XY 距离 <50 mm 时进入 ATTACHED，不要求先抬高。物体高度仅用于 classifyGrasp 的抓取诊断（成功要求 z >0.26 m），不能作为抬升前附着门。确认后锁存，接触短暂抖动或闭爪物体滑落不会直接解除；实际宽度超过 box_width_m+width_epsilon_m 才转 RELEASED。后续满足抬升前确认可再附着，reset 清锁存。
+
+这套确认依赖仿真物体真值/接触；vision 替换的是任务物体位姿来源，不代表完全没有 oracle 信息。闭爪滑落可能仍为 ATTACHED，FSM 附着门也无法补足这一盲区。
+
+estimator 的 tryProcess 在当前 ATTACHED 时早退，正常 RGB-D 几何处理及结果输出暂停，订阅回调/缓存仍可运行。ATTACHED→RELEASED 或 NOT_ATTACHED 时重置 tracker，清 RGB/depth/CameraInfo、pending 与 processed，避免直接消费附着期旧图像；生命周期切换也重置历史。释放状态不证明物体已落桌，须重新得到合格测量。
+
+### 5.5 任务观测来源与质量门
+
+observation_source 每 episode 唯一，默认 oracle。oracle 直接使用 bridge 物体真值，不受视觉 MEASURED/REJECTED 状态准入影响，但与 vision 共用附着和 FSM 阶段门。vision 消费 VisionObjectPose；关节/接触/TCP/宽度/附着仍来自 BridgeObservation。demo 的 vision 入口启动 estimator 与相机，不静默回退 oracle pose。
+
+非附着时，vision 与 bridge 的 session/generation/sequence 完全相等才配对，缓存有界并跳过已处理序号；只准入新的 MEASURED，且各质量指标必须有限：
 
 | 参数 | 通过条件 |
 | --- | --- |
-| vision.min_confidence=0.5 | confidence >= 阈值 |
-| vision.max_residual_m=0.005 | residual_m <= 阈值 |
-| vision.min_inlier_ratio=0.7 | inlier_ratio >= 阈值 |
+| vision.min_confidence=0.5 | confidence ≥ 阈值 |
+| vision.max_residual_m=0.005 | residual_m ≤ 阈值 |
+| vision.min_inlier_ratio=0.7 | inlier_ratio ≥ 阈值 |
 
-EpisodeOutcome 记录 observation_source、observation_confidence、observation_residual_m、observation_failure_layer/reason。视觉失败层为 perception，执行失败为 execution，成功时失败层/原因为空。当前任务层仍逐帧拒绝即终止，尚未消费 Stage 5 原型的四态协议。
+质量失败记录 VISION_REJECTED 或 VISION_LOW_CONFIDENCE 诊断并等待，不直接结束 episode、不创建新 snapshot。持续没有可准入观测仍受 controller 的 steady-clock 新鲜度看门狗约束，可终止为 OBSERVATION_STALE；不能把等待写成无限重试或 FSM 恢复。
 
-Stage 5 的 `VisionObjectPose` 将位姿证据与夹持状态分开：evidence_state 为 MEASURED/PREDICTED/OCCLUDED/REJECTED，grasp_state 为 UNCONFIRMED/CANDIDATE/HELD/RELEASED/INVALIDATED。pose_valid 只对可用的实测/有界预测为 true，兼容 accepted 只对 MEASURED 为 true。最近测量 stamp/sequence 仅由本帧像素支持的实测刷新；无当前测量时 residual/inlier 为 NaN、point_count=0。orientation_ambiguous 标记立方体姿态代表值的歧义，预测继承此标记，不能把 MEASURED 等同于所有姿态自由度都被唯一观测。保留预测年龄、启发式位置不确定性预算（不是统计保证）、夹持证据时间、附着建立时间/来源测量序号、依据和失效原因。
+ATTACHED 时要求同 session/generation 的最近已接受视觉样本存在，复用其位姿数值与当前 bridge 反馈。数值保持不变，不以 TCP 外推，不发布 PREDICTED，也不证明当前物体高度；内部上下文 BRIDGE_ATTACHMENT_ATTACHED 不是视觉 state_reason。退出附着清最近视觉、已接受缓存和已处理序号，等待新的质量合格 MEASURED。释放后 VERIFY 使用新测量落点，不使用运输缓存。
 
-夹持门由两图像样本之间的同代际机器人反馈检查实际宽度和 TCP 稳定性；反馈按时间顺序消费至当前图像 stamp，不使用未来状态。要求先看到张开，再进入物体尺寸带，存在近期支撑目标且 TCP 靠近；通过稳定窗口后建立附着，不要求可见共同运动。初始化依据明确为近期支撑物体在闭合期间静止的先验，不能把旧 pose 伪装成确认时刻视觉测量。每根指位置允许 -10 μm 软限位下冲并归零，超限/非有限/缺指或无效 TCP 显式拒绝。
-
-夹持后以 TCP 更新整个相对变换，合格重见测量可校正；偏差超过滑移门限解除附着。宽度增大离开尺寸带即解除，不等到完全张开，也不宣称能区分主动张爪与支撑丢失；保存解除位置供释放后关联。空抓、宽度缩小异常、状态断流、几何冲突及过期使模型失效，需要重新张开后才可再次准入。完全遮挡且输入相同的掉落/同宽错误物体不可区分，HELD 仅是条件性证据。
-
-| Stage 5 参数（当前固定场景默认） | 值与语义 |
-| --- | --- |
-| grasp.width_tolerance_m / width_stability_m | 尺寸带 ±0.008 m；稳定窗口相对起点变化 ≤0.002 m |
-| grasp.stable_s / measurement_max_age_s | 0.3 s；开始窗口的测量年龄 ≤1 s，确认时最多加一个稳定窗口 |
-| grasp.tcp_distance_m / tcp_motion_m / tcp_angle_rad | 目标距离 ≤0.065 m；窗口内 TCP 移动 ≤0.012 m、旋转 ≤0.1 rad |
-| grasp.open_width_threshold_m | 0.055 m；物体期望宽度来自 box_size_y_m=0.04 m |
-| tracking.max_prediction_age_s / held_prediction_age_s / released_prediction_age_s | 支撑 0.3 s；夹持 5 s（同时约束附着总寿命，不能用重见无限续期）；释放 0.15 s 从解除时刻计 |
-| tracking.initial_uncertainty_m / uncertainty_growth_m_s / held_uncertainty_growth_m_s / max_uncertainty_m | 初值 0.005 m；支撑/释放增长 0.08 m/s，夹持增长 0.003 m/s；上限 0.03 m |
-| tracking.association_slack_m / max_speed_m_s / min_confidence | 0.025 m / 0.6 m/s / 0.2；非附着关联门的年龄增长在 0.3 s 截断 |
-| tracking.slip_tolerance_m / max_sample_gap_s / support_tolerance_m | 可见位置偏差 0.025 m；机器人状态间隔 0.5 s；支撑高度容差 0.012 m |
-
-这些值经固定场景回放及正反例 fixture 检查，仍不是随机场景、任意物体或真实传感器的通用标定。reset/重启清空测量、夹持和附着状态；旧序号/代际拒绝，节点不接受已退休 bridge session 回流。Stage 6 尚未修改任务消费逻辑，也尚未建立最终重新实测成功门。
+EpisodeOutcome 记录来源、confidence、residual、失败层/原因；任务失败码与视觉 state_reason 属于不同接口。视觉质量门、附着门及 controller 准入共同决定是否推进，完整 vision 成功仍待集成验收。
 
 ## 6. 任务与运动执行
 
@@ -221,7 +241,9 @@ Stage 5 的 `VisionObjectPose` 将位姿证据与夹持状态分开：evidence_s
 
 EpisodeController 独占生命周期、phase、retry、失败原因与 telemetry；ROS 节点负责转换、服务/话题、timer、日志。生命周期 Idle/ResetPending/AwaitingResetResponse/AwaitingObservation/Ready/Finished/Failed 与 Phase 分开，FSM 仅在 Ready 推进。任意状态可 start 新 episode，terminal outcome 仅一次。
 
-任务顺序 `HOME -> PREGRASP -> GRASP -> CLOSE -> LIFT -> PREPLACE -> PLACE -> OPEN -> RETRACT -> VERIFY -> DONE`，执行异常经 RECOVER 重试，耗尽后 FAILED。纯 step() 不依赖 ROS/MuJoCo，classifyGrasp() 复用 mujoco_bridge::grasp_criteria。
+任务顺序 `HOME -> PREGRASP -> GRASP -> CLOSE -> LIFT -> PREPLACE -> PLACE -> OPEN -> RETRACT -> VERIFY -> DONE`，执行异常经 RECOVER 重试，耗尽后 FAILED。纯 step() 不依赖 ROS/MuJoCo；executor 的 classifyGrasp() 复用 mujoco_bridge::grasp_criteria，仅用于 CLOSE 超时原因分类，不作为第二套附着权威。
+
+CLOSE 要求 ATTACHED+close_settle；LIFT 要求 ATTACHED+机械臂关节位置/速度到达抬升目标+min_settle，不以视觉高度判定。LIFT 到达臂目标但未附着且超过 grace 时 recover/slipped，阶段超时 recover/timeout。PREPLACE/PLACE 先检查 ATTACHED，缺失时 recover/slipped，否则检查运动到位；这些门依赖 bridge 锁存，不能独立检测闭爪滑落。OPEN 要求实际宽度 >0.06 m 与 settle；VERIFY 要求 RELEASED、物体 XY 在验收区域及 settle，vision 路径须释放后的新测量。
 
 20 Hz tick 最多消费一份新鲜观测，设 IK seed、求当前目标、调用 FSM、记录迁移；无新观测不重发旧目标，新观测下 phase 未变则重发。动作顺序为当前 phase 目标、迁移日志、reset/outcome。阶段计时用仿真时间，看门狗用 steady clock，准入先检查超时再刷新新鲜度。见 [ADR 004](adr/004-episode-controller-orchestration.md) 与 [编排图](task_executor_episode_orchestration.html)。
 
@@ -263,6 +285,7 @@ FSM 默认位置/GRASP-CLOSE 位置/速度容差为 0.05 rad/0.3 rad/0.05 rad/s�
 | [掩膜单测](../src/mujoco_perception/test/test_robot_mask.cpp) / [probe](../src/mujoco_perception/test/robot_mask_probe.py) | 表面过滤、前后景保留、缺 TF/标定变化；probe 仅离线使用 oracle 统计误掩/残留 |
 | [Cartesian 回归](../Job_guides/my_study/week3.md#11-stage-ocartesian-任务几何与离线-ik-适配) / [编排回归](../Job_guides/my_study/week3.5.md#15-p5回归架构记录和收尾) | 固定 oracle 场景连续 20/20，不外推随机姿态、视觉或真机 |
 | [视觉验证](../Job_guides/my_study/week4.md#10-stage-4同帧机器人几何掩膜) | 掩膜/诊断基线、缺 TF、质量拒绝；完整视觉抓放未通过 |
+| [当前简化接口测试](../Job_guides/my_study/week4.md#51-改动清单与验证结果) | 2026-10-03 四包 build/test 通过，tracker 11 项通过；工作区汇总 487 tests / 0 errors / 0 failures / 71 skipped（含既有其他包结果），非完整 vision 成功证据 |
 
 link0..link4、link6、link7、hand 的 collision STL 在 apt/vendor 中 SHA256 相同；link5 与手指表示不同，不能推断全身碰撞结果一致。TCP FK/Jacobian 测试不验证可见网格投影。
 
@@ -271,7 +294,9 @@ link0..link4、link6、link7、hand 的 collision STL 在 apt/vendor 中 SHA256 
 - 接入 MoveIt 时决定 RSP TF 隔离与 home/ready 对齐方案，各自记录 ADR。
 - keyframe qpos 静默补齐仍缺专门门禁；修改场景/keyframe 时检查 nq 与完整状态。
 - 冲突比例缺 TF/标定偏差注入验证，不能启用未经验证的整帧拒绝阈值。
-- Stage 5 已完成夹持/附着与四态实现及学习记录，但抬升期间仍可能因几何冲突解除；Stage 6 不得用 oracle 成功掩盖此限制。完全遮挡无法确认未滑落，最终成功需释放且移开机械臂后重新实测；完整视觉验收仍未完成。当前可见滑移门仅检查位置偏差，未独立检测纯旋转滑移。
+- 附着锁存抗接触抖动，也可能掩盖闭爪掉落；vision 附着确认仍有仿真真值/接触依赖。释放后的新测量是最终落点证据，完整视觉验收未完成。
+- 新消息布局录制与 replay 联调待做：旧 CDR 不保证兼容；tracking_replay.py 逐帧等待结果，与 ATTACHED 预期静默不兼容，须先适配断言再验收。
+- 支撑锚定不证明实际落桌，候选唯一性也不保证跨遮挡目标身份；多目标或离桌场景需新证据门。
 - 当前单机器人/单 box 命名与夹爪假设，引入多臂/多物体时重新设计解析与目标身份。
 - executor 为纯 grasp_criteria 依赖 bridge；替换真机驱动时评估共享库归属。改多线程 executor 时重新验证同步。
 

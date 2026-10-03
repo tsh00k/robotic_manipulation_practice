@@ -19,6 +19,14 @@
 namespace mujoco_bridge
 {
 
+bool confirmsAttachment(const GraspSignals & s, const GraspCriteria & c)
+{
+  return std::isfinite(s.gripper_width_m) && std::isfinite(s.box_to_tcp_horizontal_m) &&
+         std::abs(s.gripper_width_m - c.box_width_m) < c.width_epsilon_m &&
+         s.left_finger_contact && s.right_finger_contact &&
+         s.box_to_tcp_horizontal_m >= 0.0 && s.box_to_tcp_horizontal_m < c.region_radius_m;
+}
+
 GraspOutcome classifyGrasp(const GraspSignals & s, const GraspCriteria & c)
 {
   const bool width_brackets_box = std::abs(s.gripper_width_m - c.box_width_m) < c.width_epsilon_m;

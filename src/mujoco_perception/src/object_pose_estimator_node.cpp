@@ -112,6 +112,10 @@ public:
       declare_parameter("box_size_z_m", 0.04) * 0.5);
     box_model_.extent_tolerance_m = declare_parameter(
       "box_extent_tolerance_m", box_model_.extent_tolerance_m);
+    box_model_.min_visible_extent_m = declare_parameter(
+      "box_min_visible_extent_m", box_model_.min_visible_extent_m);
+    box_model_.confidence_reference_points = declare_parameter(
+      "box_confidence_reference_points", box_model_.confidence_reference_points);
     box_model_.inlier_tolerance_m = declare_parameter(
       "box_inlier_tolerance_m", box_model_.inlier_tolerance_m);
     box_model_.max_residual_m = declare_parameter(
@@ -120,50 +124,8 @@ public:
       "min_inlier_ratio", box_model_.min_inlier_ratio);
     box_model_.anchor_z_to_plane = declare_parameter(
       "anchor_z_to_plane", box_model_.anchor_z_to_plane);
-    tracker_config_.supported_z_m = config_.plane_z_m + box_model_.half_extents.z();
-    tracker_config_.association_slack_m = declare_parameter(
-      "tracking.association_slack_m", tracker_config_.association_slack_m);
-    tracker_config_.max_speed_m_s = declare_parameter(
-      "tracking.max_speed_m_s", tracker_config_.max_speed_m_s);
     tracker_config_.min_confidence = declare_parameter(
       "tracking.min_confidence", tracker_config_.min_confidence);
-    tracker_config_.max_prediction_age_s = declare_parameter(
-      "tracking.max_prediction_age_s", tracker_config_.max_prediction_age_s);
-    tracker_config_.released_prediction_age_s = declare_parameter(
-      "tracking.released_prediction_age_s", tracker_config_.released_prediction_age_s);
-    tracker_config_.uncertainty_growth_m_s = declare_parameter(
-      "tracking.uncertainty_growth_m_s", tracker_config_.uncertainty_growth_m_s);
-    tracker_config_.max_uncertainty_m = declare_parameter(
-      "tracking.max_uncertainty_m", tracker_config_.max_uncertainty_m);
-    tracker_config_.object_width_m = 2.0 * box_model_.half_extents.y();
-    tracker_config_.width_tolerance_m = declare_parameter(
-      "grasp.width_tolerance_m", tracker_config_.width_tolerance_m);
-    tracker_config_.width_stability_m = declare_parameter(
-      "grasp.width_stability_m", tracker_config_.width_stability_m);
-    tracker_config_.grasp_stable_s = declare_parameter(
-      "grasp.stable_s", tracker_config_.grasp_stable_s);
-    tracker_config_.grasp_measurement_max_age_s = declare_parameter(
-      "grasp.measurement_max_age_s", tracker_config_.grasp_measurement_max_age_s);
-    tracker_config_.grasp_tcp_motion_m = declare_parameter(
-      "grasp.tcp_motion_m", tracker_config_.grasp_tcp_motion_m);
-    tracker_config_.grasp_tcp_angle_rad = declare_parameter(
-      "grasp.tcp_angle_rad", tracker_config_.grasp_tcp_angle_rad);
-    tracker_config_.closed_width_m = declare_parameter(
-      "grasp.open_width_threshold_m", tracker_config_.closed_width_m);
-    tracker_config_.tcp_distance_m = declare_parameter(
-      "grasp.tcp_distance_m", tracker_config_.tcp_distance_m);
-    tracker_config_.initial_uncertainty_m = declare_parameter(
-      "tracking.initial_uncertainty_m", tracker_config_.initial_uncertainty_m);
-    tracker_config_.support_tolerance_m = declare_parameter(
-      "tracking.support_tolerance_m", tracker_config_.support_tolerance_m);
-    tracker_config_.held_prediction_age_s = declare_parameter(
-      "tracking.held_prediction_age_s", tracker_config_.held_prediction_age_s);
-    tracker_config_.held_uncertainty_growth_m_s = declare_parameter(
-      "tracking.held_uncertainty_growth_m_s", tracker_config_.held_uncertainty_growth_m_s);
-    tracker_config_.slip_tolerance_m = declare_parameter(
-      "tracking.slip_tolerance_m", tracker_config_.slip_tolerance_m);
-    tracker_config_.max_sample_gap_s = declare_parameter(
-      "tracking.max_sample_gap_s", tracker_config_.max_sample_gap_s);
     tracker_ = std::make_unique<ObjectTracker>(tracker_config_);
 
     const auto sensor_qos = rclcpp::SensorDataQoS();
@@ -264,9 +226,10 @@ private:
       observations_.clear();
       pending_since_.clear();
       processed_.clear();
-      robot_samples_.clear();
     }
     lifecycle_known_ = true;
+    const auto previous_attachment = attachment_state_;
+    attachment_state_ = static_cast<AttachmentState>(message->attachment_state);
     bridge_session_ = message->bridge_session;
     generation_ = message->generation;
     if (!tracker_lifecycle_known_ || tracker_session_ != bridge_session_ ||
@@ -277,10 +240,21 @@ private:
       tracker_session_ = bridge_session_;
       tracker_generation_ = generation_;
     }
+    if (previous_attachment == AttachmentState::kAttached &&
+      attachment_state_ != AttachmentState::kAttached)
+    {
+      // Release starts a new visual observation episode. Do not process RGB-D
+      // frames captured while the estimator was intentionally resting.
+      tracker_->reset(bridge_session_, generation_);
+      rgb_frames_.clear();
+      depth_frames_.clear();
+      color_info_.clear();
+      depth_info_.clear();
+      pending_since_.clear();
+      processed_.clear();
+    }
     const Stamp key = stampKey(message->joint_state.header.stamp);
     observations_[key] = message;
-    robot_samples_[key] = message;
-    trim(robot_samples_, 300);
     trim(observations_, 300);
     tryProcess(key);
   }
@@ -357,6 +331,9 @@ private:
 
   void tryProcess(Stamp key)
   {
+    if (attachment_state_ == AttachmentState::kAttached) {
+      return;
+    }
     if (processed_.count(key) != 0 || rgb_frames_.count(key) == 0 ||
       depth_frames_.count(key) == 0 || color_info_.count(key) == 0 ||
       depth_info_.count(key) == 0 || observations_.count(key) == 0)
@@ -441,24 +418,23 @@ private:
       SegmentationResult segmentation = segmentDepth(
         mask.filtered_depth, *depth_info, world_from_optical, config_);
       publishCloud(depth->header, *segmentation.foreground_points, foreground_pub_);
-      const TrackingSample sample = trackingSample(depth->header, *observation);
-      consumeRobotSamples(key);
+      TrackingSample sample = trackingSample(depth->header, *observation);
       BoxModel model = box_model_;
       model.anchor_z_to_plane = model.anchor_z_to_plane && tracker_->anchorToSupport(sample);
+      sample.support_prior_used = model.anchor_z_to_plane;
       std::vector<PoseEstimate> candidates;
       for (const auto & cluster : segmentation.candidate_clusters) {
-        // An elevated candidate must never inherit the support-height prior.
-        BoxModel candidate_model = model;
-        double max_z = -std::numeric_limits<double>::infinity();
-        for (const auto & point : *cluster) {
-          max_z = std::max(max_z, static_cast<double>(point.z));
+        candidates.push_back(estimateBoxPose(*cluster, model, config_.plane_z_m));
+        const auto & candidate = candidates.back();
+        if (!candidate.geometry_valid || candidate.confidence < tracker_config_.min_confidence) {
+          RCLCPP_INFO_THROTTLE(
+            get_logger(), *get_clock(), 1000,
+            "Candidate %zu: geometry=%s reason=%s points=%zu confidence=%.3f "
+            "residual=%.4fm inlier=%.3f",
+            candidates.size() - 1, candidate.geometry_valid ? "valid" : "invalid",
+            rejectionReasonName(candidate.rejection), candidate.point_count,
+            candidate.confidence, candidate.residual_m, candidate.inlier_ratio);
         }
-        if (max_z > config_.plane_z_m + 2.0 * box_model_.half_extents.z() +
-          tracker_config_.support_tolerance_m)
-        {
-          candidate_model.anchor_z_to_plane = false;
-        }
-        candidates.push_back(estimateBoxPose(*cluster, candidate_model, config_.plane_z_m));
       }
       TrackingSample checked_sample = sample;
       if (segmentation.rejection == RejectionReason::kInvalidInput) {
@@ -572,19 +548,10 @@ private:
     RejectionReason reason,
     std::size_t point_count = 0)
   {
-    consumeRobotSamples(stampKey(header.stamp));
     TrackingSample sample = trackingSample(header, observation);
     sample.input_failure = rejectionReasonName(reason);
     publishTracking(header, observation, tracker_->update(sample, {}), 0.0);
     (void)point_count;
-  }
-
-  void consumeRobotSamples(Stamp key)
-  {
-    for (auto it = robot_samples_.begin(); it != robot_samples_.end() && it->first <= key; ) {
-      tracker_->observeRobot(trackingSample(it->second->joint_state.header, *it->second));
-      it = robot_samples_.erase(it);
-    }
   }
 
   TrackingSample trackingSample(
@@ -596,30 +563,7 @@ private:
     sample.generation = observation.generation;
     sample.sequence = observation.sample_sequence;
     sample.time_s = static_cast<double>(stampKey(header.stamp)) * 1e-9;
-    try {
-      sample.world_from_tcp = eigenTransform(observation.world_to_hand_tcp);
-    } catch (const std::exception &) {
-      sample.input_failure = "INVALID_TCP_STATE";
-    }
-    sample.gripper_width_m = 0.0;
-    int fingers = 0;
-    for (std::size_t i = 0; i < observation.joint_state.name.size(); ++i) {
-      const auto & name = observation.joint_state.name[i];
-      if ((name == "finger_joint1" || name == "finger_joint2") &&
-        i < observation.joint_state.position.size())
-      {
-        const double position = observation.joint_state.position[i];
-        // MuJoCo soft limits can produce micrometre-scale undershoot at zero.
-        if (!std::isfinite(position) || position < -1e-5 || position > 0.045) {
-          sample.input_failure = "INVALID_GRIPPER_STATE";
-        }
-        sample.gripper_width_m += std::max(0.0, position);
-        ++fingers;
-      }
-    }
-    if (fingers != 2) {
-      sample.input_failure = "MISSING_GRIPPER_STATE";
-    }
+    sample.attachment_state = static_cast<AttachmentState>(observation.attachment_state);
     return sample;
   }
 
@@ -632,23 +576,13 @@ private:
     manipulation_interfaces::msg::VisionObjectPose output;
     fillCommon(output, header, observation);
     output.evidence_state = static_cast<uint8_t>(tracking.state);
-    output.pose_valid = tracking.pose_valid;
     output.grasp_state = static_cast<uint8_t>(tracking.grasp_state);
     output.attachment_valid = tracking.attachment_valid;
-    output.grasp_evidence_stamp = rclcpp::Time(
-      static_cast<int64_t>(std::llround(tracking.grasp_evidence_time_s * 1e9)));
-    output.attachment_stamp = rclcpp::Time(
-      static_cast<int64_t>(std::llround(tracking.attachment_time_s * 1e9)));
-    output.attachment_measurement_sequence = tracking.attachment_measurement_sequence;
-    output.grasp_reason = tracking.grasp_reason;
-    output.attachment_basis = tracking.attachment_basis;
     output.last_measurement_sequence = tracking.measurement_sequence;
-    output.last_measurement_stamp = rclcpp::Time(
-      static_cast<int64_t>(std::llround(tracking.measurement_time_s * 1e9)));
-    output.prediction_age_s = tracking.prediction_age_s;
-    output.position_uncertainty_m = tracking.uncertainty_m;
     output.processing_ms = processing_ms;
-    if (tracking.pose_valid) {
+    if (tracking.state == EvidenceState::kMeasured ||
+      tracking.state == EvidenceState::kPredicted)
+    {
       output.pose.position.x = estimate.position.x();
       output.pose.position.y = estimate.position.y();
       output.pose.position.z = estimate.position.z();
@@ -657,13 +591,16 @@ private:
       output.pose.orientation.y = estimate.orientation.y();
       output.pose.orientation.z = estimate.orientation.z();
     }
-    output.accepted = tracking.state == EvidenceState::kMeasured;
     output.confidence = estimate.confidence;
     output.orientation_ambiguous = estimate.orientation_ambiguous;
     output.residual_m = estimate.residual_m;
     output.inlier_ratio = estimate.inlier_ratio;
     output.point_count = static_cast<uint32_t>(estimate.point_count);
-    output.rejection_reason = tracking.reason;
+    output.state_reason = tracking.reason;
+    output.diagnostic_stage = static_cast<uint8_t>(tracking.diagnostic_stage);
+    output.candidate_count = static_cast<uint32_t>(tracking.candidate_count);
+    output.eligible_candidate_count = static_cast<uint32_t>(tracking.eligible_candidate_count);
+    output.support_prior_used = tracking.support_prior_used;
     pose_pub_->publish(output);
   }
 
@@ -707,13 +644,13 @@ private:
   std::map<Stamp, CameraInfoConstPtr> color_info_;
   std::map<Stamp, CameraInfoConstPtr> depth_info_;
   std::map<Stamp, ObservationConstPtr> observations_;
-  std::map<Stamp, ObservationConstPtr> robot_samples_;
   std::map<Stamp, std::set<std::string>> tf_frames_;
   std::map<Stamp, std::chrono::steady_clock::time_point> pending_since_;
   std::set<Stamp> processed_;
   bool lifecycle_known_ = false;
   uint64_t bridge_session_ = 0;
   uint64_t generation_ = 0;
+  AttachmentState attachment_state_ = AttachmentState::kNotAttached;
 };
 
 }  // namespace mujoco_perception

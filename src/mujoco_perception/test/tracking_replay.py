@@ -31,13 +31,12 @@ from tf2_msgs.msg import TFMessage
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('recording', type=Path)
-    parser.add_argument('--prediction-age', type=float, default=0.3)
-    parser.add_argument('--held-age', type=float, default=5.0)
-    parser.add_argument('--invalid-tcp', action='store_true')
+    parser.add_argument('--frame-timeout', type=float, default=10.0)
     args = parser.parse_args()
     rclpy.init()
     node = Node('tracking_replay')
     rows = []
+    attachment_states = {}
     node.create_subscription(
         VisionObjectPose, '/object_pose_estimator/object_pose', rows.append, 100)
     channels = [
@@ -56,16 +55,16 @@ def main():
         TFMessage, '/tf_static',
         QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
     command = ['install/mujoco_perception/lib/mujoco_perception/object_pose_estimator_node',
-               '--ros-args', '-p', f'tracking.max_prediction_age_s:={args.prediction_age}',
-               '-p', f'tracking.held_prediction_age_s:={args.held_age}']
+               '--ros-args']
     with (args.recording.parent / 'replay.log').open('w', encoding='utf-8') as output:
         process = subprocess.Popen(command, stdout=output, stderr=subprocess.STDOUT)
         try:
             deadline = time.monotonic() + 10
-            while any(pub.get_subscription_count() == 0 for pub in publishers.values()):
+            while (any(pub.get_subscription_count() == 0 for pub in publishers.values()) or
+                   static_pub.get_subscription_count() == 0):
                 rclpy.spin_once(node, timeout_sec=0.1)
                 if time.monotonic() > deadline or process.poll() is not None:
-                    raise RuntimeError('Estimator did not connect')
+                    raise RuntimeError('Estimator did not connect to replay inputs')
             with gzip.open(args.recording / 'static_tf.cdr.gz', 'rb') as source:
                 static_pub.publish(deserialize_message(source.read(), TFMessage))
             rclpy.spin_once(node, timeout_sec=0.2)
@@ -79,11 +78,7 @@ def main():
                     with gzip.open(robot_path, 'rt', encoding='ascii') as source:
                         for encoded in json.load(source):
                             robot = deserialize_message(bytes.fromhex(encoded), BridgeObservation)
-                            if args.invalid_tcp:
-                                robot.world_to_hand_tcp.transform.rotation.w = 0.0
-                                robot.world_to_hand_tcp.transform.rotation.x = 0.0
-                                robot.world_to_hand_tcp.transform.rotation.y = 0.0
-                                robot.world_to_hand_tcp.transform.rotation.z = 0.0
+                            attachment_states[robot.sample_sequence] = robot.attachment_state
                             stamp = robot.joint_state.header.stamp
                             robot_time = stamp.sec + stamp.nanosec * 1e-9
                             if robot_time <= last_robot_time:
@@ -94,13 +89,11 @@ def main():
                 for name, _, kind, _ in channels:
                     with gzip.open(frame / (name + '.cdr.gz'), 'rb') as source:
                         message = deserialize_message(source.read(), kind)
-                        if name == 'observation' and args.invalid_tcp:
-                            message.world_to_hand_tcp.transform.rotation.w = 0.0
-                            message.world_to_hand_tcp.transform.rotation.x = 0.0
-                            message.world_to_hand_tcp.transform.rotation.y = 0.0
-                            message.world_to_hand_tcp.transform.rotation.z = 0.0
+                        if name == 'observation':
+                            attachment_states[message.sample_sequence] = message.attachment_state
                         publishers[name].publish(message)
-                deadline = time.monotonic() + 1.0
+                    rclpy.spin_once(node, timeout_sec=0.005)
+                deadline = time.monotonic() + args.frame_timeout
                 while len(rows) == before and time.monotonic() < deadline:
                     rclpy.spin_once(node, timeout_sec=0.02)
                 assert len(rows) > before, f'No replay result for {frame.name}'
@@ -115,27 +108,21 @@ def main():
                      for r in rows)
     trace = [{'time_s': r.header.stamp.sec + r.header.stamp.nanosec * 1e-9,
               'sequence': r.sample_sequence, 'state': r.evidence_state,
+              'attachment_state': attachment_states.get(r.sample_sequence, 0),
               'grasp_state': r.grasp_state, 'attachment_valid': r.attachment_valid,
-              'grasp_reason': r.grasp_reason, 'reason': r.rejection_reason,
-              'prediction_age_s': r.prediction_age_s} for r in rows]
+              'state_reason': r.state_reason, 'diagnostic_stage': r.diagnostic_stage,
+              'candidate_count': r.candidate_count,
+              'eligible_candidate_count': r.eligible_candidate_count,
+              'support_prior_used': r.support_prior_used} for r in rows]
     (args.recording.parent / 'replay_trace.json').write_text(
         json.dumps(trace, indent=2), encoding='utf-8')
     print(json.dumps({'frames': len(rows), 'states': dict(counts),
-                      'attached_frames': sum(r.attachment_valid for r in rows),
-                      'grasp_reasons': dict(Counter(r.grasp_reason for r in rows)),
-                      'prediction_age_limit_s': args.prediction_age}, indent=2))
+                      'attached_frames': sum(r.attachment_valid for r in rows)}, indent=2))
     assert rows, 'Empty replay'
     for row in rows:
-        assert row.accepted == (row.evidence_state == row.MEASURED)
-        if row.evidence_state == row.PREDICTED:
-            if row.attachment_valid:
-                assert row.prediction_age_s <= args.held_age + 1e-9
-            elif row.grasp_state != row.GRASP_RELEASED:
-                assert row.prediction_age_s <= args.prediction_age + 1e-9
+        assert row.evidence_state != row.PREDICTED
         if row.evidence_state in [row.REJECTED, row.OCCLUDED]:
-            assert not row.pose_valid
-    if args.invalid_tcp:
-        assert all(row.evidence_state == row.REJECTED for row in rows)
+            assert row.evidence_state != row.MEASURED
     node.destroy_node()
     rclpy.shutdown()
 

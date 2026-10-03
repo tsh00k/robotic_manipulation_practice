@@ -98,10 +98,11 @@ TEST(Fsm, MotionPhaseRecoversOnTimeout)
   EXPECT_EQ(d.exit_reason, ExitReason::kTimeout);
 }
 
-TEST(Fsm, CloseAdvancesOnSlipBecauseThatMeansGrippedNotYetLifted)
+TEST(Fsm, CloseAdvancesOnBridgeAttachmentBeforeLift)
 {
   FsmInputs in;
   in.phase = Phase::kClose;
+  in.attachment_state = 1;
   in.grasp_signals.gripper_width_m = 0.04;
   in.grasp_signals.box_height_m = 0.24;  // still on the table, below lift threshold
   in.grasp_signals.box_to_tcp_horizontal_m = 0.003;
@@ -122,6 +123,7 @@ TEST(Fsm, CloseDoesNotAdvanceOnSlipBeforeCloseSettleS)
   // survive the lift that followed immediately after.
   FsmInputs in;
   in.phase = Phase::kClose;
+  in.attachment_state = 1;
   in.grasp_signals.gripper_width_m = 0.04;
   in.grasp_signals.box_height_m = 0.24;
   in.grasp_signals.box_to_tcp_horizontal_m = 0.003;
@@ -165,15 +167,32 @@ TEST(Fsm, LiftAdvancesOnSuccess)
 {
   FsmInputs in;
   in.phase = Phase::kLift;
+  in.attachment_state = 1;
   in.grasp_signals.gripper_width_m = 0.04;
   in.grasp_signals.box_height_m = 0.37;  // above lift_height_threshold_m
   in.grasp_signals.box_to_tcp_horizontal_m = 0.003;
   in.grasp_signals.left_finger_contact = true;
   in.grasp_signals.right_finger_contact = true;
   in.elapsed_in_phase_s = 1.0;
+  in.arm = settledAt({0, 0.2, 0, -1.6, 0, 1.5708, -0.7853});
   const FsmDecision d = step(in, targetAt({0, 0.2, 0, -1.6, 0, 1.5708, -0.7853}), defaultParams());
   EXPECT_EQ(d.next_phase, Phase::kPreplace);
   EXPECT_EQ(d.exit_reason, ExitReason::kReached);
+}
+
+TEST(Fsm, AttachedLiftWaitsForArmToReachTarget)
+{
+  FsmInputs in;
+  in.phase = Phase::kLift;
+  in.attachment_state = 1;
+  in.arm = settledAt(kHomeArm);
+  in.elapsed_in_phase_s = 2.5;
+  const auto d = step(in, targetAt({0, 0.2, 0, -1.6, 0, 1.5708, -0.7853}), defaultParams());
+  EXPECT_EQ(d.next_phase, Phase::kLift);
+  EXPECT_EQ(d.exit_reason, ExitReason::kNone);
+  in.elapsed_in_phase_s = 7.0;
+  const auto timeout = step(in, targetAt({0, 0.2, 0, -1.6, 0, 1.5708, -0.7853}), defaultParams());
+  EXPECT_EQ(timeout.exit_reason, ExitReason::kTimeout);
 }
 
 TEST(Fsm, LiftRecoversAsSlippedWhenArmReachedButGripDidNotSucceed)
@@ -238,11 +257,11 @@ TEST(Fsm, LiftKeepsWaitingWhileArmStillMovingAndNotYetTimedOut)
   EXPECT_EQ(d.exit_reason, ExitReason::kNone);
 }
 
-TEST(Fsm, PreplaceRecoversIfBoxHeightFallsBelowLiftThreshold)
+TEST(Fsm, PreplaceRecoversWhenBridgeReportsNoAttachment)
 {
   FsmInputs in;
   in.phase = Phase::kPreplace;
-  in.grasp_signals.box_height_m = 0.24;  // back down at table height -- really dropped
+  in.grasp_signals.box_height_m = 0.24;  // stale geometry cannot override bridge state
   in.elapsed_in_phase_s = 0.1;  // well before any timeout
   const FsmDecision d =
     step(in, targetAt({0.62, 0.2, 0, -1.6, 0, 1.5708, -0.7853}, 0.03), defaultParams());
@@ -260,6 +279,7 @@ TEST(Fsm, PreplaceToleratesMomentaryFingerContactFlickerWhileStillHeldAloft)
   // drop the moment kPreplace began.
   FsmInputs in;
   in.phase = Phase::kPreplace;
+  in.attachment_state = 1;
   in.grasp_signals.box_height_m = 0.37;  // well above lift threshold, still aloft
   in.grasp_signals.left_finger_contact = false;  // this tick's contact flicker
   in.grasp_signals.right_finger_contact = true;
@@ -287,6 +307,7 @@ TEST(Fsm, VerifyDoneWhenBoxNearPlaceAndReleased)
 {
   FsmInputs in;
   in.phase = Phase::kVerify;
+  in.attachment_state = 2;
   in.box_x_m = 0.43;
   in.box_y_m = 0.30;  // within place_region_radius_m of (0.43, 0.31)
   in.grasp_signals.left_finger_contact = false;

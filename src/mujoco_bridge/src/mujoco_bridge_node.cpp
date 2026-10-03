@@ -651,6 +651,7 @@ private:
       return false;
     }
 
+    attachment_state_ = manipulation_interfaces::msg::BridgeObservation::ATTACHMENT_NOT_ATTACHED;
     ++generation_;
     message = "reset to keyframe `" + reset_keyframe_name_ + "`";
     RCLCPP_INFO(
@@ -1058,6 +1059,36 @@ private:
     tcp.transform.rotation.x = data_->xquat[4 * hand_body_id_ + 1];
     tcp.transform.rotation.y = data_->xquat[4 * hand_body_id_ + 2];
     tcp.transform.rotation.z = data_->xquat[4 * hand_body_id_ + 3];
+
+    const GraspSignals signals{
+      gripperWidth(data_, left_finger_qpos_adr_, right_finger_qpos_adr_),
+      msg.object_pose.pose.position.z,
+      std::hypot(
+        msg.object_pose.pose.position.x - tcp.transform.translation.x,
+        msg.object_pose.pose.position.y - tcp.transform.translation.y),
+      msg.left_finger_contact,
+      msg.right_finger_contact,
+    };
+    const auto previous_attachment_state = attachment_state_;
+    const double open_threshold = grasp_criteria_.box_width_m + grasp_criteria_.width_epsilon_m;
+    if (attachment_state_ == manipulation_interfaces::msg::BridgeObservation::ATTACHMENT_ATTACHED) {
+      // Contact is noisy during transport. Only an intentional opening can end
+      // the bridge-owned attachment lifecycle.
+      if (signals.gripper_width_m > open_threshold) {
+        attachment_state_ = manipulation_interfaces::msg::BridgeObservation::ATTACHMENT_RELEASED;
+      }
+    } else if (confirmsAttachment(signals, grasp_criteria_)) {
+      attachment_state_ = manipulation_interfaces::msg::BridgeObservation::ATTACHMENT_ATTACHED;
+    }
+    if (attachment_state_ != previous_attachment_state) {
+      RCLCPP_INFO(
+        get_logger(),
+        "attachment %u -> %u (width=%.4fm box_z=%.4fm box_to_tcp=%.4fm L=%d R=%d)",
+        static_cast<unsigned>(previous_attachment_state), static_cast<unsigned>(attachment_state_),
+        signals.gripper_width_m, signals.box_height_m, signals.box_to_tcp_horizontal_m,
+        signals.left_finger_contact, signals.right_finger_contact);
+    }
+    msg.attachment_state = attachment_state_;
     observation_pub_->publish(msg);
   }
 
@@ -1107,6 +1138,8 @@ private:
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr left_finger_contact_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr right_finger_contact_pub_;
   GraspCriteria grasp_criteria_{};
+  manipulation_interfaces::msg::BridgeObservation::_attachment_state_type attachment_state_ =
+    manipulation_interfaces::msg::BridgeObservation::ATTACHMENT_NOT_ATTACHED;
   std::optional<GraspOutcome> last_logged_grasp_outcome_;
   uint64_t step_count_ = 0;
   std::chrono::steady_clock::time_point rtf_window_wall_start_ = std::chrono::steady_clock::now();

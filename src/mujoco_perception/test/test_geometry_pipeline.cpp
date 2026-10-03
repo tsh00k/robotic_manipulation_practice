@@ -148,7 +148,7 @@ TEST(BoxPose, UsesPclObbAndMarksCubeYawAmbiguous)
   model.min_inlier_ratio = 0.9;
   const auto result = estimateBoxPose(points, model, 0.22);
 
-  ASSERT_TRUE(result.accepted);
+  ASSERT_TRUE(result.geometry_valid);
   EXPECT_TRUE(result.orientation_ambiguous);
   EXPECT_NEAR(result.position.x(), 0.5, 1e-4);
   EXPECT_NEAR(result.position.y(), 0.0, 1e-4);
@@ -166,8 +166,63 @@ TEST(BoxPose, AcceptsVisibleTopFaceWithKnownThickness)
   }
   const auto result = estimateBoxPose(points, BoxModel{}, 0.22);
 
-  ASSERT_TRUE(result.accepted);
+  ASSERT_TRUE(result.geometry_valid);
   EXPECT_NEAR(result.position.z(), 0.24, 1e-4);
+}
+
+TEST(BoxPose, PartialTopFaceCanPassTaskQualityWithoutFullDimensions)
+{
+  pcl::PointCloud<pcl::PointXYZ> points;
+  for (int x = 0; x < 7; ++x) {
+    for (int y = 0; y < 7; ++y) {
+      points.emplace_back(0.500F + x * 0.002F, y * 0.002F, 0.260F);
+    }
+  }
+  const auto result = estimateBoxPose(points, BoxModel{}, 0.22);
+  ASSERT_TRUE(result.geometry_valid);
+  EXPECT_GE(result.confidence, 0.5);
+  EXPECT_LE(result.residual_m, 0.005);
+  EXPECT_GE(result.inlier_ratio, 0.7);
+  // A partial patch cannot reveal the true center: do not claim otherwise.
+  EXPECT_NEAR(result.position.x(), 0.506, 1e-4);
+  BoxModel unsupported;
+  unsupported.anchor_z_to_plane = false;
+  EXPECT_FALSE(estimateBoxPose(points, unsupported, 0.22).geometry_valid);
+}
+
+TEST(BoxPose, PartialSideUsesKnownWidthToRecoverCenter)
+{
+  pcl::PointCloud<pcl::PointXYZ> points;
+  for (int y = 0; y < 9; ++y) {
+    for (int z = 0; z < 9; ++z) {
+      points.emplace_back(0.48F, -0.016F + y * 0.004F, 0.23F + z * 0.003F);
+    }
+  }
+  const auto result = estimateBoxPose(points, BoxModel{}, 0.22);
+  ASSERT_TRUE(result.geometry_valid);
+  EXPECT_NEAR(result.position.x(), 0.50, 1e-4);
+  EXPECT_NEAR(result.residual_m, 0.0, 1e-5);
+  EXPECT_GE(result.confidence, 0.5);
+}
+
+TEST(BoxPose, RejectsTinyPatchAndTableRemnantDespiteKnownBoxPrior)
+{
+  pcl::PointCloud<pcl::PointXYZ> points;
+  for (int x = 0; x < 7; ++x) {
+    for (int y = 0; y < 7; ++y) {
+      points.emplace_back(0.5F + x * 0.0005F, y * 0.0005F, 0.26F);
+    }
+  }
+  EXPECT_FALSE(estimateBoxPose(points, BoxModel{}, 0.22).geometry_valid);
+  points.clear();
+  for (int x = 0; x < 7; ++x) {
+    for (int y = 0; y < 7; ++y) {
+      points.emplace_back(0.5F + x * 0.002F, y * 0.002F, 0.227F);
+    }
+  }
+  const auto result = estimateBoxPose(points, BoxModel{}, 0.22);
+  EXPECT_FALSE(result.geometry_valid);
+  EXPECT_EQ(result.rejection, RejectionReason::kModelExtentMismatch);
 }
 
 TEST(BoxPose, RejectsAClusterWithWrongDimensions)
@@ -178,7 +233,7 @@ TEST(BoxPose, RejectsAClusterWithWrongDimensions)
   points.emplace_back(0.45F, 0.05F, 0.22F);
   points.emplace_back(0.55F, 0.05F, 0.22F);
   const auto result = estimateBoxPose(points, BoxModel{}, 0.22);
-  EXPECT_FALSE(result.accepted);
+  EXPECT_FALSE(result.geometry_valid);
   EXPECT_EQ(result.rejection, RejectionReason::kModelExtentMismatch);
 }
 
@@ -214,12 +269,12 @@ TEST(BoxPose, ElevatedFullGeometryDisablesSupportAnchorAndTopOnlyCannotMeasure)
   BoxModel model;
   model.anchor_z_to_plane = false;
   const auto result = estimateBoxPose(points, model, 0.22);
-  ASSERT_TRUE(result.accepted);
+  ASSERT_TRUE(result.geometry_valid);
   EXPECT_NEAR(result.position.z(), 0.34, 1e-4);
   for (auto & point : points) {
     point.z = 0.36F;
   }
-  EXPECT_FALSE(estimateBoxPose(points, model, 0.22).accepted);
+  EXPECT_FALSE(estimateBoxPose(points, model, 0.22).geometry_valid);
 }
 
 }  // namespace

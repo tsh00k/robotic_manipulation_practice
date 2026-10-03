@@ -56,10 +56,8 @@ bool armReached(
   return true;
 }
 
-bool bothFingersHolding(const mujoco_bridge::GraspSignals & s)
-{
-  return s.left_finger_contact && s.right_finger_contact;
-}
+constexpr uint8_t kAttachmentAttached = 1;
+constexpr uint8_t kAttachmentReleased = 2;
 
 // Guards every "reached" branch below, not just motionStep()'s. Caught live
 // (week2.md Stage I validation run) on kClose: the very first tick after entering
@@ -118,32 +116,20 @@ FsmDecision step(const FsmInputs & in, const JointTarget & target, const FsmPara
         // a drop mid-transit must be caught even though each phase's own criterion
         // is otherwise a plain motion check.
         //
-        // Deliberately box_height_m, NOT bothFingersHolding() -- caught live
-        // (week2.md Stage I): mujoco_bridge's own grasp outcome log shows
-        // left/right finger contact flickering SUCCESS<->UNEXPECTED_CONTACT every
-        // single tick even during a hold that is, by every other measure (box
-        // height staying near its lifted value), completely stable. That flicker
-        // is mjContact regenerating from scratch every mj_forward (grasp_state.hpp)
-        // catching one finger geom out of contact for a single physics step's
-        // worth of jitter, not a real drop. Height changes continuously and only
-        // actually falls when the object is really let go, which is exactly the
-        // physical event this check needs to catch.
-        if (in.grasp_signals.box_height_m < params.grasp_criteria.lift_height_threshold_m) {
+        const bool attached = in.attachment_state == kAttachmentAttached;
+        if (!attached) {
           return {Phase::kRecover, ExitReason::kSlipped, false};
         }
         return motionStep(in, target, params, params.grasp_position_epsilon_rad);
       }
 
     case Phase::kClose: {
+        const bool attached = in.attachment_state == kAttachmentAttached;
         const GraspOutcome outcome = classifyGrasp(in.grasp_signals, params.grasp_criteria);
-        // kSuccess or kSlip both mean "width+contact already look like a grip" --
-        // classifyGrasp() cannot tell "grasped" from "grasped, not yet lifted" apart
-        // on its own (grasp_criteria.hpp's own docstring), and kClose is exactly the
-        // phase supplying that missing context: we have not attempted to lift yet,
-        // so kSlip here reads as success, not failure.
-        if ((outcome == GraspOutcome::kSuccess || outcome == GraspOutcome::kSlip) &&
-          in.elapsed_in_phase_s >= params.close_settle_s)
-        {
+        // BridgeObservation owns the attachment lifecycle. The local classifier is
+        // retained only to label a timeout; it must not create a second attachment
+        // decision that can disagree with bridge state.
+        if (attached && in.elapsed_in_phase_s >= params.close_settle_s) {
           return {nextPhase(in.phase), ExitReason::kReached, false};
         }
         if (in.elapsed_in_phase_s > params.phase_timeout_s) {
@@ -156,19 +142,18 @@ FsmDecision step(const FsmInputs & in, const JointTarget & target, const FsmPara
       }
 
     case Phase::kLift: {
-        const GraspOutcome outcome = classifyGrasp(in.grasp_signals, params.grasp_criteria);
-        if (outcome == GraspOutcome::kSuccess && pastMinSettle(in, params)) {
-          return {nextPhase(in.phase), ExitReason::kReached, false};
-        }
+        const bool attached = in.attachment_state == kAttachmentAttached;
         const bool arm_at_lift_height = armReached(
           in.arm, target.arm_positions, params.position_epsilon_rad, params.velocity_epsilon_rad_s);
-        if (arm_at_lift_height && in.elapsed_in_phase_s > params.lift_settle_grace_s) {
-          // The arm got where kLift's target says it should be, but classifyGrasp()
-          // still is not reporting kSuccess -- the grip did not survive the lift.
-          // This is the one place in the whole sequence that can genuinely tell
-          // "grasped then slipped" apart from "never got lifted" (grasp_criteria.hpp
-          // flags this as its own blind spot): the arm-reached fact is exactly the
-          // extra information classifyGrasp() does not have.
+        if (attached && arm_at_lift_height && pastMinSettle(in, params)) {
+          return {nextPhase(in.phase), ExitReason::kReached, false};
+        }
+        if (!attached && arm_at_lift_height &&
+          in.elapsed_in_phase_s > params.lift_settle_grace_s)
+        {
+          // The arm reached the lift target but the bridge does not confirm
+          // attachment. This cannot detect a closed-gripper slip hidden by the
+          // bridge's attachment latch.
           return {Phase::kRecover, ExitReason::kSlipped, false};
         }
         if (in.elapsed_in_phase_s > params.phase_timeout_s) {
@@ -196,7 +181,7 @@ FsmDecision step(const FsmInputs & in, const JointTarget & target, const FsmPara
     case Phase::kVerify: {
         const double dx = in.box_x_m - params.place_x_m;
         const double dy = in.box_y_m - params.place_y_m;
-        const bool released = !bothFingersHolding(in.grasp_signals);
+        const bool released = in.attachment_state == kAttachmentReleased;
         if (std::hypot(dx, dy) < params.place_region_radius_m && released &&
           pastMinSettle(in, params))
         {

@@ -49,7 +49,7 @@ int main(int argc, char ** argv)
   }
   const auto eigenvalues = Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d>(covariance).eigenvalues();
   const bool planar = eigenvalues[0] < eigenvalues[2] * 0.001;
-  std::cout << "OBB," << obb.accepted << "," << (obb.position - truth).norm() << ","
+  std::cout << "OBB," << obb.geometry_valid << "," << (obb.position - truth).norm() << ","
             << obb_ms << "," << planar << "\n";
 
   pcl::PointCloud<pcl::PointXYZ>::Ptr model(new pcl::PointCloud<pcl::PointXYZ>());
@@ -68,7 +68,7 @@ int main(int argc, char ** argv)
   }
   Eigen::Matrix4f initial = Eigen::Matrix4f::Identity();
   // The seed is derived from observation, never from the evaluation truth.
-  initial.block<3, 1>(0, 3) = (obb.accepted ? obb.position : centroid).cast<float>();
+  initial.block<3, 1>(0, 3) = (obb.geometry_valid ? obb.position : centroid).cast<float>();
   const auto run = [&](auto & registration, const char * name) {
       registration.setInputSource(model);
       registration.setInputTarget(observed);

@@ -15,6 +15,7 @@
 #pragma once
 
 #include <array>
+#include <cstdint>
 
 #include <mujoco_bridge/grasp_criteria.hpp>
 
@@ -61,6 +62,7 @@ struct FsmInputs
   // rather than reimplemented, see that header's docstring on why GraspOutcome was
   // written expecting this node as its second consumer.
   mujoco_bridge::GraspSignals grasp_signals;
+  uint8_t attachment_state = 0;
   // Absolute box xy, for kVerify's "did it land near the place target" check.
   // classifyGrasp()'s GraspSignals deliberately does not carry this (it only knows
   // box-relative-to-tcp distance, not box-relative-to-a-place-target distance --

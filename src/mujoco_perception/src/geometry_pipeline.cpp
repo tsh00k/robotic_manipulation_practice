@@ -309,6 +309,8 @@ PoseEstimate estimateBoxPose(
   if (cluster.size() < 3 || !model.half_extents.allFinite() ||
     (model.half_extents.array() <= 0.0).any() || model.extent_tolerance_m < 0.0 ||
     model.inlier_tolerance_m < 0.0 || model.max_residual_m <= 0.0 ||
+    !std::isfinite(model.min_visible_extent_m) || model.min_visible_extent_m <= 0.0 ||
+    !std::isfinite(model.confidence_reference_points) || model.confidence_reference_points <= 0.0 ||
     model.min_inlier_ratio < 0.0 || model.min_inlier_ratio > 1.0 || !std::isfinite(plane_z_m))
   {
     result.rejection = RejectionReason::kInvalidInput;
@@ -335,12 +337,18 @@ PoseEstimate estimateBoxPose(
     result.model_conflict = result.model_conflict ||
       measured[i] > expected[i] + model.extent_tolerance_m;
   }
-  // A fixed overhead camera often observes only the top face. When z is
-  // anchored to the support plane, the hidden thickness is supplied by the
-  // known model and only the two visible principal dimensions are checked.
+  // Occlusion shrinks observed extents; a supported partial surface is not a
+  // smaller object. Keep the upper model bound and require two spatial axes,
+  // but supply missing dimensions from the known box instead of rejecting them.
+  if (result.model_conflict) {
+    result.rejection = RejectionReason::kModelExtentMismatch;
+    return result;
+  }
   const std::size_t first_dimension = model.anchor_z_to_plane ? 1 : 0;
   for (std::size_t i = first_dimension; i < measured.size(); ++i) {
-    if (std::abs(measured[i] - expected[i]) > model.extent_tolerance_m) {
+    const double minimum = model.anchor_z_to_plane ? model.min_visible_extent_m :
+      expected[i] - model.extent_tolerance_m;
+    if (measured[i] < minimum) {
       result.rejection = RejectionReason::kModelExtentMismatch;
       return result;
     }
@@ -354,11 +362,44 @@ PoseEstimate estimateBoxPose(
     pcl::PointXYZ min_world;
     pcl::PointXYZ max_world;
     pcl::getMinMax3D(cluster, min_world, max_world);
+    // A horizontal patch below the center cannot be a visible top face of
+    // the supported cube. Do not fit support-plane remnants as box bottoms.
+    if (model.anchor_z_to_plane &&
+      max_world.z - min_world.z <= model.inlier_tolerance_m &&
+      max_world.z < plane_z_m + model.half_extents.z())
+    {
+      result.rejection = RejectionReason::kModelExtentMismatch;
+      return result;
+    }
     rotation = Eigen::Matrix3d::Identity();
     position.x() = (min_world.x + max_world.x) * 0.5;
     position.y() = (min_world.y + max_world.y) * 0.5;
     if (model.anchor_z_to_plane) {
       position.z() = plane_z_m + model.half_extents.z();
+      // A visible side is a box boundary, not the middle of the observed patch.
+      // Test centers consistent with either observed boundary and the known size.
+      // Top-only ties retain the patch midpoint: hidden XY is not observable.
+      const Eigen::Vector3d midpoint = position;
+      double best_error = std::numeric_limits<double>::infinity();
+      for (const double x : {midpoint.x(), min_world.x + model.half_extents.x(),
+          max_world.x - model.half_extents.x()})
+      {
+        for (const double y : {midpoint.y(), min_world.y + model.half_extents.y(),
+            max_world.y - model.half_extents.y()})
+        {
+          const Eigen::Vector3d center(x, y, midpoint.z());
+          double error = 0.0;
+          for (const auto & point : cluster) {
+            const double residual = pointToSurfaceResidual(
+              point.getVector3fMap().cast<double>() - center, model.half_extents);
+            error += residual * residual;
+          }
+          if (error < best_error - 1e-12) {
+            best_error = error;
+            position = center;
+          }
+        }
+      }
     }
   }
 
@@ -379,7 +420,8 @@ PoseEstimate estimateBoxPose(
   result.orientation = Eigen::Quaterniond(rotation);
   result.inlier_ratio = static_cast<double>(inliers) / static_cast<double>(cluster.size());
   result.residual_m = std::sqrt(squared_residual / static_cast<double>(cluster.size()));
-  const double point_score = clamp01(static_cast<double>(cluster.size()) / 200.0);
+  const double point_score = clamp01(
+    static_cast<double>(cluster.size()) / model.confidence_reference_points);
   const double residual_score = clamp01(1.0 - result.residual_m / model.max_residual_m);
   result.confidence = point_score * result.inlier_ratio * residual_score;
   if (result.inlier_ratio < model.min_inlier_ratio) {
@@ -387,7 +429,7 @@ PoseEstimate estimateBoxPose(
   } else if (result.residual_m > model.max_residual_m) {
     result.rejection = RejectionReason::kHighResidual;
   } else {
-    result.accepted = true;
+    result.geometry_valid = true;
   }
   return result;
 }

@@ -47,23 +47,15 @@ class Probe(Node):
         self.outcomes = []
         self.episode_start_wall = float('inf')
         self.parameters = {}
-        self.parameter_names = [
-            'tracking.max_prediction_age_s', 'tracking.held_prediction_age_s',
-            'tracking.released_prediction_age_s', 'tracking.max_sample_gap_s',
-            'tracking.min_confidence', 'tracking.association_slack_m',
-            'tracking.max_speed_m_s', 'tracking.initial_uncertainty_m',
-            'tracking.uncertainty_growth_m_s', 'tracking.held_uncertainty_growth_m_s',
-            'tracking.max_uncertainty_m', 'tracking.slip_tolerance_m',
-            'grasp.stable_s', 'grasp.measurement_max_age_s', 'grasp.width_tolerance_m',
-            'grasp.width_stability_m', 'grasp.tcp_motion_m', 'grasp.tcp_angle_rad',
-            'grasp.tcp_distance_m', 'grasp.open_width_threshold_m', 'box_size_y_m',
-            'robot_mask.depth_tolerance_m']
+        self.parameter_names = ['tracking.min_confidence', 'box_size_y_m',
+                                'robot_mask.depth_tolerance_m']
         self.injection_index = 0
         self.blackout_start_s = None
         self.next_blackout_s = 0.0
         self.recording = destination / 'recording'
         self.recording.mkdir(exist_ok=True)
         self.inputs = {}
+        self.attachment_states = {}
         self.pending_recordings = set()
         self.recorded_frames = 0
         for name, topic, kind in [
@@ -85,6 +77,8 @@ class Probe(Node):
         header = (message.joint_state.header if name == 'observation' else
                   message.transforms[0].header if name == 'tf' else message.header)
         key = (header.stamp.sec, header.stamp.nanosec)
+        if name == 'observation':
+            self.attachment_states[key] = message.attachment_state
         self.inputs[name][key] = serialize_message(message)
         self.save_pending()
         while len(self.inputs[name]) > (300 if name == 'observation' else 100):
@@ -146,21 +140,20 @@ class Probe(Node):
             'generation': message.generation,
             'sequence': message.sample_sequence,
             'state': ['REJECTED', 'MEASURED', 'PREDICTED', 'OCCLUDED'][message.evidence_state],
-            'pose_valid': message.pose_valid,
+            'attachment_state': self.attachment_states.get(key, 0),
             'grasp_state': message.grasp_state,
             'attachment_valid': message.attachment_valid,
-            'grasp_reason': message.grasp_reason,
-            'attachment_basis': message.attachment_basis,
-            'accepted': message.accepted,
             'measurement_sequence': message.last_measurement_sequence,
-            'prediction_age_s': message.prediction_age_s,
-            'uncertainty_m': message.position_uncertainty_m,
             'points': message.point_count,
             'confidence': message.confidence,
             'residual_m': message.residual_m,
             'processing_ms': message.processing_ms,
             'relay_to_result_ms': latency_ms,
-            'reason': message.rejection_reason,
+            'state_reason': message.state_reason,
+            'diagnostic_stage': message.diagnostic_stage,
+            'candidate_count': message.candidate_count,
+            'eligible_candidate_count': message.eligible_candidate_count,
+            'support_prior_used': message.support_prior_used,
             'xyz': [message.pose.position.x, message.pose.position.y, message.pose.position.z],
             'blackout': blackout,
         })
@@ -270,7 +263,6 @@ def main():
                    name: sum(key not in cache for key in probe.pending_recordings)
                    for name, cache in probe.inputs.items()},
                'outcomes': probe.outcomes,
-               'grasp_reasons': dict(Counter(row['grasp_reason'] for row in probe.rows)),
                'parameters': probe.parameters,
                'attached_frames': sum(row['attachment_valid'] for row in probe.rows)}
     for field in ['processing_ms', 'relay_to_result_ms']:
@@ -280,16 +272,16 @@ def main():
     (destination / 'summary.json').write_text(json.dumps(summary, indent=2), encoding='utf-8')
     print(json.dumps(summary, indent=2))
     assert probe.rows, 'No paired vision frames'
-    assert any(row['state'] == 'PREDICTED' and row['blackout'] for row in probe.rows)
     assert any(row['state'] == 'OCCLUDED' and row['blackout'] for row in probe.rows)
     for row in probe.rows:
         if row['state'] == 'MEASURED':
-            assert row['points'] >= 3 and row['accepted'] and row['pose_valid']
+            assert row['points'] >= 3 and row['state'] == 'MEASURED'
             assert row['sequence'] == row['measurement_sequence']
         else:
-            assert not row['accepted'] and np.isnan(row['residual_m'])
+            assert row['state'] != 'MEASURED' and np.isnan(row['residual_m'])
         if row['state'] in ['OCCLUDED', 'REJECTED']:
-            assert not row['pose_valid']
+            assert row['state'] in ('REJECTED', 'OCCLUDED')
+    assert not any(row['state'] == 'PREDICTED' for row in probe.rows)
     probe.destroy_node()
     rclpy.shutdown()
 
