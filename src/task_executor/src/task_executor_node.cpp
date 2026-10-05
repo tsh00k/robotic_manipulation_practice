@@ -135,7 +135,6 @@ private:
       latest_vision_observation_.reset();
       last_accepted_vision_observation_.reset();
       last_vision_sequence_processed_ = 0;
-      vision_cache_.clear();
     }
     bridge_attachment_known_ = true;
     last_bridge_attachment_state_ = msg->attachment_state;
@@ -148,8 +147,6 @@ private:
     const manipulation_interfaces::msg::VisionObjectPose::SharedPtr msg)
   {
     latest_vision_observation_ = msg;
-    vision_cache_[msg->sample_sequence] = msg;
-    while (vision_cache_.size() > 30) {vision_cache_.erase(vision_cache_.begin());}
   }
 
   // Convert one bridge message and pass it through the controller's freshness gate.
@@ -339,7 +336,6 @@ private:
     latest_vision_observation_.reset();
     last_accepted_vision_observation_.reset();
     observation_cache_.clear();
-    vision_cache_.clear();
     last_vision_sequence_processed_ = 0;
     bridge_attachment_known_ = false;
     last_bridge_attachment_state_ =
@@ -447,7 +443,6 @@ private:
       latest_vision_observation_.reset();
       last_accepted_vision_observation_.reset();
       observation_cache_.clear();
-      vision_cache_.clear();
       last_vision_sequence_processed_ = 0;
       bridge_attachment_known_ = false;
       last_bridge_attachment_state_ =
@@ -502,7 +497,6 @@ private:
   manipulation_interfaces::msg::VisionObjectPose::SharedPtr last_accepted_vision_observation_;
   std::map<uint64_t, manipulation_interfaces::msg::BridgeObservation::SharedPtr>
   observation_cache_;
-  std::map<uint64_t, manipulation_interfaces::msg::VisionObjectPose::SharedPtr> vision_cache_;
   uint64_t last_vision_sequence_processed_ = 0;
   bool bridge_attachment_known_ = false;
   uint8_t last_bridge_attachment_state_ =
