@@ -13,11 +13,83 @@
 # limitations under the License.
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.conditions import LaunchConfigurationEquals
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
+
+
+SCENE_POSE_FIELDS = ('x', 'y', 'z', 'roll', 'pitch', 'yaw')
+
+
+def scene_parameters(context):
+    """
+    Build the scene.* parameters for the bridge, and only the bridge.
+
+    The box/bin start poses are simulator ground truth. Perception and the executor
+    must get them from the camera (docs/adr/015), so these parameters are deliberately
+    not passed to any other node. Only values the user gave are passed: 'auto' leaves
+    the node's own default in place (x/y/angles: the layout of the legacy scene, z: the
+    height that rests the lowest corner 1 mm above the table), so those numbers are
+    written once, in the node.
+    """
+    enabled_text = LaunchConfiguration('scene_enabled').perform(context).strip().lower()
+    if enabled_text not in ('true', 'false'):
+        raise RuntimeError(
+            f"launch argument scene_enabled:={enabled_text!r} must be true or false")
+    enabled = enabled_text == 'true'
+    parameters = {'scene.enabled': enabled}
+    for body in ('box', 'bin'):
+        for field in SCENE_POSE_FIELDS:
+            name = f'{body}_{field}'
+            text = LaunchConfiguration(name).perform(context).strip()
+            if text == 'auto':
+                continue
+            if not enabled:
+                raise RuntimeError(
+                    f'launch argument {name}:={text} has no effect while scene_enabled is '
+                    f'false; pass scene_enabled:=true')
+            try:
+                parameters[f'scene.{body}.{field}'] = float(text)
+            except ValueError:
+                raise RuntimeError(
+                    f"launch argument {name}:={text!r} is not a number (metres or radians, "
+                    f"or 'auto')") from None
+    return parameters
+
+
+def make_bridge_node(context):
+    return [Node(
+        package='mujoco_bridge',
+        executable='mujoco_bridge_node',
+        name='mujoco_bridge',
+        output='screen',
+        # This node *is* the /clock source, so use_sim_time is a no-op for it (it
+        # never calls get_clock()->now() -- see mujoco_bridge_node.cpp simTime()).
+        # Set anyway to establish the pattern: every node added to this launch file
+        # going forward (task_executor in Stage I) must set it too, or its timeouts
+        # run on wall time instead of sim time.
+        parameters=[scene_parameters(context), {
+            'use_sim_time': True,
+            'joint_state_rate_hz': LaunchConfiguration('joint_state_rate_hz'),
+            'tf_rate_hz': LaunchConfiguration('tf_rate_hz'),
+            'enable_debug_viewer': LaunchConfiguration('enable_debug_viewer'),
+            'debug_viewer_rate_hz': LaunchConfiguration('debug_viewer_rate_hz'),
+            'enable_rgbd_camera': LaunchConfiguration('enable_rgbd_camera'),
+            'camera_rate_hz': LaunchConfiguration('camera_rate_hz'),
+        }],
+        # Same fix, same reason as rviz_node's additional_env below: with
+        # enable_debug_viewer:=true, this process also creates a GLFW/GL window
+        # (DebugViewer, week2.md Stage J 11.7), and hardware-accelerated context
+        # creation hangs indefinitely in this container -- see 11.7.4. Unlike
+        # rviz2 that hang is fatal to the whole node, not just the view: it
+        # happens synchronously inside the constructor, before rclcpp::spin()
+        # ever starts, so /joint_states and /tf never come up either. Harmless
+        # to set unconditionally: with enable_debug_viewer:=false (default) this
+        # process never calls into GLFW/GL at all.
+        additional_env={'LIBGL_ALWAYS_SOFTWARE': '1'},
+    )]
 
 
 def generate_launch_description():
@@ -49,36 +121,17 @@ def generate_launch_description():
     vision_max_residual_arg = DeclareLaunchArgument('vision_max_residual_m', default_value='0.005')
     vision_min_inlier_arg = DeclareLaunchArgument('vision_min_inlier_ratio', default_value='0.7')
 
-    bridge_node = Node(
-        package='mujoco_bridge',
-        executable='mujoco_bridge_node',
-        name='mujoco_bridge',
-        output='screen',
-        # This node *is* the /clock source, so use_sim_time is a no-op for it (it
-        # never calls get_clock()->now() -- see mujoco_bridge_node.cpp simTime()).
-        # Set anyway to establish the pattern: every node added to this launch file
-        # going forward (task_executor in Stage I) must set it too, or its timeouts
-        # run on wall time instead of sim time.
-        parameters=[{
-            'use_sim_time': True,
-            'joint_state_rate_hz': LaunchConfiguration('joint_state_rate_hz'),
-            'tf_rate_hz': LaunchConfiguration('tf_rate_hz'),
-            'enable_debug_viewer': LaunchConfiguration('enable_debug_viewer'),
-            'debug_viewer_rate_hz': LaunchConfiguration('debug_viewer_rate_hz'),
-            'enable_rgbd_camera': LaunchConfiguration('enable_rgbd_camera'),
-            'camera_rate_hz': LaunchConfiguration('camera_rate_hz'),
-        }],
-        # Same fix, same reason as rviz_node's additional_env below: with
-        # enable_debug_viewer:=true, this process also creates a GLFW/GL window
-        # (DebugViewer, week2.md Stage J 11.7), and hardware-accelerated context
-        # creation hangs indefinitely in this container -- see 11.7.4. Unlike
-        # rviz2 that hang is fatal to the whole node, not just the view: it
-        # happens synchronously inside the constructor, before rclcpp::spin()
-        # ever starts, so /joint_states and /tf never come up either. Harmless
-        # to set unconditionally: with enable_debug_viewer:=false (default) this
-        # process never calls into GLFW/GL at all.
-        additional_env={'LIBGL_ALWAYS_SOFTWARE': '1'},
-    )
+    # Optional box/bin start layout (bridge only, see scene_parameters). Off by default;
+    # with it off the simulator is the legacy single-box scene. This moves objects in the
+    # simulator only: task_executor's pick/place targets and the perception still assume
+    # the legacy layout, so a moved scene is not a validated pick-and-place scene yet.
+    # Lengths in metres, angles in radians, R = Rz(yaw) Ry(pitch) Rx(roll); 'auto' = the
+    # node's default. box_* is the box centre, bin_* the centre of the bin's inner floor.
+    scene_args = [DeclareLaunchArgument('scene_enabled', default_value='false')]
+    scene_args += [
+        DeclareLaunchArgument(f'{body}_{field}', default_value='auto')
+        for body in ('box', 'bin') for field in SCENE_POSE_FIELDS
+    ]
 
     task_executor_node = Node(
         package='task_executor',
@@ -135,7 +188,8 @@ def generate_launch_description():
         vision_min_confidence_arg,
         vision_max_residual_arg,
         vision_min_inlier_arg,
-        bridge_node,
+        *scene_args,
+        OpaqueFunction(function=make_bridge_node),
         task_executor_node,
         perception_node,
         rviz_node,

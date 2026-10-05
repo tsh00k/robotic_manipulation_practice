@@ -1,0 +1,40 @@
+<mujoco model="pick_place_bin_scene">
+  <!-- pick_place_scene.xml plus an open container (the bin). Loaded by the bridge only
+       when scene.enabled is true; the default scene is loaded from pick_place_scene.xml
+       untouched, so with the scene off the simulator is byte-for-byte the legacy one.
+
+       Why a second file instead of a hidden bin inside pick_place_scene.xml: a bin kept
+       in the default model but hidden (non-rendered group, no collision) was measured to
+       change the RGB image: 5208 of 76800 pixels differ, 5153 of them by one level, 55 by
+       up to 86 levels, with depth and every observation bit-identical. The difference
+       scales with the hidden geometry's volume (floor 4032, four walls 1300 pixels), does
+       not depend on where the bin is, and is the same whether the geoms are hidden by
+       group or by alpha=0. A one-millimetre hidden geom or an empty body changed nothing.
+       The compile-time statistics (stat.meansize, stat.meanmass) were pinned back to the
+       baseline values and that did not remove the difference, so they are not the cause.
+       The cause was not found; keeping the bin out of the default model sidesteps it.
+       See Job_guides/my_study/week4.1.md Stage 1.
+
+       Static body (no joint): no extra qpos, so the keyframes of the included file stay
+       valid, and no TF frame (buildFrameIndex keys off body_jntnum).
+       Origin = centre of the inner floor surface; floor 6 mm thick below z=0, walls 6 mm
+       thick and 12 mm tall above it. The bridge reads the bin's extent from these geoms
+       (scene_ops.cpp readSceneGeometry), so changing the numbers here changes the
+       placement checks with them. pos is only the default pose; scene.bin.* moves it. -->
+  <include file="pick_place_scene.xml"/>
+
+  <worldbody>
+    <body name="bin" pos="0.5 0.3 0.227">
+      <geom name="bin_floor" type="box" size="0.076 0.071 0.003" pos="0 0 -0.003"
+        rgba="0.15 0.55 0.65 1"/>
+      <geom name="bin_left" type="box" size="0.003 0.071 0.006" pos="-0.073 0 0.006"
+        rgba="0.15 0.55 0.65 1"/>
+      <geom name="bin_right" type="box" size="0.003 0.071 0.006" pos="0.073 0 0.006"
+        rgba="0.15 0.55 0.65 1"/>
+      <geom name="bin_front" type="box" size="0.07 0.003 0.006" pos="0 -0.068 0.006"
+        rgba="0.15 0.55 0.65 1"/>
+      <geom name="bin_back" type="box" size="0.07 0.003 0.006" pos="0 0.068 0.006"
+        rgba="0.15 0.55 0.65 1"/>
+    </body>
+  </worldbody>
+</mujoco>

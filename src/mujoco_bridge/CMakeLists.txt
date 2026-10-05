@@ -20,6 +20,8 @@ find_package(std_srvs REQUIRED)
 find_package(manipulation_interfaces REQUIRED)
 find_package(ament_index_cpp REQUIRED)
 find_package(mujoco REQUIRED)
+# scene_config.cpp / scene_ops.cpp (box/bin start layout) use Eigen transforms.
+find_package(Eigen3 REQUIRED)
 # For the optional debug viewer (debug_viewer.cpp) only. Unlike mujoco::mujoco,
 # glfw3 does not bundle a conflicting tinyxml2, so there is no dlopen-isolation
 # reason to avoid linking it normally. Provided by apt (libglfw3-dev); not listed
@@ -49,11 +51,15 @@ add_executable(mujoco_bridge_node
   src/grasp_state.cpp
   src/debug_viewer.cpp
   src/rgbd_camera.cpp
+  # Scene layout lives in src/ (headers included), not include/, so it is neither
+  # installed nor reachable through the exported grasp_criteria include directory.
+  src/scene_config.cpp
+  src/scene_ops.cpp
 )
 target_include_directories(mujoco_bridge_node PRIVATE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
-target_link_libraries(mujoco_bridge_node grasp_criteria glfw)
+target_link_libraries(mujoco_bridge_node grasp_criteria glfw Eigen3::Eigen)
 ament_target_dependencies(mujoco_bridge_node
   rclcpp
   sensor_msgs
@@ -123,6 +129,43 @@ if(BUILD_TESTING)
   # may invoke the test binary from an arbitrary working directory.
   target_compile_definitions(test_state_ops PRIVATE
     TEST_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures")
+
+  # Pure geometry/validation, no ROS and no MuJoCo.
+  ament_add_gtest(test_scene_config
+    test/test_scene_config.cpp
+    src/scene_config.cpp
+  )
+  target_include_directories(test_scene_config PRIVATE src)
+  target_link_libraries(test_scene_config Eigen3::Eigen)
+
+  # Against the real pick_place_scene.xml (the default scene, no bin) and
+  # pick_place_bin_scene.xml (what scene.enabled loads): the extents read from the model,
+  # what applying a layout does, and that the second is the first plus only the bin. The
+  # source-tree paths are compile-time definitions, like PANDA_MJCF_PATH below.
+  get_filename_component(PICK_PLACE_SCENE_MJCF_PATH
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../robot_description/mujoco/franka_emika_panda/pick_place_scene.xml"
+    ABSOLUTE)
+  get_filename_component(PICK_PLACE_BIN_SCENE_MJCF_PATH
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../robot_description/mujoco/franka_emika_panda/pick_place_bin_scene.xml"
+    ABSOLUTE)
+  ament_add_gtest(test_scene_ops
+    test/test_scene_ops.cpp
+    src/scene_ops.cpp
+    src/scene_config.cpp
+    src/state_ops.cpp
+    src/mujoco_dl.cpp
+  )
+  target_include_directories(test_scene_ops PRIVATE
+    include src ${MUJOCO_INCLUDE_DIRS})
+  target_link_libraries(test_scene_ops Eigen3::Eigen dl)
+  target_compile_definitions(test_scene_ops PRIVATE
+    PICK_PLACE_SCENE_MJCF_PATH="${PICK_PLACE_SCENE_MJCF_PATH}"
+    PICK_PLACE_BIN_SCENE_MJCF_PATH="${PICK_PLACE_BIN_SCENE_MJCF_PATH}")
+
+  # Launch glue for scene.* (only given values, only to the bridge) and the rule that no
+  # other package uses the scene configuration. Pure Python, no simulator.
+  find_package(ament_cmake_pytest REQUIRED)
+  ament_add_pytest_test(test_scene_launch test/test_scene_launch.py)
 
   ament_add_gtest(test_grasp_criteria
     test/test_grasp_criteria.cpp

@@ -51,6 +51,8 @@
 #include "mujoco_bridge/mujoco_dl.hpp"
 #include "mujoco_bridge/rgbd_camera.hpp"
 #include "mujoco_bridge/state_ops.hpp"
+#include "scene_config.hpp"
+#include "scene_ops.hpp"
 
 namespace mujoco_bridge
 {
@@ -90,6 +92,11 @@ namespace mujoco_bridge
 // The lesson is not "always fails safe" but "know which direction you're switching in".
 constexpr const char * kDefaultModelRelativePath =
   "/mujoco/franka_emika_panda/pick_place_scene.xml";
+// Loaded instead when scene.enabled is true: the same scene plus the bin. A separate
+// file rather than a hidden bin in the default one, because a hidden bin was measured
+// to change the rendered image (see that file's header).
+constexpr const char * kBinModelRelativePath =
+  "/mujoco/franka_emika_panda/pick_place_bin_scene.xml";
 constexpr const char * kDefaultResetKeyframeName = "pick_place_home";
 
 constexpr const char * kHandBodyName = "hand";
@@ -123,9 +130,18 @@ public:
   MujocoBridgeNode()
   : Node("mujoco_bridge"), api_(loadMujocoApi())
   {
+    // Decided first: it selects the default model, and a pose parameter given while the
+    // scene is off is an error worth reporting before anything is loaded.
+    const bool scene_enabled = declare_parameter("scene.enabled", false);
+    std::vector<std::string> given;
+    for (const auto & entry : get_node_parameters_interface()->get_parameter_overrides()) {
+      given.push_back(entry.first);
+    }
+    rejectPoseOverridesWhenDisabled(scene_enabled, given);
+
     const std::string default_model_path =
       ament_index_cpp::get_package_share_directory("robot_description") +
-      kDefaultModelRelativePath;
+      (scene_enabled ? kBinModelRelativePath : kDefaultModelRelativePath);
     const std::string model_path = declare_parameter("model_path", default_model_path);
     const std::string reset_keyframe_name =
       declare_parameter("reset_keyframe_name", std::string(kDefaultResetKeyframeName));
@@ -150,6 +166,9 @@ public:
       get_logger(), "Loaded %s (nq=%d, nv=%d, timestep=%.4fs)",
       model_path.c_str(), model_->nq, model_->nv, timestep_s);
 
+    // Before anything is derived from the model: the box start pose and the bin pose
+    // are model state, and the indices built below must see the configured layout.
+    configureScene(scene_enabled);
     buildJointIndex();
     buildFrameIndex();
     buildActuatorIndex();
@@ -512,6 +531,60 @@ private:
     RCLCPP_INFO(
       get_logger(), "actuators: %zu arm joint(s) mapped, gripper actuator %s",
       actuator_by_joint_.size(), gripper_actuator_id_ >= 0 ? "found" : "NOT found");
+  }
+
+  // Optional start layout (scene.*), off by default.
+  //
+  // Disabled: nothing happens. The model is the default scene file, loaded untouched
+  // (no bin in it at all), so the simulator is the legacy one. Enabled: the model is the
+  // bin scene; the pose parameters are declared, validated against extents read from
+  // that model, and applied to it (scene_ops.hpp). A pose parameter given while the
+  // scene is off was already rejected in the constructor.
+  //
+  // These parameters exist on this node only. The poses are simulator ground truth;
+  // perception and the executor must get box/bin poses from the camera, so launch
+  // passes scene.* to the bridge alone (docs/adr/015).
+  void configureScene(bool enabled)
+  {
+    if (!enabled) {
+      RCLCPP_INFO(get_logger(), "scene.enabled=false: legacy layout, no bin");
+      return;
+    }
+
+    const SceneGeometry geometry = readSceneGeometry(api_, model_);
+    // z defaults to the support height for the requested orientation, so omitting it
+    // never penetrates; an explicit z is validated like every other value.
+    const auto declarePose = [&](
+      const std::string & prefix, double default_x, double default_y,
+      const Eigen::Vector3d & lo, const Eigen::Vector3d & hi) {
+        PoseRequest pose;
+        pose.x = declare_parameter(prefix + ".x", default_x);
+        pose.y = declare_parameter(prefix + ".y", default_y);
+        pose.roll = declare_parameter(prefix + ".roll", 0.0);
+        pose.pitch = declare_parameter(prefix + ".pitch", 0.0);
+        pose.yaw = declare_parameter(prefix + ".yaw", 0.0);
+        pose.z = declare_parameter(
+          prefix + ".z",
+          autoSupportZ(
+            rotationFromRpy(pose.roll, pose.pitch, pose.yaw), lo, hi, geometry.table_top_z));
+        return pose;
+      };
+    SceneRequest request;
+    request.box = declarePose(
+      "scene.box", kDefaultBoxX, kDefaultBoxY, -geometry.box_half_extents,
+      geometry.box_half_extents);
+    request.bin = declarePose(
+      "scene.bin", kDefaultBinX, kDefaultBinY, geometry.bin_min, geometry.bin_max);
+
+    const ScenePoses poses = resolveScene(request, geometry);
+    applyScene(api_, model_, data_, poses);
+    RCLCPP_INFO(
+      get_logger(),
+      "scene.enabled=true: box xyz=[%.4f %.4f %.4f] rpy=[%.3f %.3f %.3f], "
+      "bin xyz=[%.4f %.4f %.4f] rpy=[%.3f %.3f %.3f]",
+      request.box.x, request.box.y, request.box.z, request.box.roll, request.box.pitch,
+      request.box.yaw, request.bin.x, request.bin.y, request.bin.z, request.bin.roll,
+      request.bin.pitch, request.bin.yaw);
   }
 
   // Looks up the ground-truth object body once at startup, same discipline as
@@ -1153,7 +1226,17 @@ private:
 int main(int argc, char ** argv)
 {
   rclcpp::init(argc, argv);
-  rclcpp::spin(std::make_shared<mujoco_bridge::MujocoBridgeNode>());
+  std::shared_ptr<mujoco_bridge::MujocoBridgeNode> node;
+  try {
+    node = std::make_shared<mujoco_bridge::MujocoBridgeNode>();
+  } catch (const std::exception & e) {
+    // An invalid configuration (scene.*, model path) is an expected way for startup to
+    // fail: say why and exit non-zero, not terminate() with a core dump.
+    RCLCPP_FATAL(rclcpp::get_logger("mujoco_bridge"), "startup failed: %s", e.what());
+    rclcpp::shutdown();
+    return 1;
+  }
+  rclcpp::spin(node);
   rclcpp::shutdown();
   return 0;
 }

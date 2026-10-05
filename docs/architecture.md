@@ -55,8 +55,10 @@
 | 物体 | body **`box`**，world 下 freejoint；4 cm 立方体、50 g，初始中心 `(0.5, 0, 0.241) m` |
 | 接触 | condim=3、friction=`1 0.03 0.003`、solref=`0.01 1`；当前仅滑动摩擦生效，改 condim 需重测 |
 | 放置标记 | `(0.5, 0.3, 0.221) m`，无碰撞；仅视觉参考，验收由 `verify.*` 决定 |
-| `model_path` 默认 | 项目自有 `pick_place_scene.xml` |
+| `model_path` 默认 | 项目自有 `pick_place_scene.xml`（`scene.enabled=true` 时为 `pick_place_bin_scene.xml`，见下） |
 | `reset_keyframe_name` 默认 | `pick_place_home`；16 维 qpos = 7 臂 + 2 手指 + box 3 平移/4 四元数 |
+
+**可选 box/bin 起始布局（Week 4.1 Stage 1，bridge 专有，默认关闭）。** `scene.enabled:=true` 时 bridge 加载 [pick_place_bin_scene.xml](../robot_description/mujoco/franka_emika_panda/pick_place_bin_scene.xml)（`include` 默认场景并加一个静态 bin：底板 + 四壁，12 mm，有碰撞），并按 `scene.box.{x,y,z,roll,pitch,yaw}` / `scene.bin.*` 设置起始位姿；launch 对应 `scene_enabled`、`box_*`、`bin_*`（缺省为 `auto`，只传用户给出的值）。长度 m、角度 rad、R=Rz(yaw)Ry(pitch)Rx(roll)；`z` 省略取旋转后最低角点距桌面 1 mm；box 原点为中心，bin 原点为内底面中心。位姿写入 `qpos0`、全部 keyframe 的 qpos 与 bin body，reset 恢复同一布局。出桌、穿桌、非有限值、bin 倾斜超约 20°、box 与 bin 包围盒间距小于 20 mm、关闭时给出位姿，都使 bridge 以状态 1 退出并说明原因。**关闭时模型与旧版逐字节相同**：把隐藏的 bin 放进默认场景会使相机 RGB 有 5208 个像素变化（深度与观测不变，根因未明），所以 bin 在单独的文件里。这些位姿是仿真真值，只有 bridge 声明参数，perception 与 executor 不读取；executor 的 place 目标与验收仍是固定位置，所以开启后的抓放结果不代表入 bin（Stage 13、15 才改）。决策见 [ADR 015](adr/015-rollback-stage6-perception-side-transport-diagnostics.md)，过程与验证见 [Week 4.1 Stage 1](../Job_guides/my_study/week4.1.md#stage-1bridge-可配置场景默认关闭)。
 
 换回 panda.xml 时须同时改用 home。找不到指定 keyframe 会使 reset 显式失败；带 box 场景误用仍存在的 vendor home 则可能成功返回并把 box 置于补齐后的错误位置。
 

@@ -142,7 +142,7 @@ Stage 1~6 已写出完整骨架（0 一句话总结、1 改动清单、2 机制�
 - 每个阶段开始前，先写**输入情形 → 预期消息/候选/状态 → 时间约束 → 预期动作 → 否定条件**，固定版本和配置；不能实验失败后改预期来凑通过。
 - 有已知失败的先复现失败，修复后跑同一用例，再检查受影响的正常路径。
 - build/test 与真实 ROS/MuJoCo 运行都要完成；文档中的计划项不得写成已通过。运行前按 [STUDY_NOTES_GUIDE 3.1](../../STUDY_NOTES_GUIDE.md#31-验证环境卫生两次误判后定下) 确认没有遗留节点，后台节点不经过 `ros2 run`。
-- 基线回归：每个阶段出口必须保持 Stage 5 记录的结果——[oracle_attachment_probe.py](../../src/task_executor/test/oracle_attachment_probe.py) 默认配置 20/20 零重试、默认视觉抓放 3/3 零重试（见 [Week 4 5.1](week4.md#51-改动清单与验证结果)）。回归次数不替代过程断言。
+- 基线回归按改动面选择，不机械重跑：只改仿真侧且默认关闭的阶段，用与 Stage 5 基线的逐字段、逐像素对照即可；改动 perception 或 executor 行为的阶段，才跑 episode 回归（[episode_probe.py](../../src/mujoco_bridge/test/episode_probe.py) 视觉/oracle 各数次，不必 20 次；基线上视觉 3/3、oracle 20/20 零重试的记录见 [Week 4 5.1](week4.md#51-改动清单与验证结果)）。回归次数不替代过程断言。
 - 范围：每个阶段只改上表所列的包；超出范围先改本文，再改代码。
 - 逐 episode 按 session/generation/sequence、图像 stamp、结果到达时间和 phase 记录 trace；状态集合不替代顺序与持续时间。相机只有 10 Hz，视觉序号不要求连续，但必须递增且关联同一次图像。
 - oracle 仅用于明确标记的对照和离线误差计算，不喂给 vision 决策。
@@ -152,45 +152,68 @@ Stage 1~6 已写出完整骨架（0 一句话总结、1 改动清单、2 机制�
 
 ### 1.0 一句话总结
 
-只让 bridge 能按 CLI 生成不同的 box/bin 初始位姿，并在 reset 时恢复；默认关闭时与 Stage 5 逐字段一致。perception 和 executor 不动，也不声称能入 bin 抓放。
+只让 bridge 能按 CLI 生成不同的 box/bin 初始位姿，并在 reset 时恢复；默认关闭时与 Stage 5 逐字段、逐像素一致。perception 和 executor 不动，本阶段不要求（也没有验收）任何抓放。
 
 ### 1.1 改动清单与验证结果
 
-**计划，结果待实施。** 范围：[pick_place_scene.xml](../../robot_description/mujoco/franka_emika_panda/pick_place_scene.xml)（bin 底板和四壁，默认隐藏且无碰撞，壁高仍 12 mm）、[mujoco_bridge_node.cpp](../../src/mujoco_bridge/src/mujoco_bridge_node.cpp)（场景配置、`configureScene()`、reset 恢复）、[demo.launch.py](../../src/mujoco_bridge/launch/demo.launch.py)（只把 `scene_*` / `box_*` / `bin_*` 参数传给 bridge）及对应测试。不改 perception、executor 和消息定义。
+**实现和验证已完成（2026-10-05），尚未提交。**
+
+| 文件 | 改动 |
+| --- | --- |
+| [pick_place_bin_scene.xml](../../robot_description/mujoco/franka_emika_panda/pick_place_bin_scene.xml)（新） | `include` 默认场景并加 bin：底板 + 四壁，12 mm，静态 body，有碰撞，可见 |
+| [pick_place_scene.xml](../../robot_description/mujoco/franka_emika_panda/pick_place_scene.xml) | **未改动** |
+| [scene_config.hpp/.cpp](../../src/mujoco_bridge/src/scene_config.cpp) | 纯几何与校验：RzRyRx、自动支撑 z、出桌/穿桌/倾斜/box-bin 间距检查。放在 `src/` 而不是 `include/`，不安装、也不在导出的 `grasp_criteria` include 路径上 |
+| [scene_ops.hpp/.cpp](../../src/mujoco_bridge/src/scene_ops.cpp) | 从模型读 box/bin/桌面尺寸；把 bin 位姿和 box 起始位姿写入 body、`qpos0`、所有 keyframe、`d->qpos` |
+| [mujoco_bridge_node.cpp](../../src/mujoco_bridge/src/mujoco_bridge_node.cpp) | `scene.enabled` 在加载模型前读取并选择默认 MJCF；`configureScene()`；`main()` 捕获启动异常，打印原因并以状态 1 退出（原先是 `terminate` + core dump） |
+| [demo.launch.py](../../src/mujoco_bridge/launch/demo.launch.py) | `scene_enabled`（默认 `false`）与 `box_*` / `bin_*`（默认 `auto`），**只传给 bridge**；只传用户给出的值 |
+| 测试 | `test_scene_config`（19）、`test_scene_ops`（12）、`test_scene_launch`（7，含“其它包不得使用场景配置”的 tripwire）；探针 `scene_probe.py`、`episode_probe.py` |
+
+| 验证 | 结果 |
+| --- | --- |
+| 新增单测 | 38 项全过；bridge 包 17 项（含 cpplint、pep257、uncrustify）全过；工作区 577 tests、0 errors、0 failures、77 skipped |
+| 默认关闭 vs Stage 5 基线（`scene_probe.py capture/compare`，同一次启动流程、两次 reset） | 关节、box 位姿、TCP 位姿、接触、附着状态差异均为 0；RGB（240×320）最大差 0 级；深度最大差 0 m，有效像素集合相同。对照：基线对基线也是 0 |
+| 开启后 reset 位姿 vs 命令行 | 三组配置（默认布局；box rpy=(0.3,0.2,0.7)+bin 倾斜/旋转；显式 z）在两次 reset 后 box 位姿与独立重算的期望一致（位置误差 0.39 mm，来自首个采样已推进一个物理步；朝向误差 0°）；bin 位姿与启动日志一致 |
+| 非法参数（9 种） | 全部以状态 1 退出，日志点名参数和原因：出桌 ×2、z 穿桌、roll=NaN、bin 倾斜、box 在 bin 上、关闭时给了位姿、整数给了 double 参数、模型里没有 bin |
+| 渲染 | 并排图确认开启后 bin 和旋转的 box 出现在相机视野内（`/tmp/s1_default_vs_enabled.png`，未提交） |
+
+**范围收窄说明（2026-10-05，用户指出）。** 我曾在本阶段额外跑了 oracle/视觉抓放（视觉 3 次、oracle 20 次、开启 bin 后 oracle 若干次）。它们不是本阶段的验收，不构成证据：默认关闭的等价性已由上面的逐字段/逐像素比较直接证明，比成功率强；开启 bin 后 executor 目标未改，抓放结果本来就不在预期范围内。为避免误读，这些运行结果不写成验收项。唯一值得留档的一次观察是：开启 bin、盒子仍被放到旧目标时，oracle 报告成功，盒子最终 z≈0.247 m，而桌面上是 0.240 m。成功标志只看 XY 和释放，不看盒子在不在 bin 里，这正是 Stage 15 要换判据的原因。
 
 ### 1.2 机制与权衡
 
-- **配置只在 bridge。** `scene.enabled`（默认 `false`）、`scene.box.{x,y,z,roll,pitch,yaw}`、`scene.bin.*` 由 bridge 声明；解析与校验放在 bridge 私有头文件，不放进 `manipulation_interfaces`。共享包一旦带位姿加载器，后续任何节点只需一行 include 就能读到答案，“bin 由视觉获得”就只剩自觉维护。
-- **尺寸来源。** 校验需要 box 与 bin 的尺寸。优先从加载的 MJCF 几何读取，避免和 C++ 常量各写一份；若实现时发现读取比常量复杂得多，再改并记录原因。
-- **校验规则**（数值继承自存档 [Week 4 6.2](week4.md#62-场景配置与旋转)，作为起点而非依据）：角度为 RzRyRx（rad）；`z` 省略或 `auto` 取桌面上方旋转后最低角点 +1 mm；显式 `z` 穿桌、超出桌面范围、box 中心落入 bin 占地加边距、非有限值、bin 上轴 z 分量 <0.94（约 20°）均拒绝启动并给出具体原因。
-- **reset 恢复。** 初始位姿写入 `qpos0` 与所有 keyframe 的 `qpos`，以及 bin body 的位置/四元数。MuJoCo 在编译期缓存 `body_contype/body_conaffinity`，只改 geom 会被 body 粗筛跳过（存档 [Week 4 6.6](week4.md#66-排查记录) 的实测教训），启用/禁用时两层必须同步。
-- **默认关闭等价于 Stage 5。** 关闭时 bin 的 geom 透明且 `contype=0`，`place_marker` 保持可见。
-- **权衡：** 校验放节点内（任何启动方式都生效）而非 launch 层；不做“每 episode 用服务改配置”，数据生成器可按不同 CLI 重新启动。
+- **配置只在 bridge。** `scene.enabled`（默认 `false`）、`scene.box.{x,y,z,roll,pitch,yaw}`、`scene.bin.*` 由 bridge 声明；解析与校验放在 bridge 私有的 `src/` 头文件，不放进 `manipulation_interfaces`，也不放进导出的 `include/`。共享包一旦带位姿加载器，后续任何节点只需一行 include 就能读到答案，“bin 由视觉获得”就只剩自觉维护。
+- **bin 放在单独的 MJCF 里，不放进默认场景。** 原计划是默认 MJCF 常驻 bin、关闭时隐藏且无碰撞。实测这不等价：RGB 有 5208/76800 个像素变化（5153 个差 1 级，55 个最大差 86 级），而深度和所有观测不变。差异大小随隐藏几何体积变化（只留底板 4032 像素，只留四壁 1300 像素），与 bin 位置无关，用隐藏组或 alpha=0 隐藏结果相同；空 body 或 1 mm 的隐藏小几何体不引起任何变化。把编译期统计量 `meansize`、`meanmass` 固定回基线值也没有消除差异，所以不是它们。**根因没有找到**（怀疑与渲染场景范围或排序有关，未验证）。改为：关闭时加载原文件，字节不变；开启时加载 `pick_place_bin_scene.xml`。代价是 bin 的几何在第二个文件里，且两个文件要保持 `include` 关系；`test_scene_ops` 断言后者等于前者加 1 个 body、5 个 geom，其余（nq、nkey、全部 key_qpos、qpos0）相同。
+- **尺寸来源。** 校验需要的 box、bin、桌面尺寸从加载的模型读取，C++ 里没有第二份数字。限制：要求这些 geom 是未旋转的 box。
+- **校验规则**（数值继承自存档 [Week 4 6.2](week4.md#62-场景配置与旋转)，作为起点而非依据）：角度为 RzRyRx（rad）；`z` 省略取桌面上方旋转后最低角点 +1 mm；显式 `z` 穿桌（容差 0.1 mm）、出桌（按旋转后包围盒）、非有限值、bin 上轴 z 分量 <0.94（约 20°）、box 包围盒与 bin 包围盒间距 <20 mm 均拒绝启动并说明原因。20 mm 是“夹爪张开余量的一半”，只是必要条件，到 Stage 13 才验证可达；包围盒检查是保守的，会拒绝少数旋转后实际能避开的布局。
+- **reset 恢复。** 初始位姿写入 `qpos0`、**所有** keyframe 的 `qpos`、`d->qpos` 以及 bin body 的位置/四元数。注意：panda 自带的 `home` keyframe 的 box 部分被 MuJoCo 补零到世界原点（z=0，桌面以下），开启场景后它也被覆盖，这是行为变化，但 bridge 默认并不用这个 keyframe。因为 bin 现在在模型里天生有碰撞，不再需要运行时同步 body 级碰撞掩码；Stage 6 存档里的这个坑在本设计下不会出现。
+- **启动失败的方式。** 无效配置是预期的失败路径，节点现在打印 `startup failed: ...` 后以状态 1 退出，而不是抛出未捕获异常。
+- **权衡：** 校验放节点内（任何启动方式都生效）而非 launch 层；launch 只在“关闭时给了位姿”“不是数字”这类 launch 层才看得出的错误上拦截。不做“每 episode 用服务改配置”，数据生成器可按不同 CLI 重新启动。
 
 ### 1.3 预期轨迹与验收
 
-| 输入情形 | 预期 | 否定条件 |
-| --- | --- | --- |
-| `scene.enabled=false`（默认） | reset 后 `BridgeObservation` 的关节与 box 位姿与 `main` 基线逐字段相同（容差内）；oracle 探针 20/20、默认视觉 3/3，均零重试 | bin 可见或有碰撞；`place_marker` 被隐藏 |
-| `enabled=true`，非零 xyz/rpy | reset 后 box 与 bin 位姿等于配置（容差 1e-6）；连续两次 reset 位姿相同；box 落稳后与初始位姿的差单独记录（初始倾斜会落稳） | reset 后漂移，或跨 reset 累积 |
-| `z` 省略/`auto` 且有旋转 | 最低角点距桌面约 1 mm | 穿桌或明显悬空 |
-| 非法参数（非有限值、出桌、穿桌、重叠、倾斜过大） | bridge 启动失败，日志给出具体原因 | 静默截断或修正 |
-| 启用后的碰撞掩码 | body、geom 两层同为 1；禁用时同为 0 | 只同步了一层 |
-| 启用后跑 oracle 抓放 | **不验收**：place 目标未改，bin 地板比桌面高约 7 mm（见[基线代码事实](#基线代码事实)第 4 条） | 把这一项写成通过 |
+| 输入情形 | 预期 | 否定条件 | 结果 |
+| --- | --- | --- | --- |
+| `scene.enabled=false`（默认） | reset 后 `BridgeObservation` 与 `main` 基线逐字段相同；相机 RGB/深度逐像素相同 | 模型里有 bin；任何字段或像素不同 | 通过（见 1.1） |
+| `enabled=true`，非零 xyz/rpy | reset 后 box 与 bin 位姿等于配置；连续两次 reset 位姿相同 | reset 后漂移，或跨 reset 累积 | 通过 |
+| `z` 省略/`auto` 且有旋转 | 最低角点距桌面约 1 mm | 穿桌或明显悬空 | 通过（单测按手算值断言） |
+| 非法参数 | 启动失败，日志给出具体原因 | 静默截断或修正；崩溃 | 通过（9 种） |
+| 碰撞 | bin 有碰撞：箱子扔在 bin 上方停在地板上（z≈0.247），bin 移走后停在桌面（z≈0.240） | 穿过 bin | 通过（单测） |
+| 启用后跑抓放 | **不验收**（见 1.1“范围收窄说明”） | 把它写成通过 | 未验收 |
 
 ### 1.4 失败模式与验证手段
 
 | 失败模式 | 现象 | 怎么发现或防住 |
 | --- | --- | --- |
-| keyframe 未同步 | reset 后 box 回到旧位姿 | 连续两次不同配置 reset 的位姿断言 |
-| 只更新 geom 不更新 body 缓存 | bin 看得见但接不住 | 沿用 [test_model_consistency.cpp](../../src/mujoco_bridge/test/test_model_consistency.cpp) 的思路加载 MJCF 断言两层掩码 |
-| launch 默认值与节点默认值不一致 | 默认 demo 悄悄变了 | `--show-args` 与节点参数 dump 对照；断言 `scene_enabled` 默认 `false` |
-| 校验失败只让 bridge 退出 | executor 仍在空转 | 检查 launch 是否整体退出并打印原因 |
+| keyframe 未同步 | reset 后 box 回到旧位姿 | 单测：多个 keyframe 都带配置位姿；连续 reset 位姿断言 |
+| 默认关闭时模型被悄悄改变 | 默认 demo 的图像、观测变了 | 逐字段、逐像素与基线比较；单测断言默认场景没有 bin。**本阶段的真实案例**：隐藏 bin 改变了 5208 个像素，成功率和观测检查都发现不了，只有逐像素比较能发现 |
+| launch 默认值与节点默认值不一致 | 默认 demo 悄悄变了 | pytest 断言默认只传 `scene.enabled=false` |
+| 场景配置泄漏给其它节点 | perception/executor 能读到答案 | pytest tripwire：其它包的源码里不得出现 `scene_config`、`scene.box` 等 |
+| 校验失败只让 bridge 退出 | executor 仍在空转 | 本阶段只验证 bridge 自身退出码和日志；launch 整体是否随之退出未验证 |
 
 ### 1.5 你没问但值得注意的
 
-- “与 Stage 5 一致”怎么写成自动断言：对 `BridgeObservation` 做字段级比较，而不是只看成功率（E 类，可测试性）。
-- 启动校验失败时错误是否进日志、launch 是否整体退出，而不是留下半个系统（C 类，可观测性）。
+- **“默认关闭等价于 Stage 5”不能靠成功率证明。** 本阶段的隐藏 bin 在成功率和全部观测上都等价，只有逐像素比较发现了差异（E 类，可测试性）。后续每个改动 perception 输入的阶段都应保留这种对照。
+- **根因没找到的现象怎么处理。** 隐藏几何体改变渲染的原因未明，本阶段靠“不让它出现”绕开，不是解释。如果以后在默认场景里加任何几何体，要先做同样的逐像素对照（C 类，可观测性）。
+- launch 整体是否会随 bridge 启动失败而退出，没有验证，只验证了 bridge 进程本身。
 
 ### 1.6 本阶段边界与后续
 
