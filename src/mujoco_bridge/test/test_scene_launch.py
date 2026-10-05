@@ -93,12 +93,39 @@ def test_scene_parameters_are_built_only_for_the_bridge():
 def test_other_packages_do_not_use_the_scene_configuration(package):
     # docs/adr/015: box/bin poses are simulator ground truth; perception and the executor
     # get them from the camera. Tripwire for anyone wiring the scene parameters, or the
-    # bridge's private scene headers, into another package.
+    # bridge's private scene headers, into another package's product code.
+    #
+    # Files under test/ are skipped on purpose. Evaluation tools there start a bridge and
+    # pass it `-p scene.box.yaw:=...` on its command line; that sets up the simulator and
+    # gives nothing to the node under test. What must not happen is a node reading these
+    # parameters, and no node in a test/ directory is one of the product nodes.
     suffixes = {'.cpp', '.hpp', '.py', '.txt', '.xml', '.yaml', '.msg', '.srv'}
     needles = ('scene_config', 'scene_ops', 'scene.enabled', 'scene.box', 'scene.bin')
     offenders = []
     for path in (REPO_SRC / package).rglob('*'):
-        if path.suffix in suffixes and path.is_file():
-            text = path.read_text(errors='ignore')
-            offenders += [f'{path.relative_to(REPO_SRC)}: {n}' for n in needles if n in text]
+        if path.suffix not in suffixes or not path.is_file():
+            continue
+        if 'test' in path.relative_to(REPO_SRC / package).parts[:-1]:
+            continue
+        text = path.read_text(errors='ignore')
+        offenders += [f'{path.relative_to(REPO_SRC)}: {n}' for n in needles if n in text]
     assert not offenders, offenders
+
+
+def test_the_scene_configuration_guard_still_catches_product_code(tmp_path):
+    # The guard above skips test/ directories. Check it did not become blind: the same
+    # scan, pointed at a product-code file that mentions a scene parameter, must report it.
+    product = tmp_path / 'fake_package' / 'src'
+    product.mkdir(parents=True)
+    (product / 'node.cpp').write_text('declare_parameter("scene.bin.x", 0.0);\n')
+    tools = tmp_path / 'fake_package' / 'test'
+    tools.mkdir()
+    (tools / 'probe.py').write_text("args += ['-p', 'scene.bin.x:=0.5']\n")
+    root = tmp_path / 'fake_package'
+    found = []
+    for path in root.rglob('*'):
+        if path.suffix in {'.cpp', '.py'} and path.is_file() and \
+                'test' not in path.relative_to(root).parts[:-1] and \
+                'scene.bin' in path.read_text():
+            found.append(path.name)
+    assert found == ['node.cpp']
