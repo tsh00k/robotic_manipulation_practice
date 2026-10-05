@@ -1,10 +1,10 @@
 # Week 4 学习笔记
 
-> Stage 1~5 已记录；Stage 5 当前采用 bridge 权威附着、视觉暂停/释放重测与 executor 缓存准入，见 [正式记录](#stage-5视觉接口收紧与简化状态机)。前文架构和 architecture.md 已同步；Stage 6 完整联调及 vision 抓放验收待完成。多色物体、bin、策略与数据契约见 [week4.5.md](week4.5.md)。
+> Stage 1~5 保留历史记录，对应 `main` 当前代码（提交 `e37dcb2`）。Stage 6（可配置单 box/bin、实体 bin、持续视觉与 TCP 推算、四态运输监测）于 2026-10-04 收尾后**决定回退**：完整实现只归档在分支 `archive/stage6-transport-monitor`（提交 `3587adf`），`main` 上不存在；Stage 6 章节保留为历史记录与教训，回退原因和对照见 [6.9](#69-回退决定与存档)，决策见 [ADR 015](../../docs/adr/015-rollback-stage6-perception-side-transport-diagnostics.md)。后续按 [Week 4.1](week4.1.md) 的分阶段计划逐步重新加入。Week 4.5 保持 [HOLD UP](week4.5.md)。
 
 **Stage 4 历史现象（2026-10-01）：** 用户观察到 GRASP 遮挡后以 VISION_LOW_CONFIDENCE 停止。当时质量失败直接结束 episode，绕过 FSM 重试，增加 max_retries 无效；具体失败指标尚未核实。掩膜只能去除机器人表面，不能恢复遮挡像素。
 
-当前质量失败记录诊断并等待新测量；ATTACHED 时视觉暂停，executor 复用最近接受的位姿数值，释放后重新测量。没有 TCP 预测或视觉独立夹持判断。bridge 的附着确认仍使用仿真真值/接触，锁存可能漏掉闭爪滑落；尚无完整 vision 成功证据。
+当前质量失败记录诊断并等待新测量；ATTACHED 时视觉暂停，executor 复用最近接受的位姿数值，释放后重新测量。没有 TCP 预测或视觉独立夹持判断。bridge 的附着确认仍使用仿真真值/接触，锁存可能漏掉闭爪滑落；尚无完整 vision 成功证据。Stage 6 曾尝试持续视觉与 TCP 推算，已回退，见 [6.9](#69-回退决定与存档)。
 
 ## 学习重点范围
 
@@ -28,7 +28,7 @@
   - [2.3 Stage 3：oracle/vision 对照和任务接入](#23-stage-3oraclevision-对照和任务接入)
   - [2.4 Stage 4：同帧机器人几何掩膜](#24-stage-4同帧机器人几何掩膜)
   - [2.5 Stage 5：视觉接口收紧与简化状态机](#25-stage-5视觉接口收紧与简化状态机)
-  - [2.6 Stage 6：任务证据门与完整抓放验收](#26-stage-6任务证据门与完整抓放验收)
+  - [2.6 Stage 6：可配置单物体入 bin 与搬运监测](#26-stage-6可配置单物体入-bin-与搬运监测)
 - [3. 本周验收标准](#3-本周验收标准)
 - [4. 失败模式和验证方法](#4-失败模式和验证方法)
 - [5. 主动提示的问题](#5-主动提示的问题)
@@ -117,6 +117,17 @@
     - [5.8.2 排查记录：局部候选尺寸与中心偏差](#582-排查记录局部候选尺寸与中心偏差)
   - [5.9 你没问但值得注意的](#59-你没问但值得注意的)
   - [5.10 本阶段边界与后续](#510-本阶段边界与后续)
+- [Stage 6：可配置单物体入 bin 与搬运监测](#stage-6可配置单物体入-bin-与搬运监测)
+  - [6.0 一句话总结](#60-一句话总结)
+  - [6.1 改动清单与验证结果](#61-改动清单与验证结果)
+  - [6.2 场景配置与旋转](#62-场景配置与旋转)
+  - [6.3 持续视觉和固定 TCP 推算](#63-持续视觉和固定-tcp-推算)
+  - [6.4 掉落与主动 place 的证据边界](#64-掉落与主动-place-的证据边界)
+  - [6.5 失败模式与验证手段](#65-失败模式与验证手段)
+  - [6.6 排查记录](#66-排查记录)
+  - [6.7 你没问但值得注意的](#67-你没问但值得注意的)
+  - [6.8 本阶段边界与后续](#68-本阶段边界与后续)
+  - [6.9 回退决定与存档](#69-回退决定与存档)
 - [12. Week 4.5 交接](#12-week-45-交接)
 - [13. 悬挂问题与反向清单](#13-悬挂问题与反向清单)
 
@@ -337,6 +348,8 @@ Stage 3 的已完成验证只覆盖 vision 样本进入 `PREGRASP` 和拒绝后�
 
 ### 2.5 Stage 5：视觉接口收紧与简化状态机
 
+本节是 Stage 5 完成时的事实，也是 `main` 当前行为。Stage 6 曾以持续视觉与 TCP 推算替代其中的搬运规则，该原型已回退（见 [6.9](#69-回退决定与存档)），由 Week 4.1 分阶段重新引入，在引入前本表仍然有效。
+
 | 项 | 当前实现与出口 |
 | --- | --- |
 | 职责 | bridge 确认/锁存附着；estimator 检查候选有效性/唯一性；executor 做质量准入与阶段决策 |
@@ -348,16 +361,50 @@ Stage 3 的已完成验证只覆盖 vision 样本进入 `PREGRASP` 和拒绝后�
 
 旧关联/独立夹持/TCP 预测方案与原始追问保留在 [5.7 历史归档](#57-旧-stage-5-方案归档与弃用原因)。ICP/GICP 仅离线比较，默认在线仍为 OBB。
 
-### 2.6 Stage 6：任务证据门与完整抓放验收
+### 2.6 Stage 6：可配置单物体入 bin 与搬运监测
 
-| 项 | 待完成的验证与决策 |
+> 用户调整目标：“允许不同的初始box位置和不同的初始target位置（要能够通过CLI args指定，方便我们之后连接VLA时生成数据用），在target位置要有一个bin。”并补充：“我希望物体和bin的初始rotation也能被更改”、“我不打算做多物体多颜色了。暂且把week4.5标记HOLD UP.”
+
+**状态（2026-10-05）：本节是已被取代的历史计划。** 它把场景、感知、放置轨迹、搬运监测和回归合成一个 Stage，实现后已回退；各部分改由 [Week 4.1](week4.1.md) 拆成独立阶段，下表五项的去向见 [6.9](#69-回退决定与存档)。
+
+本节保留执行前的目标和验收计划，实际实现、验证和未覆盖项见 [Stage 6 正式记录](#stage-6可配置单物体入-bin-与搬运监测)。Stage 6 原计划在默认视觉抓放基线上实现单个 4 cm box 放入固定尺寸 bin，并监测搬运状态。多物体、多颜色、模型接入及 LeRobot 数据导出不属于本阶段。
+
+| 顺序 | 实施内容与出口 |
 | --- | --- |
-| 接入状态 | bridge 附着门、运输缓存复用、释放后新测量准入已在代码中；默认场景 vision 3/3 成功，扩展联调验收未完成。附着期持续视觉、TCP 位置推算与掉落检测留到 Stage 6 实现 |
-| 防止伪成功 | 检查 CLOSE/LIFT/PREPLACE/PLACE 附着门、OPEN 实际指宽及 VERIFY 的 RELEASED+新测量落点。缓存位姿不能证明当前抬升，bridge 锁存不能证明持续未滑落 |
-| 集成验证 | oracle 回归、vision 固定场景连续抓放、相同 seed 的 held-out 对照；注入遮挡、掉落、错误目标、缺帧/TF 和 reset，保存新布局录制并适配 replay 的附着期静默断言 |
-| 目标判据 | 固定场景目标 20/20 完整 vision episode；held-out 至少 20 次报告成功率、落点误差、假成功与失败层。此项尚未达成 |
-| 可观测性 | 统计视觉三态、bridge 三态、附着期暂停时长、释放到新测量延迟与最终证据序号；区分 processing_ms 与端到端延迟 |
-| 后续决策 | Stage 6 联调持续视觉校验、由视觉初始化的 TCP→box 相对变换及掉落/主动放置区分，见 5.10；相关接口与状态决策新增 ADR。无 oracle 的附着确认另行设计，不能从当前验证推导可用 |
+| 1. 场景与 CLI | 为 box、bin 提供初始 position 和 rotation 参数；项目自有场景加入有碰撞的底面与四壁。统一配置驱动 bridge 场景、executor 放置目标及验收区域，启动和 reset 都恢复同一配置；不得只移动视觉标记或 executor 目标 |
+| 2. 旋转与 bin 感知 | 修正当前轴对齐/桌面支撑先验，支持旋转 box、离桌局部点云和 bin 内支撑面；区分已知静态 bin 几何与可抓 box，避免 bin 壁混簇或误选。oracle 真值只用于 oracle 模式和离线评测 |
+| 3. bin 放置轨迹 | 根据 bin 开口、内底面、box 姿态及夹爪包络计算 PREPLACE/PLACE/RETRACT；保留现有 diff_ik，但实际检查 bin 壁间隙、到位和稳定性。入 bin 成功判据替换当前桌面 XY 半径判据 |
+| 4. 连续估计与监测 | 恢复 ATTACHED 期间视觉；合格视觉与同时间 TCP 初始化固定 TCP→box 相对变换，executor 侧推算搬运位置，视觉独立校验；实现下述四态监测及掉落/主动释放时间边界 |
+| 5. 回归与证据 | 保留原计划中有用的 oracle 对照、生命周期门、故障注入、held-out、录制/replay 和延迟统计；先完成场景/旋转/bin 基线，再联调搬运监测，分别留存结果 |
+
+**CLI 与 reset 契约（拟定）。** launch 参数采用 `box_x/y/z`、`box_roll/pitch/yaw`、`bin_x/y/z`、`bin_roll/pitch/yaw`；长度单位 m，角度 rad，位置表达在 world，旋转采用 `Rz(yaw) Ry(pitch) Rx(roll)`，内部转换为单位四元数。box 原点为几何中心，bin 原点为内底面中心；省略 z 时按旋转后几何最低点计算桌面支撑高度，显式 z 必须检查穿透与稳定性。target 是 bin 内的目标放置区域，不保留一套可与 bin 脱节的独立 target pose。
+
+接口接受位置及 roll/pitch/yaw 配置，验收必须分别报告纯 yaw 和含 roll/pitch 的情形，不能将“参数可传入”写成“任意姿态可靠”。box 倾斜可能在启动后自然落稳；bin 第一版为静态固定容器，其倾斜会改变可放置区域和稳定性。启动/reset 后先等待物体稳定，记录配置初始位姿和落稳实测位姿；桌外、穿透、box/bin 初始重叠、不可达或无法稳定放置的配置显式拒绝并说明原因，不能静默夹回默认值。立方体姿态误差按旋转对称等价类评测。bin 配置 pose 是已知场景先验，必须标记来源；本阶段不要求视觉估计 bin pose。
+
+**入 bin 证据。** 在 bin 局部坐标中检查 box 完整包络位于内壁边界内（包含安全裕量），同时检查内底面支撑高度、最终姿态及多帧稳定。仅中心进入开口或 XY 接近目标不能判成功；夹爪撤离后必须获得释放之后的新视觉测量。bin 壁导致最终观测不可用时等待有界验证窗口，超时以证据不足结束，不复用 TCP 推算判成功。放置高度取 bin 内底面，而不是现有 `table_top_z + box_half_height`；下降/撤离须检查手指与 bin 壁，第一版优先宽口浅 bin，具体尺寸由几何间隙和运行验证确定。
+
+**运输估计与命令边界。** TCP 推算用于运输中的连续状态，视觉用于独立校验、重获目标和最终验收；两者保留各自时间戳、来源和有效性，不直接平均。相对变换由视觉初始化，不能查询真值 `box` TF 初始化；估计 frame 与真值 frame 分开。偏离期间不自动重置相对变换，避免把滑移吸收为校正。每个阶段的规划目标在进入阶段时冻结；当前 LIFT 以 object pose 加高度生成目标，接入动态估计后不得每帧重复加高度而让目标上移。释放/reset 清除相对变换、监测历史和视觉缓存，严格拒绝旧 generation。
+
+| 任务监测状态 | 证据与行为 |
+| --- | --- |
+| 正常搬运 | 合格视觉与 TCP 推算一致，继续执行 |
+| 视觉不可用 | 遮挡、拒绝或缺帧不能证明掉落，继续 TCP 推算；记录观察缺口，最终 VERIFY 仍须新实测 |
+| 夹持异常待确认 | 合并可疑偏离与疑似掉落；即使多帧偏离也不单独停止。保留异常证据，搜索范围包含 TCP 邻域之外；身份不明确/多候选不随意选最大簇 |
+| 确认掉落 | 可靠目标身份、脱离夹爪包络，结合持续相对下坠或目标留在支撑面而 TCP 离开的证据才判定；受控停止并输出失败原因，禁止继续正常放置 |
+
+完全遮挡无法保证检测掉落；视觉观察缺口不作为运动停止条件，也不作为“仍未掉落”的证据。运动超时、IK 不可达和生命周期失配沿用独立失败路径。bridge ATTACHED 保留当前权威生命周期，不能否决独立的确认掉落证据；新任务监测状态不能混入视觉 MEASURED/OCCLUDED/REJECTED 三态。
+
+**掉落与 place 的时间边界。** PLACE 下降不授权释放。关联当前 episode 的主动 OPEN 命令、实际张爪反馈及观测时间戳后，才能解释预期分离；授权释放之前脱离，即使落入 bin 也属于掉落。正常释放但落在 bin 外、卡壁或不稳定属于放置失败。时间边界不明确时保持待确认，不能用当前 OPEN 状态追认更早的脱离。
+
+**保留和扩展的验收项。**
+
+1. 默认 bin 场景目标为 vision 20/20 完整 episode；另外至少 20 组预先固定的 held-out box/bin 位置与旋转，同配置分别跑 oracle/vision，报告成功率、bin 局部落点误差、姿态等价误差、重试、假成功和失败层，不筛掉失败配置。
+2. 参数配置/reset 一致性：无参数默认值、不同位置/旋转、非法配置、重复 reset、旧 generation 样本；记录 CLI、场景尺寸/版本和配置位姿/落稳位姿，使后续数据生成可复现。随机批次可由外部脚本用固定 seed 生成并传入 CLI，不强制在 bridge 内随机化。
+3. 注入短遮挡、持续偏离但未掉落、可见真实掉落、掉落恰好落入 bin、正常 OPEN、bin 外释放及释放边界延迟；验证前两者不误停、真实掉落能检测、正常释放不误判，测量检测延迟及漏报。
+4. 注入 bin 壁混簇、旋转局部可见、缺帧/TF、完全遮挡及 reset；报告不可观测区间和证据不足，不能把未知计为成功。oracle 必须在视觉持续拒绝时仍保持独立回归。
+5. 保存新接口录制，更新 replay 对“附着期静默”的旧断言；记录原始 RGB-D、视觉质量、实测/TCP 推算、异常证据、OPEN 命令/反馈、阶段冻结目标及最终证据序号，区分 processing_ms 和端到端延迟。
+
+实施前识别的风险包括 yaw 搜索、离桌候选下限、按桌面计算放置 z，以及只看最终 XY 可误报入 bin。Stage 6 的处理与实测见正式记录；任意倾斜姿态与无 oracle 附着确认仍需独立设计。
 
 ## 3. 本周验收标准
 
@@ -1235,6 +1282,8 @@ Stage 4 只解决同帧机器人可见表面过滤及其诊断；它不建立跨
 
 ## Stage 5：视觉接口收紧与简化状态机
 
+本节保留 Stage 5 的机制、实测与原始讨论，对应 `main` 当前代码。附着期暂停视觉、缓存位置不更新等行为仍是当前行为；Stage 6 曾尝试以持续视觉/固定 TCP 推算替代，该原型已回退（见 [6.9](#69-回退决定与存档)）。下文“当前”均指本阶段完成时。
+
 ### 5.0 一句话总结
 
 本阶段将机器人附着生命周期、视觉证据与任务决策分开：bridge 确认并锁存附着，estimator 只报告当前帧的视觉结果，executor 决定是否继续任务。附着运输时暂停 RGB-D 处理，释放后清空旧缓存并等待新的 `MEASURED`。旧运动门、速度预测、短期预测和视觉侧夹持/滑移推断已删除；旧方案的追问、实验与排查留在 [5.7](#57-旧-stage-5-方案归档与弃用原因)，不作为当前实现的验收证据。
@@ -1618,9 +1667,269 @@ rg -n 'Stage 5|stage5|]\(#' Job_guides/my_study/week4.md
 
 后续状态字段或权威来源变更应新增 ADR，引用旧快照，并同步架构文档。本次后续同步已更新前文架构/信息流和 architecture.md；此次 oracle 回归修复同时更新 bridge/FSM、相关测试和探针，并新增 ADR 012；局部候选准入与拟合决策新增 ADR 013；既有 ADR 快照与其他周记保持不变，不据此宣称 Stage 6 已完成。
 
+## Stage 6：可配置单物体入 bin 与搬运监测
+
+> **状态（2026-10-05）：本章记录的实现已回退，不在 `main` 上。** 6.0~6.8 是回退前的原始记录，其中的测试数、20/20 等结果只对归档分支 `archive/stage6-transport-monitor` 的代码成立，不适用于 `main`。6.0~6.8 里引用的 Week 4.1 Stage 编号对应上一版 6 阶段计划，已被 18 阶段计划取代，对照见 [6.9](#69-回退决定与存档)。下文中指向仅存在于归档分支的文件（`scene_config.hpp`、`transport_monitor.hpp`、`test_transport_monitor.cpp`、`stage6_probe.py`）的链接已改为纯文本；指向 `main` 上仍存在的文件的链接，描述的也是归档代码里的行为，与 `main` 当前实现不一定一致。
+
+### 6.0 一句话总结
+
+单 box/bin 的初始位置和旋转由共享配置驱动场景、视觉先验与任务；搬运时固定 TCP→box 推算提供执行位置，持续视觉独立判断异常，最终用主动张爪及释放后稳定入 bin 证据验收。
+
+**收尾状态（2026-10-04）：** 上句概括代码机制，不代表持续视觉和异常监控已经完整验收。用户实测夹持时持续 `MISSING_ROBOT_TRANSFORM`，且无法从 `object_pose` 查看估计/校验与释放判定；bin 位姿仍来自配置。按用户决定，本阶段停止扩展，保留这些缺口并转交 [Week 4.1](week4.1.md)。此前本轮尝试的 TF 修复、聚合消息、bin 检测、壁高及摩擦修改均已撤销，不能算作 Stage 6 产出。
+
+第一次阅读建议按 [6.1](#61-改动清单与验证结果) 的行为对照了解范围，再顺读 [6.2](#62-场景配置与旋转) 场景、[6.3](#63-持续视觉和固定-tcp-推算) 观测、[6.4](#64-掉落与主动-place-的证据边界) 判定。之后用 6.1 的文件索引追代码，用 [6.6](#66-排查记录) 理解为什么需要这些修正。前面的动态架构视图反映当前实现；Stage 5 正文保留当时的设计和实测，不作为当前行为说明。
+
+### 6.1 改动清单与验证结果
+
+**收尾清单：已经实现与尚未搞定。** 这里区分代码存在、已有实验和用户可观察的效果。
+
+| 范围 | 已实现的基线 | 收尾时仍存在的缺口 |
+| --- | --- | --- |
+| 场景 | CLI 指定 box/bin xyz/rpy；reset 恢复；实体底板/四壁碰撞 | bin 位姿仍是配置先验；壁高仍为 12 mm；不保证任意旋转/位置稳定可达 |
+| box 观测 | vision 入口使用 RGB-D 几何估计；保留独立 oracle 对照 | launch 默认仍是 oracle；用户报告夹持时视觉连续拒绝、pose 为默认零值；完全遮挡和任意倾斜 6D 恢复未解决 |
+| 搬运 | 固定 TCP→box 推算和同帧视觉比较的代码已接入 | 缺少完整、可直接读取的估计/校验快照；在线多 broadcaster TF 与独立 replay 的输入不同 |
+| 异常与放置 | 四态、主动 OPEN/实际张开边界、稳定完整入 bin 门、确认掉落零重试终止 | 状态只在独立 String 话题发送；时间边界和稳定门未公开；迟到的释放前证据可能被清除 |
+| 验证 | build/test、默认与固定配置回归、合成故障、录制/replay | 缺少按 episode/phase 对预期状态序列、候选数、来源及时间边界的运行时断言；成功率不能弥补这些缺口 |
+| 物理夹持 | 不同初始旋转可运行抓放 | 用户观察到旋转时打滑；按用户要求暂不处理夹持力、摩擦或速度 |
+
+> 用户指出：“你的验证目标不能仅仅是：20/20通过。更重要的是，先提出假定，预估代码过程中的状态变化，然后实跑验证。”
+
+这一批评成立。现有 probe 虽然记录视觉 rows 和状态集合，正常与遮挡/偏离注入的通过条件主要仍是 success/零重试；drop 额外检查失败码，未普遍断言中间状态、顺序与持续时间。下面的历史成功率保留，但不能据此写成“持续视觉、双源校验和释放边界均已验收”。Week 4.1 要先写预期轨迹，再在在线运行中逐项断言；录制过滤 executor TF 后的 replay 也不能代替完整在线 TF 验证。
+
+**Stage 5 → Stage 6 的行为变化。** 文件数量多，是因为同一个行为需要同时落实到物理场景、观测、任务和验证；不是每个文件都引入一个新概念。
+
+| 主题 | Stage 5 已完成的行为 | Stage 6 新增或替换的行为 |
+| --- | --- | --- |
+| 场景与目标 | 默认单盒桌面抓放，按目标位置验收 | 单 box/bin 初始 xyz/rpy 可配置；实体 bin 承接物体，目标由 bin 派生 |
+| 附着期观测 | 主动暂停视觉处理，搬运不依赖新视觉 | 视觉持续处理；当前 TCP 推算执行位置，同帧视觉独立校验 |
+| 运输异常 | bridge 附着锁存不能独立发现闭爪滑落 | 四态监测；遮挡/持续偏离继续，满足持续掉落证据才终止 |
+| 最终成功 | 释放后重新取得视觉，检查放置目标 | 主动张爪边界 + 释放后新观测 + 旋转盒体完整入 bin + 跨时间稳定性 |
+| 回归范围 | 默认视觉抓放 | oracle/vision 配置集合、故障注入、持续视觉录制和独立回放 |
+
+**模块改动清单。**
+
+| 范围 | 改动 |
+| --- | --- |
+| manipulation_interfaces | 新增共享 `scene_config.hpp`，配置、旋转、支撑高度、bin 表面与完整盒体包含检查 |
+| bridge / MJCF / launch | 静态有碰撞 bin；box/bin xyz/rpy CLI；配置写入 reset keyframe；更新 geom 和 body 碰撞缓存；vision 自动开启相机 |
+| perception | 附着期持续处理；扩大离桌 ROI；过滤已知 bin；bin 局部支撑拟合；5° yaw 搜索；部分几何准入及 PCA 投影上界修正 |
+| executor | 固定 TCP 推算、同帧独立视觉监测、四种状态、确认掉落终止、主动释放边界、稳定入 bin 验收、按物体 yaw 抓取与阶段目标冻结 |
+| 验证工具 | `stage6_probe.py` 自主管理真实进程、配置集合/故障注入/JSON 与 CDR 录制；replay 读取场景配置；单测覆盖配置、几何、监测与 FSM |
+
+**行为 → 核心文件 → 验证入口。** 文件按职责分组，先读核心入口，再沿函数调用追踪。表中的单测说明局部规则，probe 才覆盖真实 MuJoCo/ROS 联调。
+
+| 行为/契约 | 核心文件与阅读入口 | 验证入口 |
+| --- | --- | --- |
+| 一套配置供三个节点使用 | `scene_config.hpp`：`loadSceneConfig()`；[demo.launch.py](../../src/mujoco_bridge/launch/demo.launch.py)：`scene_parameters()` / `launch_nodes()` | [配置测试](../../src/task_executor/test/test_task_executor_config.cpp)；CLI launch smoke；probe 配置集合 |
+| bin 有碰撞，reset 恢复同一初始场景 | [pick_place_scene.xml](../../robot_description/mujoco/franka_emika_panda/pick_place_scene.xml)：底板/四壁；[mujoco_bridge_node.cpp](../../src/mujoco_bridge/src/mujoco_bridge_node.cpp)：`configureScene()` 的 body/geom 掩码和 keyframe | oracle probe 入 bin、reset 后位姿；碰撞缓存问题见 6.6 |
+| 视觉持续、去除已知 bin、允许部分可见盒体 | [object_pose_estimator_node.cpp](../../src/mujoco_perception/src/object_pose_estimator_node.cpp)：`tryProcess()`；[geometry_pipeline.cpp](../../src/mujoco_perception/src/geometry_pipeline.cpp)：`estimateBoxPose()` | [几何测试](../../src/mujoco_perception/test/test_geometry_pipeline.cpp)：旋转顶面、局部侧面、离桌顶面；vision probe / replay |
+| 视觉和 TCP 同帧配对，执行使用当前 TCP | [task_executor_node.cpp](../../src/task_executor/src/task_executor_node.cpp)：`onObservation()` → `onVisionObservation()` → `qualified()` / `collectObservation()` | vision probe 的 occlusion / invalid_pose；录制与回放检查 sequence/stamp；异步释放边界仍未完整覆盖 |
+| 固定偏移、独立残差、四态运输监测 | `transport_monitor.hpp`：`attach()` / `predict()` / `observe()` | `test_transport_monitor.cpp`（监测测试）：遮挡、持续偏离、证据中断、释放时间；deviation / drop 注入 |
+| 抓取随物体 yaw，阶段目标不追逐上升的推算位置 | [cartesian_waypoint_source.cpp](../../src/task_executor/src/cartesian_waypoint_source.cpp)：`waypointFor()`；[episode_controller.cpp](../../src/task_executor/src/episode_controller.cpp)：阶段位姿冻结 | [controller 测试](../../src/task_executor/test/test_episode_controller.cpp)：`PhaseTargetDoesNotChaseMovingObjectObservation`；不同 yaw 配置回归 |
+| 确认掉落后终止并保持实际状态 | [observation_frame.hpp](../../src/task_executor/include/task_executor/observation_frame.hpp)：`confirmed_drop`；controller `tick()` 的终止分支 | controller `ConfirmedDropHoldsMeasuredStateWithoutResetOrOpening`；drop 注入检查失败原因/零重试 |
+| place 依赖主动释放和稳定完整入 bin | monitor `commandOpen()` / `openingFeedback()`；node `collectObservation()`；共享 `cubeInBin()`；[fsm.cpp](../../src/task_executor/src/fsm.cpp)：VERIFY 门 | monitor 释放边界和包含测试；oracle/vision probe 正常释放、稳定落点且不误判掉落 |
+| 场景驱动任务参数，拒绝冲突配置 | [task_executor_config.cpp](../../src/task_executor/src/task_executor_config.cpp) 与 [task_executor_config.hpp](../../src/task_executor/include/task_executor/task_executor_config.hpp) | 配置测试；非零 box/bin 位姿 launch 与扩展 probe |
+| 可重复联调和离线复查 | `stage6_probe.py`：`run_case()` / `main()`；[tracking_replay.py](../../src/mujoco_perception/test/tracking_replay.py)：`main()` | 下表运行结果；录制保存 scene 配置和当前 CDR 输入，回放不启动 simulator/executor |
+
+各包 `CMakeLists.txt` / `package.xml` 负责导出共享头文件、依赖、安装和测试注册；`episode_controller.hpp`、`fsm.hpp` 等头文件承接对应状态字段。这些配套修改随上表的行为阅读，不另设机制章节。
+
+**最终实现的证据。** 以下注明版本差异，历史失败过程统一放在 6.6。
+
+| 验证 | 实测结果与适用范围 |
+| --- | --- |
+| 全量 build/test | 六包 `colcon build --symlink-install` 成功；519 tests、0 errors、0 failures、73 skipped（汇总含 CTest/单测/规范检查，非 519 个物理场景）；监测 8 项、几何 13 项 |
+| oracle 默认/扩展 | 默认连续 20/20；20 个固定扩展配置 20/20；均零重试。扩展组包含不同 xyz/yaw 与小 roll/pitch，不能外推任意姿态 |
+| vision 默认/扩展 | 默认连续 20/20、零重试是在最后 confidence 门同步之前完成；同步后的最终版本追加默认 1/1，并完成扩展 20/20、零重试。最终版本未再次执行默认连续 20 次，不能把两份证据合称同版本的完整回归 |
+| 故障注入 | occlusion 成功；持续 40 mm deviation 成功并出现 ANOMALY_PENDING；drop 为 CONFIRMED_DROP、零重试终止；invalid_pose 未崩溃并成功。采用同生命周期/同帧合成视觉，不代表实际物理滑落已验收 |
+| 当前接口 replay | 最终版本新默认录制独立回放 22 帧：20 MEASURED、2 REJECTED，其中 4 帧附着结果均 MEASURED。证明这一段输入持续处理并得到结果，未证明所有运输姿态下测量可靠 |
+| CLI launch | `--show-args` 包含 box/bin xyz/rpy；实际非零 roll/pitch/yaw 与 auto z 启动，BridgeObservation 位姿吻合、单 /clock publisher；回收整组进程 |
+
+探针每轮使用真实安装可执行文件、检查唯一 clock 并回收进程。证据在 `/tmp/stage6_*`，不提交日志和录制。扩展组是固定的 20 个配置，属于回归集合；调试用过后不能宣称独立盲测。正常放置本身检查未误判为 CONFIRMED_DROP。
+
+**未验收边界：** 真实物理滑落尚未验证；释放清缓存后迟到的释放前异常证据可能丢失；完全遮挡无法确认掉落；任意 roll/pitch 的视觉 6D 恢复、极限工作空间和真机不在当前通过范围。合成注入说明“给定证据后系统如何动作”，不能证明真实滑落必然生成这些证据。
+
+复查入口如下，运行前需按项目约定确认没有遗留 bridge、正确加载容器环境；vision 还需可用 X11/OpenGL。
+
+```bash
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+# 同一默认配置连续执行 20 个 episode
+/usr/bin/python3 src/task_executor/test/stage6_probe.py --source vision --episodes 20
+# 20 个固定扩展配置；heldout 是工具参数名，已调试过，不是盲测
+/usr/bin/python3 src/task_executor/test/stage6_probe.py --source vision --suite heldout
+# 合成视觉注入，可替换为 occlusion / deviation / invalid_pose
+/usr/bin/python3 src/task_executor/test/stage6_probe.py --source vision --fault drop
+```
+
+### 6.2 场景配置与旋转
+
+> 用户原始目标：“允许不同的初始box位置和不同的初始target位置（要能够通过CLI args指定，方便我们之后连接VLA时生成数据用），在target位置要有一个bin。”补充：“我希望物体和bin的初始rotation也能被更改。”
+
+```bash
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+ros2 launch mujoco_bridge demo.launch.py observation_source:=vision \
+  box_x:=0.49 box_y:=-0.025 box_z:=auto \
+  box_roll:=0.03 box_pitch:=0.02 box_yaw:=0.4 \
+  bin_x:=0.51 bin_y:=0.27 bin_z:=auto \
+  bin_roll:=0.02 bin_pitch:=0.02 bin_yaw:=-0.2
+ros2 topic pub --once /task_executor/start_episode std_msgs/msg/Empty '{}'
+```
+
+长度 m、角度 rad，旋转为 RzRyRx；box 原点为几何中心，bin 原点为内底面中心。省略 z 或 auto 使用旋转后最低角点计算桌面上 1 mm 间隙。显式 z、桌边、box/bin 重叠、非有限值与 bin 上轴方向均校验；bin 上轴 z 分量须 ≥0.94。配置有效不保证 IK 可达，实际不可达仍可能 IK_FAILED。box 初始倾斜可能在物理运行后落稳，配置初始姿态不等于抓取时姿态。
+
+底板与四壁是静态 body，不增加 nq；内半宽 70/65 mm、壁厚 6 mm、壁高 12 mm、底厚 6 mm。同一共享配置供 bridge、perception、executor 使用；直接启动单节点需保持 `scene.*` 一致。reset 恢复相同配置，未新增每 episode 修改配置的服务；数据生成器可按不同 CLI 配置启动。scene 模式要求 diff_ik，冲突的独立 task/verify 覆盖会拒绝。放置位置由 bin 派生，world 向下释放，不要求最终 box yaw 等于 bin yaw。
+
+这条配置链从 launch 开始：`box_x` / `bin_yaw` 等 CLI 参数转成三个节点相同的 `scene.box.*` / `scene.bin.*`。各节点调用共享 `loadSceneConfig()` 得到同一组变换，但各自用途不同：bridge 修改真实场景和 reset 状态；perception 过滤已知 bin 表面并在 bin 局部坐标拟合盒体；executor 派生放置目标并验收盒体包含。共享的是解析与几何契约，不是三个节点运行时共享一块内存；单独启动时配置不一致仍会造成错误。
+
+> 收尾反馈：“bin位置仍然是oracle，我希望是是基于视觉检测，可以假定有box和bin的形状先验。可以复用和box相关的检测代码吗，比如说可以形成一套通用的检测类？”“当初始状态带有旋转，pick and place的过程中，方块会发生打滑。这个可以暂时不解决。”
+
+bin 视觉定位尚未实现，当前配置过滤不是检测。后续复用同帧输入、掩膜、反投影、候选和质量结果结构，box 与空心 bin 分别拟合几何，不能直接把实心盒体估计器换尺寸来检测容器。检测和任务接入分别安排在 Week 4.1 Stage 3、4；打滑优化暂缓，不随检测改动调摩擦/力/速度。前次提出的适度升高四壁安排在 bin 几何阶段，届时同步模型与形状先验并验证，当前仍为 12 mm。
+
+### 6.3 持续视觉和固定 TCP 推算
+
+> 原始追问：“物体被夹起来的时候是什么情况，为什么观察pose不见更新？是因为视觉无法判断y轴变化吗？”、“当前放宽准入之后，可以重新启用了吗？”、“你认为是否还需要以tcp_box TF来实时更新位置呢？”、“如果同时拥有估计的和校验的，采用哪个？”
+
+Stage 5 pose 不更新源于主动暂停处理；Stage 6 恢复附着期 RGB-D。最后合格视觉和同序号 TCP 初始化 `T_tcp_box = inverse(T_world_tcp) * T_world_box_measured`，随后执行位置为 `T_world_tcp_now * T_tcp_box`。不查询真值 box TF，也不将视觉偏差自动吸收进相对变换。合格新视觉用该帧 TCP 做历史时刻对照，而不是拿旧图像位置比较当前 TCP。执行使用推算，视觉用于独立校验；多帧偏差依然继续。
+
+| episode 时段（vision 模式） | 执行/验收使用的物体位姿 | 同时发生的视觉工作 |
+| --- | --- | --- |
+| 附着前：HOME/PREGRASP/GRASP/CLOSE | 新的合格视觉；首次附着时从最后合格视觉及对应 TCP 初始化偏移 | 配对、掩膜、几何拟合、唯一性和质量准入；长期无合格结果可能 OBSERVATION_STALE |
+| 已 ATTACHED：LIFT/PREPLACE/PLACE，以及实际释放前 | 当前 TCP × 固定偏移；阶段 waypoint 使用冻结的物体位姿 | 合格视觉与同一图像时刻的 TCP 推算作比较；拒绝/遮挡不改偏移、不单独停机 |
+| 实际释放后：OPEN/RETRACT/VERIFY | 清除旧准入缓存，等待释放后的新合格视觉；VERIFY 再检查稳定入 bin | 继续测量物体实际落点；此时推算不能替代最终验收 |
+
+同帧校验与实时执行是两个时间问题。例如图像在 t₀ 拍摄、结果在 t₁ 到达：残差比较用 `T_world_tcp(t₀) * T_tcp_box`，执行位置用 `T_world_tcp(t₁) * T_tcp_box`。如果将 t₀ 的视觉位置直接和 t₁ 的 TCP 比较，正常机械臂移动也会表现为偏离。两者需要相同生命周期、sequence 和精确 stamp 才能配对。
+
+实时更新物体位置不意味着实时重算阶段目标。假设进入 LIFT 时盒中心 z=0.24 m、抬升距离 0.15 m，目标应保持在 z=0.39 m。如果每次都把“当前推算盒中心 +0.15 m”作为目标，TCP 上升后目标也跟着上升，机械臂会不断追逐更高位置。`EpisodeController` 在每个阶段首次计算目标时冻结输入物体位姿；运输监测仍读取新视觉和 TCP，二者职责不同。
+
+`/task_executor/box_estimated` 与 `world→box_estimated` 明确区别于 bridge 真值 `box`。视觉消息只生产 MEASURED/REJECTED/OCCLUDED，未新增视觉 PREDICTED；推算 snapshot 中的 confidence/residual 来自初始化帧，不能当作当前视觉置信度。oracle 用真值，不依赖视觉准入；附着状态仍来自含仿真真值/接触的 bridge。
+
+局部点云先检查两个可见空间轴 ≥8 mm，再用已知盒表面残差/内点率验证。PCA 轴可能沿盒面对角方向，投影上界采用盒体对角线加 15 mm。yaw 在 0°~85° 按 5° 搜索，以 90° 对称归一化；离桌中心 z 使用最高点减半高，依赖可见顶面，不能宣称任意倾斜 6D 可恢复。bin 位姿来自配置先验，视觉不估计 bin。替代方案是在线融合/更新偏移，可减小初始误差但可能把滑移解释为校正；本阶段保留固定偏移与独立残差以便观察和测试。
+
+> 收尾反馈：“夹持状态下的state_reason一直是missing robot transformation，此时的视觉观测不见更新，全是0；”“同时拥有估计和校验的情况，我看不到，它并没有在object pose中发送。”
+
+`MISSING_ROBOT_TRANSFORM` 是输入/同步失败，不是“机械臂遮挡导致无候选”。当前 REJECTED 不填有效 pose，默认零值也不表示物体在 world 原点；只有合格 MEASURED 才能用作视觉校验。TCP 执行推算在 `/task_executor/box_estimated`（PoseStamped），原始视觉在 `/object_pose_estimator/object_pose`（VisionObjectPose），后者从未携带双源比较。前者又没有 source、生命周期和校验偏差字段，用户确实无法由单条消息判断当前在使用什么、视觉是否在校验。
+
+静态审阅发现 `onTf()` 用同 stamp 的新集合覆盖旧集合，而 executor 同时广播 `box_estimated`：若这条 TF 在机器人 TF 后到达，`hasRobotTf()` 会失去原集合。默认 TF 缓存还只保留 30 个 stamp（100 Hz 下约 0.3 s），需要与 0.5 s 墙钟等待、仿真速度及回调积压一起验证。这是代码可见的故障路径和优先假设，尚未用本次用户场景实跑确认根因；已撤销的修改不能当修复证据。Week 4.1 Stage 1 专门复现、修复并验证，不顺带扩展感知。
+
+### 6.4 掉落与主动 place 的证据边界
+
+> 用户要求：“中途因为少许遮挡导致视觉失效了呢？……视觉一直开着的还有一个好处就是，box掉落下来之后可以及时发现。你想一个鲁棒的方案。”并明确：“可疑偏离和疑似掉落合并成一个状态”、“即使是多帧偏离，没有导致掉落也不应该停止”。随后追问：“对于掉落，你打算如何跟最终的place做区分？”
+
+| 监测状态 | 证据与动作 |
+| --- | --- |
+| NORMAL | 视觉与同帧推算位置相容，继续 |
+| VISION_UNAVAILABLE | 遮挡、拒绝、迟到或无合格测量；清掉落累计，继续当前 TCP 推算 |
+| ANOMALY_PENDING | 偏离 >25 mm；合并可疑偏离和疑似掉落，不单凭持续偏离停机 |
+| CONFIRMED_DROP | 分离 >65 mm、相对推算下移 >45 mm，并持续相对下坠（每样本 >1 mm）或支撑且下移 >75 mm；累计 ≥0.3 s，锁存终止 |
+
+视觉必须唯一、质量合格、同 session/generation/sequence 与精确 stamp、年龄 ≤0.35 s；超过 0.35 s 的间隔不拼成持续证据。完全遮挡时不能确认掉落。support_prior_used 仅表示先验允许，不证明接触，因此“支撑后掉落”是几何启发式而非物理接触证明。
+
+主动 place 以 OPEN 命令和实际宽度 >45 mm 共同建立时间边界；只有边界之后的证据可由主动释放解释。仅命令还没开爪不能豁免掉落，晚到的开爪反馈也不能解释更早的证据（单测覆盖）。确认掉落后保持实际关节和当前宽度，输出 CONFIRMED_DROP，零重试、不自动张爪。该动作在仿真中验证，尚非真机安全停止方案。
+
+成功还需 RELEASED、主动开启反馈、新观测中的旋转完整 box 在 bin 内，XY 留 3 mm、最低角点距底面 ≤8 mm，至少 3 个独立稳定样本且跨 0.2 s；相邻移动 <5 mm、姿态 <5°、间隔 ≤0.35 s。正常释放后的下坠属于 place，但落到 bin 外或未稳定不能成功。释放时清历史并拒绝边界之前的序号；迟到的释放前掉落若在清理后才到，仍可能丢失，这一边界未完整验收。
+
+| 具体情形 | 判定依据与结果 |
+| --- | --- |
+| PLACE 时 TCP 带着盒体一起下降，尚未张爪 | 对同帧推算的相对残差仍小；world z 下降本身不是掉落证据 |
+| 中途遮挡，或连续测量横向偏离 40 mm | 分别为 VISION_UNAVAILABLE / ANOMALY_PENDING，继续执行；不凭持续偏离终止 |
+| 闭爪时盒体与推算分离并相对下坠，证据满足持续门 | CONFIRMED_DROP，即使最后落进 bin 也不能当主动 place 成功 |
+| 已发送 OPEN，但实际宽度尚未超过 45 mm | 尚未建立主动释放边界，不能仅靠命令豁免掉落 |
+| OPEN 后实际张爪，再出现分离和下坠 | 可解释为预期释放；仍须等待新的稳定入 bin 证据，不能立即成功 |
+| 正常释放，中心靠近目标但卡壁、越界或仍运动 | 稳定性/完整包含门不通过；不能用中心 XY 距离宣布成功 |
+
+代码阅读时把三层状态分开：bridge 的 ATTACHED/RELEASED 表示附着生命周期；视觉 MEASURED/REJECTED/OCCLUDED 表示这一帧的证据；运输四态表示 executor 如何解释偏离。MEASURED 既不保证附着，也不保证入 bin；bridge 锁存 ATTACHED 也不证明闭爪后绝无掉落。
+
+> 收尾反馈：“掉落与主动place的证据边界，这四个检测状态在哪里发送了，object pose里没有；”并要求“不要引入太多冗余的监控”。
+
+目前四态发布在 `/task_executor/transport_state`，类型 `std_msgs/msg/String`，只有状态名，没有 stamp/生命周期/判定证据。`intentionalRelease()` 时间边界和 `placement_valid` 是内部字段，`object_pose` 不发送它们。更严重的是状态发布位于 `collectObservation()` 成功构造 snapshot 之后，非附着期视觉拒绝而提前返回时不会刷新；`release()` 也不清四态，单看旧 NORMAL 不能证明当下仍在有效校验。
+
+Week 4.1 Stage 2 将一个 executor 结构化状态出口作为用户观察入口，保留 estimator 原始视觉语义和 RViz 所需 pose/TF；旧 String 不长期作为第二套状态权威。聚合消息展示来源、有效性、时间关联、偏差、运输是否适用及释放/放置原因，不新增第五种运输状态或第二套推断器。实际时序修复留到 Stage 5，不能仅新增字段就宣称边界正确。
+
+### 6.5 失败模式与验证手段
+
+| 失败模式 | 观察与验证 |
+| --- | --- |
+| 附着期遮挡/长期偏离 | 联合看 bridge 当前 TCP、box_estimated、transport_state 与 outcome；注入无效/40 mm 偏离应继续，不能只看视觉状态 |
+| 可见闭爪掉落 | 合格测量与同帧 TCP 分离、下移及持续证据；合成注入验证终止链，真实物理滑移实验仍待补 |
+| 非附着期无视觉 | 不使用旧 pose 冒充新测量，长期拒绝可 OBSERVATION_STALE；默认/旋转场景回归检查候选日志与新鲜度 |
+| bin 几何或碰撞不同步 | 已知表面过滤不能代替真实碰撞；查看 MuJoCo body/geom 掩码及真值落稳高度 |
+| 最终 XY 正确但仍下坠/在壁上 | 完整 box 包含、底面距离与多帧稳定门；不能只看目标中心距离 |
+| 异常四元数/旧生命周期/迟到帧 | 有限性和单位四元数检查、session/generation/序号/stamp 门；invalid_pose 注入不能造成节点崩溃 |
+| 推算误差或运输视觉不可用 | 固定变换可能保留初始中心偏差，不能自证正确；早期扩展回放附着期 5 帧全拒绝，最终默认回放 4 帧均 MEASURED，两者都不足以证明通用掉落识别能力 |
+
+### 6.6 排查记录
+
+本节保留修复前证据，用来解释设计变更，不与 6.1 的最终结果相加。
+
+| 历史版本/实验 | 当时结果 | 后续处理 |
+| --- | --- | --- |
+| 新鲜度/释放门修正之前 | 扩展视觉 14/20 | 修正观测新鲜度及释放验收时序 |
+| 上述修正后、PCA 投影上界修正前 | 扩展视觉 15/20，失败为 OBSERVATION_STALE | 旋转方形投影不应按单边长度限制 |
+| PCA 上界修正后、confidence 门同步前 | 扩展视觉 16/20，失败配置 8、9、14、15 | 排除未达到执行 confidence 门的残留候选后再判断唯一性 |
+| 早期扩展 case 9 独立回放 | 20 帧：14 MEASURED、6 REJECTED；5 帧附着期均 REJECTED | 说明持续处理但运输测量不可用；后续新默认录制结果见 6.1 |
+
+**bin 看得到却接不住。** 首次 geom 碰撞掩码打开后，oracle 出现 PLACE_MISSED，vision 释放后长期拒绝。真值显示盒体掉到桌面而非 bin 底。MuJoCo 编译时还有 body_contype/body_conaffinity 缓存，运行中只改 geom 会被 body 粗筛跳过；同步更新 body 缓存后 oracle 扩展 20/20、零重试。
+
+**旋转候选尺寸误拒绝。** 新鲜度/释放门修正前扩展视觉仅 14/20，之后 15/20；日志显示 197~208 点候选仍为 MODEL_EXTENT_MISMATCH。4 cm 方形沿 PCA 的斜轴可投影到约 56.6 mm，原边长加 15 mm 的 55 mm 上界并非旋转不变量。改为盒对角线投影上界，同时保留拟合残差和唯一性；新增旋转顶面单测验证。不因存在单物体先验就随意选择最大簇，多合格候选仍明确拒绝，诊断汇总每个候选位置与质量。
+
+**低质量残留抢先造成歧义。** 投影修正后扩展组 16/20，失败配置 8、9、14、15 为 OBSERVATION_STALE。日志显示真实盒体 confidence≈0.92~0.95，旁边高处的机器人残留 confidence≈0.23~0.35；它们无法通过 executor 的 0.5 门，却先通过 tracker 的 0.2 门造成 MULTIPLE_CANDIDATES。scene 默认门调整为 0.5，demo 与 executor 参数同步；保留多合格候选拒绝，不按最大簇选目标。
+
+**时序不能混用。** 独立视觉先与历史 TCP 按相同 sequence/stamp 配对，执行再用当前 TCP；释放边界拒绝旧序号，入 bin 样本需要真实跨时间的稳定性，不能靠快速消费积压帧凑三次。录制 TF 过滤掉 executor 的 box_estimated，防止覆盖同 stamp 的机器人 TF。初次规范检查发现 Python 续行缩进问题，修正后全量测试通过。
+
+**收尾审阅（2026-10-04，静态检查，未追加功能修复）。** 在线 TF 接收仍会覆盖同 stamp 集合，而 recording 过滤 `box_estimated` 的做法只是让离线输入不再包含这一广播；它没有修复在线路径，反而会使 replay 看不到该类问题。用户报告的持续拒绝需要完整在线 trace 验证。executor 的 `vision_cache_` 只有写入、裁剪、清空，没有读取，是明确的冗余缓存；Week 4.1 Stage 2 清理。`grasp_state/attachment_valid` 是 bridge 状态副本，适合在接口迁移时一并去冗余。controller 的阶段冻结与 diff_ik 的 PREGRASP 锁存作用域不同，不能仅凭“都有缓存”删除；改前需保留跨阶段抓取参考与阶段目标稳定的测试。审阅结论不等于全量代码无缺陷。
+
+### 6.7 你没问但值得注意的
+
+1. **可观测性和实时性分开。** 新默认录制独立回放 22 帧（20 MEASURED、2 REJECTED），含附着输入；早期扩展 case 9 的五帧附着结果全拒绝。完全遮挡不能证明没有掉落。录制 case 9 的深度到达→结果耗时 p50≈287 ms、p95≈539 ms，含软件渲染并发与记录开销，不含相机渲染前时间，也不是独立性能基线；processing_ms 更不能代表完整端到端延迟。
+2. **预测质量有来源。** 初始化视觉质量不会随 TCP 推算自动变成当前质量，调试必须同时看 transport_state 与原视觉 stamp；未来数据接口应显式带来源与初始测量年龄。
+3. **释放边界需要补迟到证据实验。** 纯监测单测验证开爪前后时间顺序，但 ROS 适配层清历史会丢掉迟到的释放前证据；不能把单测结论外推为已覆盖整条异步链。
+4. **配置能力不同于泛化验收。** 初始 roll/pitch 可指定而物体会落稳；bin 有倾斜限制。固定回归集合通过也不能覆盖桌边、极限可达性、任意倾角、物理滑落或真机。
+
+### 6.8 本阶段边界与后续
+
+保留 Stage 6 原计划中仍有作用的 oracle 对照、结构化 outcome、reset/生命周期检查、视觉质量门和离线同帧回放；多物体、多颜色为 HOLD UP。未接入 VLA、LeRobot 导出、MoveIt、动态 bin 视觉估计或真机。场景参数和逐帧证据为后续数据接口提供可复现基础，并未宣称完整数据集契约已完成。
+
+> 用户收尾决定：“我们的目标：单摄像头，box和bin随机放在桌面上，具体的位姿要通过视觉获得，然后实现离线的IK pick and place”“总的计划需要扩写和进一步分阶段，但是stage6可以到此结束。”
+
+Stage 6 于 2026-10-04 收尾，后续进入独立的 [Week 4.1](week4.1.md) 学习周期，Stage 从 1 重新编号：1 修复在线同步并建立预期轨迹；2 收敛监控出口；3 共享几何检测与 bin 视觉定位；4 双视觉锁存接入现有离线 IK；5 附着/释放证据与迟到时序；6 随机场景过程验收。旋转打滑优化暂缓，完全遮挡不能保证发现掉落；固定相对变换不吸收偏离。Week 4.5 仍 HOLD UP，不恢复多物体/多颜色或提前加入 VLA。
+
+基线决策保留 [ADR 014](../../docs/adr/014-configurable-bin-continuous-transport-monitor.md) 快照；后续改变 bin 来源或监控接口时新增 ADR，不改写旧决策。本轮仅整理事实、审阅与计划，Stage 6 未执行 commit。
+
+> 2026-10-05 补注：上一段的 6 阶段编号和“收敛监控出口”等安排已被取代，见 [6.9](#69-回退决定与存档)；新增的 ADR 即 [ADR 015](../../docs/adr/015-rollback-stage6-perception-side-transport-diagnostics.md)。
+
+### 6.9 回退决定与存档
+
+> 用户收尾后的评审结论（2026-10-04，与另一模型讨论后）：Stage 6 把“场景配置和实体 bin”“搬运期间的视觉辅助估计”“掉落、主动 place、释放边界和最终稳定性判定”三类事混在一起；第三类还没有足够成熟的观测基础，却已经扩展了 task_executor、TransportMonitor、FSM、EpisodeOutcome 和 probe，改动范围和状态数量都膨胀。更合适的做法是以 Stage 5 的视觉 pick and place 为基线，只保留真正有价值的增量。
+
+用户据此决定舍弃 Stage 6 的大部分改动，并要求把保留的部分嵌入 Week 4.1 并进一步拆细阶段，“尽量别塞到一起”。
+
+**做了什么。** Stage 6 工作区原样提交到分支 `archive/stage6-transport-monitor`（提交 `3587adf`，不合并、不推送），`main` 的代码和 [architecture.md](../../docs/architecture.md) 回到 Stage 5 提交 `e37dcb2`。本文件只保留笔记：本章记录、ADR 014 快照，以及把前文架构视图还原为 Stage 5 的描述（那些段落在 Stage 6 期间被改成了不再成立的“当前代码”）。
+
+**回退的理由（详见 [ADR 015](../../docs/adr/015-rollback-stage6-perception-side-transport-diagnostics.md)）。**
+
+1. 第三类内容缺少可观测证据，状态机先于证据出现。
+2. 20/20 回归与合成注入没有证明过程可靠，6.1 已记录这一批评。
+3. 共享的 `scene_config.hpp` 让 perception 和 executor 都能读到 box/bin 位姿，与“bin 由视觉获得”冲突。
+
+**6.0~6.8 里的旧 Week 4.1 编号 → 现行 18 阶段计划。**
+
+| 6.0~6.8 引用的旧阶段 | 旧内容 | 现行去向（[Week 4.1](week4.1.md)） |
+| --- | --- | --- |
+| 旧 Stage 1 | 修复在线 TF 同步 | Stage 2 记录附着期证据分布；Stage 3 合并同 stamp TF |
+| 旧 Stage 2 | executor 侧聚合状态出口 `object_status`，展示执行、视觉、同帧校验和四态 | 取消 executor 聚合；视觉测量与 TCP 推算同帧比较放进 perception 的 `object_pose`（Stage 4、6） |
+| 旧 Stage 3 | 共享几何管线与 bin 视觉定位，壁高 25 mm | Stage 7（壁高）、8~10（bin 拟合、在线定位、box/bin 归属分离） |
+| 旧 Stage 4 | 双视觉锁存接入现有 IK | Stage 11~15（旋转 box、锁存、place 目标、grasp_yaw、入 bin 判据） |
+| 旧 Stage 5 | 附着与释放的证据边界 | 附着不读真值：Stage 16；掉落与释放边界：Stage 17，可选，以真实偏差数据为入口 |
+| 旧 Stage 6 | 随机场景过程验收 | Stage 18 |
+
+**6.0~6.8 中仍然有用的内容。** 它们是实现过程中实测得到的，在对应阶段重新用到时仍需重新验证，不能当作已通过：MuJoCo 的 body/geom 碰撞缓存必须同步（6.6）；旋转方块的 PCA 投影上界应按盒体对角线而非边长（6.6）；vision 的 tracker 门（0.2）与 executor 门（0.5）不一致会造成多候选（6.6）；释放时清缓存会丢迟到证据（6.4、6.7）；`onTf()` 对同 stamp 覆盖集合的静态审阅结论（6.3）。
+
+**6.0~6.8 中不再成立的内容。** 持续视觉在运输期由 executor 监测、四态与 `CONFIRMED_DROP`、`transport_state` 话题、`box_estimated` 的 executor 发布、稳定入 bin 的多帧判定、“一套配置供三个节点使用”：这些在 `main` 上都不存在，也不是 Week 4.1 的目标，其中后两项被 ADR 015 明确取代。
+
 ## 12. Week 4.5 交接
 
-Stage 4 已提供带同帧机器人掩膜的视觉输入；Stage 5~6 完成并通过完整视觉抓放验收后，Week 4.5 才接收三类稳定输入：带证据状态的视觉 observation、oracle observation 和 episode 生命周期事件。Week 4.5 不改变视觉算法，而是定义这些输入怎样被记录、回放并交给传统规划器或 learned policy。具体计划见 [week4.5.md](week4.5.md)。
+Week 4.5 当前为 **HOLD UP**；用户暂不做多物体、多颜色任务，其原计划仅保留历史参考，不作为 Stage 6 的下一步。当前后续主线是 [Week 4.1](week4.1.md) 的单摄像头双目标视觉定位、现有离线 IK 接入及过程验收。未来若恢复策略/数据接口工作，再围绕单物体实际需求重写 [week4.5.md](week4.5.md)，保留观测来源、episode 生命周期及实际动作记录等有用契约。
 
 ## 13. 悬挂问题与反向清单
 

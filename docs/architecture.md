@@ -29,7 +29,7 @@
 
 默认使用 oracle 观测与 diff_ik waypoint，keyframe 保留对照。固定 oracle 场景曾通过回归；完整 vision 抓放尚未验收。
 
-当前 Stage 5 已简化为 bridge 权威附着、视觉暂停/释放重测与 executor 缓存准入，见 [Week 4 Stage 5](../Job_guides/my_study/week4.md#stage-5视觉接口收紧与简化状态机)。四包构建/测试通过；2026-10-03 修复抬升前附着循环依赖并补 LIFT 到位门，见 [ADR 012](adr/012-prelift-attachment-confirmation.md)。oracle 持续注入视觉拒绝的真实回归为 20/20 成功、零重试，两包 build/test 通过（工作区汇总 492 tests、0 errors、0 failures、71 skipped）；详情见 Week 4 Stage 5；当前接口 replay 和完整 vision episode 未执行。旧独立夹持与 TCP 预测实验只作为历史证据；[ADR 009](adr/009-robot-aware-stateful-vision.md)、[ADR 010](adr/010-grasp-conditioned-object-state.md)、[ADR 011](adr/011-vision-object-pose-contract-tightening.md) 保留当时决策快照，不能代替下文当前契约。Stage 6 联调验收、MoveIt 规划与 learned policy 尚未完成。
+当前 Stage 5 已简化为 bridge 权威附着、视觉暂停/释放重测与 executor 缓存准入，见 [Week 4 Stage 5](../Job_guides/my_study/week4.md#stage-5视觉接口收紧与简化状态机)。四包构建/测试通过；2026-10-03 修复抬升前附着循环依赖并补 LIFT 到位门，见 [ADR 012](adr/012-prelift-attachment-confirmation.md)。oracle 持续注入视觉拒绝的真实回归为 20/20 成功、零重试，两包 build/test 通过（工作区汇总 492 tests、0 errors、0 failures、71 skipped）；详情见 Week 4 Stage 5；当前接口 replay 和完整 vision episode 未执行。旧独立夹持与 TCP 预测实验只作为历史证据；[ADR 009](adr/009-robot-aware-stateful-vision.md)、[ADR 010](adr/010-grasp-conditioned-object-state.md)、[ADR 011](adr/011-vision-object-pose-contract-tightening.md) 保留当时决策快照，不能代替下文当前契约。原 Stage 6（可配置 bin 与运输监控）已废弃并回退，不在代码中，见 [Week 4 6.9](../Job_guides/my_study/week4.md#69-回退决定与存档) 与 [ADR 015](adr/015-rollback-stage6-perception-side-transport-diagnostics.md)；后续改动按 [Week 4.1](../Job_guides/my_study/week4.1.md) 的阶段计划逐个加入，每个阶段通过后再更新本页。MoveIt 规划与 learned policy 尚未完成。
 
 ## 2. 模型与场景
 
