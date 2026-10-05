@@ -1669,7 +1669,7 @@ rg -n 'Stage 5|stage5|]\(#' Job_guides/my_study/week4.md
 
 ## Stage 6：可配置单物体入 bin 与搬运监测
 
-> **状态（2026-10-05）：本章记录的实现已回退，不在 `main` 上。** 6.0~6.8 是回退前的原始记录，其中的测试数、20/20 等结果只对归档分支 `archive/stage6-transport-monitor` 的代码成立，不适用于 `main`。6.0~6.8 里引用的 Week 4.1 Stage 编号对应上一版 6 阶段计划，已被 18 阶段计划取代，对照见 [6.9](#69-回退决定与存档)。下文中指向仅存在于归档分支的文件（`scene_config.hpp`、`transport_monitor.hpp`、`test_transport_monitor.cpp`、`stage6_probe.py`）的链接已改为纯文本；指向 `main` 上仍存在的文件的链接，描述的也是归档代码里的行为，与 `main` 当前实现不一定一致。
+> **状态（2026-10-05）：本章记录的实现已回退，不在 `main` 上。** 6.0~6.8 是回退前的原始记录，其中的测试数、20/20 等结果只对归档分支 `archive/stage6-transport-monitor` 的代码成立，不适用于 `main`。6.0~6.8 里引用的 Week 4.1 Stage 编号对应最初的 6 阶段计划，已被现行计划取代，对照见 [6.9](#69-回退决定与存档)。下文中指向仅存在于归档分支的文件（`scene_config.hpp`、`transport_monitor.hpp`、`test_transport_monitor.cpp`、`stage6_probe.py`）的链接已改为纯文本；指向 `main` 上仍存在的文件的链接，描述的也是归档代码里的行为，与 `main` 当前实现不一定一致。
 
 ### 6.0 一句话总结
 
@@ -1912,16 +1912,16 @@ Stage 6 于 2026-10-04 收尾，后续进入独立的 [Week 4.1](week4.1.md) 学
 2. 20/20 回归与合成注入没有证明过程可靠，6.1 已记录这一批评。
 3. 共享的 `scene_config.hpp` 让 perception 和 executor 都能读到 box/bin 位姿，与“bin 由视觉获得”冲突。
 
-**6.0~6.8 里的旧 Week 4.1 编号 → 现行 18 阶段计划。**
+**6.0~6.8 里的旧 Week 4.1 编号 → 现行计划。** 6.0~6.8 引用的是 2026-10-04 的第一版 6 阶段计划；2026-10-05 先重排为 18 阶段，当天又按 [ADR 016](../../docs/adr/016-initial-pose-detection-and-gripper-width-carry-check.md) 重排为 14 阶段（视觉只做初始位姿检测，搬运期看夹爪开度）。现行去向：
 
 | 6.0~6.8 引用的旧阶段 | 旧内容 | 现行去向（[Week 4.1](week4.1.md)） |
 | --- | --- | --- |
-| 旧 Stage 1 | 修复在线 TF 同步 | Stage 2 记录附着期证据分布；Stage 3 合并同 stamp TF |
-| 旧 Stage 2 | executor 侧聚合状态出口 `object_status`，展示执行、视觉、同帧校验和四态 | 取消 executor 聚合；视觉测量与 TCP 推算同帧比较放进 perception 的 `object_pose`（Stage 4、6） |
-| 旧 Stage 3 | 共享几何管线与 bin 视觉定位，壁高 25 mm | Stage 7（壁高）、8~10（bin 拟合、在线定位、box/bin 归属分离） |
-| 旧 Stage 4 | 双视觉锁存接入现有 IK | Stage 11~15（旋转 box、锁存、place 目标、grasp_yaw、入 bin 判据） |
-| 旧 Stage 5 | 附着与释放的证据边界 | 附着不读真值：Stage 16；掉落与释放边界：Stage 17，可选，以真实偏差数据为入口 |
-| 旧 Stage 6 | 随机场景过程验收 | Stage 18 |
+| 旧 Stage 1 | 修复在线 TF 同步 | 取消：新方向没有搬运期视觉，TF 覆盖隐患记入悬挂项 |
+| 旧 Stage 2 | executor 侧聚合状态出口，展示执行、视觉、同帧校验和四态 | 取消：没有搬运期视觉位姿，也不做同帧比较 |
+| 旧 Stage 3 | 共享几何管线与 bin 视觉定位，壁高 25 mm | Stage 3（误差表）、4（壁高，条件阶段）、6（bin 检测落地） |
+| 旧 Stage 4 | 双视觉锁存接入现有 IK | Stage 5（box 检测落地）、7（锁存）、8（place 目标）、9（`grasp_yaw`） |
+| 旧 Stage 5 | 附着与释放的证据边界 | Stage 12（开度窗口）、13（附着确认不读真值）；掉落状态机不做 |
+| 旧 Stage 6 | 随机场景过程验收 | Stage 14 |
 
 **6.0~6.8 中仍然有用的内容。** 它们是实现过程中实测得到的，在对应阶段重新用到时仍需重新验证，不能当作已通过：MuJoCo 的 body/geom 碰撞缓存必须同步（6.6）；旋转方块的 PCA 投影上界应按盒体对角线而非边长（6.6）；vision 的 tracker 门（0.2）与 executor 门（0.5）不一致会造成多候选（6.6）；释放时清缓存会丢迟到证据（6.4、6.7）；`onTf()` 对同 stamp 覆盖集合的静态审阅结论（6.3）。
 
