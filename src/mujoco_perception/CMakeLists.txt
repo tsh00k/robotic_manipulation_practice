@@ -28,7 +28,7 @@ find_package(tf2_msgs REQUIRED)
 
 add_library(mujoco_perception_geometry
   src/geometry_pipeline.cpp src/robot_mask.cpp src/object_tracker.cpp
-  src/depth_window.cpp src/initial_box_detector.cpp)
+  src/depth_window.cpp src/initial_box_detector.cpp src/initial_box_estimator.cpp)
 target_include_directories(mujoco_perception_geometry PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
@@ -85,6 +85,8 @@ if(BUILD_TESTING)
   target_link_libraries(test_depth_window mujoco_perception_geometry)
   ament_add_gtest(test_initial_box_detector test/test_initial_box_detector.cpp)
   target_link_libraries(test_initial_box_detector mujoco_perception_geometry Eigen3::Eigen)
+  ament_add_gtest(test_initial_box_estimator test/test_initial_box_estimator.cpp)
+  target_link_libraries(test_initial_box_estimator mujoco_perception_geometry Eigen3::Eigen)
 
   ament_add_gtest(test_object_tracker test/test_object_tracker.cpp)
   target_link_libraries(test_object_tracker mujoco_perception_geometry)

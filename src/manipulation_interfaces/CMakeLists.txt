@@ -12,6 +12,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/BridgeObservation.msg"
   "msg/VisionObjectPose.msg"
   "msg/RobotMaskDiagnostics.msg"
+  "msg/InitialBoxCandidate.msg"
+  "msg/InitialBoxPose.msg"
   "srv/ResetScene.srv"
   DEPENDENCIES sensor_msgs geometry_msgs std_msgs
 )

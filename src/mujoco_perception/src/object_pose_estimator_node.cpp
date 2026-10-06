@@ -30,6 +30,7 @@
 #include "ament_index_cpp/get_package_share_directory.hpp"
 #include "geometry_msgs/msg/transform_stamped.hpp"
 #include "manipulation_interfaces/msg/bridge_observation.hpp"
+#include "manipulation_interfaces/msg/initial_box_pose.hpp"
 #include "manipulation_interfaces/msg/robot_mask_diagnostics.hpp"
 #include "manipulation_interfaces/msg/vision_object_pose.hpp"
 #include "pcl_conversions/pcl_conversions.h"
@@ -43,6 +44,7 @@
 #include "tf2_ros/buffer.h"
 #include "tf2_ros/transform_listener.h"
 #include "mujoco_perception/geometry_pipeline.hpp"
+#include "mujoco_perception/initial_box_estimator.hpp"
 #include "mujoco_perception/robot_mask.hpp"
 #include "mujoco_perception/object_tracker.hpp"
 
@@ -128,16 +130,24 @@ public:
       "tracking.min_confidence", tracker_config_.min_confidence);
     tracker_ = std::make_unique<ObjectTracker>(tracker_config_);
 
+    // Initial box detector (Week 4.1 Stage 5): the table height, the box and the depth range
+    // are the ones the older pipeline already uses, so there is one source of truth for them.
+    InitialBoxConfig initial_box_config;
+    initial_box_config.plane_z_m = config_.plane_z_m;
+    initial_box_config.half_extents = box_model_.half_extents;
+    initial_box_config.depth_min_m = config_.depth_min_m;
+    initial_box_config.depth_max_m = config_.depth_max_m;
+    const int initial_box_frames = declare_parameter("initial_box.frames", 10);
+    if (initial_box_frames < 1) {
+      throw std::invalid_argument("initial_box.frames must be at least 1");
+    }
+    initial_box_estimator_ = std::make_unique<InitialBoxEstimator>(
+      static_cast<std::size_t>(initial_box_frames), initial_box_config);
+
     const auto sensor_qos = rclcpp::SensorDataQoS();
-    rgb_sub_ = create_subscription<sensor_msgs::msg::Image>(
-      "/mujoco_bridge/camera/color/image_raw", sensor_qos,
-      std::bind(&ObjectPoseEstimatorNode::onRgb, this, std::placeholders::_1));
     depth_sub_ = create_subscription<sensor_msgs::msg::Image>(
       "/mujoco_bridge/camera/depth/image_raw", sensor_qos,
       std::bind(&ObjectPoseEstimatorNode::onDepth, this, std::placeholders::_1));
-    color_info_sub_ = create_subscription<sensor_msgs::msg::CameraInfo>(
-      "/mujoco_bridge/camera/color/camera_info", sensor_qos,
-      std::bind(&ObjectPoseEstimatorNode::onColorInfo, this, std::placeholders::_1));
     depth_info_sub_ = create_subscription<sensor_msgs::msg::CameraInfo>(
       "/mujoco_bridge/camera/depth/camera_info", sensor_qos,
       std::bind(&ObjectPoseEstimatorNode::onDepthInfo, this, std::placeholders::_1));
@@ -149,6 +159,8 @@ public:
       std::bind(&ObjectPoseEstimatorNode::onTf, this, std::placeholders::_1));
     pose_pub_ = create_publisher<manipulation_interfaces::msg::VisionObjectPose>(
       "~/object_pose", rclcpp::QoS(10));
+    initial_box_pub_ = create_publisher<manipulation_interfaces::msg::InitialBoxPose>(
+      "~/initial_box_pose", rclcpp::QoS(10));
     predicted_pub_ = create_publisher<sensor_msgs::msg::Image>(
       "~/debug/robot_predicted_depth", sensor_qos);
     mask_pub_ = create_publisher<sensor_msgs::msg::Image>(
@@ -166,32 +178,18 @@ public:
 
     RCLCPP_INFO(
       get_logger(),
-      "RGB-D geometry estimator ready: exact timestamp matching, plane z=%.3fm, "
-      "box %.3fx%.3fx%.3fm",
+      "Depth geometry estimator ready: exact timestamp matching, plane z=%.3fm, "
+      "box %.3fx%.3fx%.3fm, initial box from the mean of %d frames",
       config_.plane_z_m, 2.0 * box_model_.half_extents.x(),
-      2.0 * box_model_.half_extents.y(), 2.0 * box_model_.half_extents.z());
+      2.0 * box_model_.half_extents.y(), 2.0 * box_model_.half_extents.z(), initial_box_frames);
     RCLCPP_INFO(get_logger(), "Robot mask loaded %zu visual meshes", robot_meshes_.size());
   }
 
 private:
-  void onRgb(const ImageConstPtr message)
-  {
-    rgb_frames_[stampKey(message->header.stamp)] = message;
-    trim(rgb_frames_);
-    tryProcess(stampKey(message->header.stamp));
-  }
-
   void onDepth(const ImageConstPtr message)
   {
     depth_frames_[stampKey(message->header.stamp)] = message;
     trim(depth_frames_);
-    tryProcess(stampKey(message->header.stamp));
-  }
-
-  void onColorInfo(const CameraInfoConstPtr message)
-  {
-    color_info_[stampKey(message->header.stamp)] = message;
-    trim(color_info_);
     tryProcess(stampKey(message->header.stamp));
   }
 
@@ -214,9 +212,7 @@ private:
     }
     if (lifecycle_known_ && message->bridge_session != bridge_session_) {
       retired_sessions_.insert(bridge_session_);
-      rgb_frames_.clear();
       depth_frames_.clear();
-      color_info_.clear();
       depth_info_.clear();
       tf_frames_.clear();
     }
@@ -226,6 +222,7 @@ private:
       observations_.clear();
       pending_since_.clear();
       processed_.clear();
+      initial_box_estimator_->reset();  // another episode: the box is somewhere else
     }
     lifecycle_known_ = true;
     const auto previous_attachment = attachment_state_;
@@ -246,12 +243,12 @@ private:
       // Release starts a new visual observation episode. Do not process RGB-D
       // frames captured while the estimator was intentionally resting.
       tracker_->reset(bridge_session_, generation_);
-      rgb_frames_.clear();
       depth_frames_.clear();
-      color_info_.clear();
       depth_info_.clear();
       pending_since_.clear();
       processed_.clear();
+      // The box has been carried: whatever the window holds is a picture of the old scene.
+      initial_box_estimator_->reset();
     }
     const Stamp key = stampKey(message->joint_state.header.stamp);
     observations_[key] = message;
@@ -307,6 +304,9 @@ private:
           publishMaskDiagnostics(
             depth->second->header, *observation->second, {}, {}, 0.0,
             rejectionReasonName(RejectionReason::kMissingRobotTransform));
+          publishInitialBoxUnusable(
+            depth->second->header, *observation->second,
+            RejectionReason::kMissingRobotTransform);
         } else {
           RCLCPP_WARN_THROTTLE(
             get_logger(), *get_clock(), 2000,
@@ -334,8 +334,7 @@ private:
     if (attachment_state_ == AttachmentState::kAttached) {
       return;
     }
-    if (processed_.count(key) != 0 || rgb_frames_.count(key) == 0 ||
-      depth_frames_.count(key) == 0 || color_info_.count(key) == 0 ||
+    if (processed_.count(key) != 0 || depth_frames_.count(key) == 0 ||
       depth_info_.count(key) == 0 || observations_.count(key) == 0)
     {
       return;
@@ -350,36 +349,28 @@ private:
       processed_.erase(processed_.begin());
     }
 
-    const auto & rgb = rgb_frames_.at(key);
     const auto & depth = depth_frames_.at(key);
-    const auto & color_info = color_info_.at(key);
     const auto & depth_info = depth_info_.at(key);
     const auto & observation = observations_.at(key);
     const auto processing_start = std::chrono::steady_clock::now();
-    const std::size_t rgb_row_bytes = static_cast<std::size_t>(rgb->width) * 3U;
     const std::size_t depth_row_bytes =
       static_cast<std::size_t>(depth->width) * sizeof(float);
     const bool matching_dimensions =
-      rgb->width == depth->width && rgb->height == depth->height &&
-      color_info->width == rgb->width && color_info->height == rgb->height &&
       depth_info->width == depth->width && depth_info->height == depth->height;
     const bool valid_frames =
-      rgb->encoding == "rgb8" && !rgb->is_bigendian && rgb->width != 0 && rgb->height != 0 &&
-      rgb->step >= rgb_row_bytes && rgb->data.size() >= rgb->step * rgb->height &&
       depth->encoding == "32FC1" && !depth->is_bigendian && depth->width != 0 &&
       depth->height != 0 && depth->step >= depth_row_bytes &&
       depth->data.size() >= depth->step * depth->height;
-    const bool valid_camera_info =
-      color_info->k[0] > 0.0 && color_info->k[4] > 0.0 &&
-      depth_info->k[0] > 0.0 && depth_info->k[4] > 0.0;
+    const bool valid_camera_info = depth_info->k[0] > 0.0 && depth_info->k[4] > 0.0;
     const bool matching_frames =
-      !rgb->header.frame_id.empty() && rgb->header.frame_id == color_info->header.frame_id &&
       !depth->header.frame_id.empty() && depth->header.frame_id == depth_info->header.frame_id;
     if (!valid_frames || !matching_dimensions || !valid_camera_info || !matching_frames) {
       publishRejected(depth->header, *observation, RejectionReason::kInvalidInput);
+      publishInitialBoxUnusable(depth->header, *observation, RejectionReason::kInvalidInput);
       return;
     }
 
+    bool initial_box_published = false;
     try {
       const auto transform = tf_buffer_.lookupTransform(
         "world", depth->header.frame_id, rclcpp::Time(depth->header.stamp),
@@ -410,11 +401,16 @@ private:
       publishMaskImages(depth->header, depth->width, depth->height, mask);
       if (!mask.valid) {
         publishRejected(depth->header, *observation, RejectionReason::kInvalidInput);
+        publishInitialBoxUnusable(depth->header, *observation, RejectionReason::kInvalidInput);
         publishMaskDiagnostics(
           depth->header, *observation, mask, {}, elapsed_ms,
           rejectionReasonName(RejectionReason::kInvalidInput));
         return;
       }
+      // The new detector looks at the same masked depth, before the older pipeline touches it.
+      updateInitialBox(
+        depth->header, *observation, mask.filtered_depth, *depth_info, world_from_optical);
+      initial_box_published = true;
       SegmentationResult segmentation = segmentDepth(
         mask.filtered_depth, *depth_info, world_from_optical, config_);
       publishCloud(depth->header, *segmentation.foreground_points, foreground_pub_);
@@ -459,10 +455,15 @@ private:
         get_logger(), *get_clock(), 2000, "Cannot transform %s to world: %s",
         depth->header.frame_id.c_str(), error.what());
       publishRejected(depth->header, *observation, RejectionReason::kMissingRobotTransform);
+      publishInitialBoxUnusable(
+        depth->header, *observation, RejectionReason::kMissingRobotTransform);
     } catch (const std::exception & error) {
       RCLCPP_WARN_THROTTLE(
-        get_logger(), *get_clock(), 2000, "RGB-D processing failed: %s", error.what());
+        get_logger(), *get_clock(), 2000, "Depth processing failed: %s", error.what());
       publishRejected(depth->header, *observation, RejectionReason::kInvalidInput);
+      if (!initial_box_published) {
+        publishInitialBoxUnusable(depth->header, *observation, RejectionReason::kInvalidInput);
+      }
     }
   }
 
@@ -542,6 +543,85 @@ private:
     output.pose.orientation.w = 1.0;
   }
 
+  // Adds a usable frame to the initial-box window and publishes where the estimate stands.
+  void updateInitialBox(
+    const std_msgs::msg::Header & header,
+    const manipulation_interfaces::msg::BridgeObservation & observation,
+    const std::vector<float> & masked_depth, const sensor_msgs::msg::CameraInfo & camera_info,
+    const Eigen::Isometry3d & world_from_optical)
+  {
+    const auto start = std::chrono::steady_clock::now();
+    const InitialBoxEstimate estimate =
+      initial_box_estimator_->update(masked_depth, camera_info, world_from_optical);
+    manipulation_interfaces::msg::InitialBoxPose output;
+    fillInitialBoxCommon(output, header, observation);
+    output.state = static_cast<uint8_t>(estimate.state);
+    output.frames_averaged = static_cast<uint32_t>(estimate.frames_averaged);
+    output.frames_required = static_cast<uint32_t>(estimate.frames_required);
+    const InitialBoxResult & detection = estimate.detection;
+    switch (estimate.state) {
+      case InitialBoxState::kWarmingUp:
+        output.reason = "WINDOW_FILLING";
+        break;
+      case InitialBoxState::kNotMeasured:
+        output.reason = initialBoxRejectionName(detection.rejection);
+        break;
+      case InitialBoxState::kMeasured:
+        output.position.x = detection.position.x();
+        output.position.y = detection.position.y();
+        output.position.z = detection.position.z();
+        output.yaw_rad = detection.yaw_rad;
+        break;
+    }
+    output.valid_depth_pixels = static_cast<uint32_t>(detection.valid_depth_pixels);
+    for (const auto & candidate : detection.candidates) {
+      manipulation_interfaces::msg::InitialBoxCandidate item;
+      item.pixels = static_cast<uint32_t>(candidate.pixels);
+      item.side_along_m = candidate.side_along_m;
+      item.side_across_m = candidate.side_across_m;
+      item.center_x = candidate.center_xy.x();
+      item.center_y = candidate.center_xy.y();
+      item.matches_box = candidate.matches_box;
+      output.candidates.push_back(item);
+    }
+    output.processing_ms = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - start).count();
+    initial_box_pub_->publish(output);
+  }
+
+  // A frame that could not be used (bad input, no robot TF): say so. It is not added to the
+  // window, so the window holds the last usable frames, and a consumer sees a gap, not a box.
+  void publishInitialBoxUnusable(
+    const std_msgs::msg::Header & header,
+    const manipulation_interfaces::msg::BridgeObservation & observation,
+    RejectionReason reason)
+  {
+    manipulation_interfaces::msg::InitialBoxPose output;
+    fillInitialBoxCommon(output, header, observation);
+    output.state = static_cast<uint8_t>(InitialBoxState::kNotMeasured);
+    output.reason = rejectionReasonName(reason);
+    output.frames_averaged = static_cast<uint32_t>(initial_box_estimator_->framesInWindow());
+    output.frames_required = static_cast<uint32_t>(initial_box_estimator_->frames());
+    initial_box_pub_->publish(output);
+  }
+
+  void fillInitialBoxCommon(
+    manipulation_interfaces::msg::InitialBoxPose & output,
+    const std_msgs::msg::Header & header,
+    const manipulation_interfaces::msg::BridgeObservation & observation) const
+  {
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    output.header = header;
+    output.header.frame_id = "world";
+    output.bridge_session = observation.bridge_session;
+    output.generation = observation.generation;
+    output.sample_sequence = observation.sample_sequence;
+    output.position.x = nan;
+    output.position.y = nan;
+    output.position.z = nan;
+    output.yaw_rad = nan;
+  }
+
   void publishRejected(
     const std_msgs::msg::Header & header,
     const manipulation_interfaces::msg::BridgeObservation & observation,
@@ -608,6 +688,7 @@ private:
   BoxModel box_model_;
   TrackerConfig tracker_config_;
   std::unique_ptr<ObjectTracker> tracker_;
+  std::unique_ptr<InitialBoxEstimator> initial_box_estimator_;
   bool tracker_lifecycle_known_ = false;
   uint64_t tracker_session_ = 0;
   uint64_t tracker_generation_ = 0;
@@ -623,14 +704,13 @@ private:
     "left_finger", "right_finger"};
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
-  rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr rgb_sub_;
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr depth_sub_;
-  rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr color_info_sub_;
   rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr depth_info_sub_;
   rclcpp::Subscription<manipulation_interfaces::msg::BridgeObservation>::SharedPtr
     observation_sub_;
   rclcpp::Subscription<tf2_msgs::msg::TFMessage>::SharedPtr tf_sub_;
   rclcpp::Publisher<manipulation_interfaces::msg::VisionObjectPose>::SharedPtr pose_pub_;
+  rclcpp::Publisher<manipulation_interfaces::msg::InitialBoxPose>::SharedPtr initial_box_pub_;
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr predicted_pub_;
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr mask_pub_;
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr filtered_pub_;
@@ -639,9 +719,7 @@ private:
   rclcpp::Publisher<manipulation_interfaces::msg::RobotMaskDiagnostics>::SharedPtr
     mask_diagnostics_pub_;
   rclcpp::TimerBase::SharedPtr pending_timer_;
-  std::map<Stamp, ImageConstPtr> rgb_frames_;
   std::map<Stamp, ImageConstPtr> depth_frames_;
-  std::map<Stamp, CameraInfoConstPtr> color_info_;
   std::map<Stamp, CameraInfoConstPtr> depth_info_;
   std::map<Stamp, ObservationConstPtr> observations_;
   std::map<Stamp, std::set<std::string>> tf_frames_;
