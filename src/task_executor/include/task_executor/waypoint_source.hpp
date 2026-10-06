@@ -44,6 +44,8 @@ struct PlaceTarget
   double x = 0.5;
   double y = 0.3;
   double support_z = 0.22;
+  // The bin's long side about world z (Stage 11's containment check); 0 without a bin.
+  double yaw_rad = 0.0;
 };
 
 // What one phase commands: the 7 arm joints (joint1..joint7, mujoco_bridge's own

@@ -116,7 +116,9 @@ def generate_launch_description():
     debug_viewer_rate_hz_arg = DeclareLaunchArgument('debug_viewer_rate_hz', default_value='30.0')
     enable_rgbd_camera_arg = DeclareLaunchArgument('enable_rgbd_camera', default_value='false')
     camera_rate_hz_arg = DeclareLaunchArgument('camera_rate_hz', default_value='10.0')
-    observation_source_arg = DeclareLaunchArgument('observation_source', default_value='oracle')
+    # vision is the demo's default from Week 4.1 Stage 11 on, when the vision episode first
+    # completes into the bin; oracle remains for comparison.
+    observation_source_arg = DeclareLaunchArgument('observation_source', default_value='vision')
     vision_min_confidence_arg = DeclareLaunchArgument('vision_min_confidence', default_value='0.5')
     vision_max_residual_arg = DeclareLaunchArgument('vision_max_residual_m', default_value='0.005')
     vision_min_inlier_arg = DeclareLaunchArgument('vision_min_inlier_ratio', default_value='0.7')

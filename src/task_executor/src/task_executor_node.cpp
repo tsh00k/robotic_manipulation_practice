@@ -33,12 +33,12 @@
 #include <manipulation_interfaces/msg/initial_bin_pose.hpp>
 #include <manipulation_interfaces/msg/initial_box_pose.hpp>
 #include <manipulation_interfaces/msg/initial_pose_latch.hpp>
-#include <manipulation_interfaces/msg/vision_object_pose.hpp>
 #include <manipulation_interfaces/srv/reset_scene.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/empty.hpp>
 #include <trajectory_msgs/msg/joint_trajectory.hpp>
 
+#include "task_executor/bin_containment.hpp"
 #include "task_executor/cartesian_waypoint_source.hpp"
 #include "task_executor/diff_ik_waypoint_source.hpp"
 #include "task_executor/episode_controller.hpp"
@@ -121,9 +121,6 @@ public:
     observation_sub_ = create_subscription<manipulation_interfaces::msg::BridgeObservation>(
       "/mujoco_bridge/episode_observation", rclcpp::QoS(10),
       std::bind(&TaskExecutorNode::onObservation, this, std::placeholders::_1));
-    vision_sub_ = create_subscription<manipulation_interfaces::msg::VisionObjectPose>(
-      "/object_pose_estimator/object_pose", rclcpp::QoS(10),
-      std::bind(&TaskExecutorNode::onVisionObservation, this, std::placeholders::_1));
 
     // The bridge's true bin pose, for the oracle source only (Week 4.1 Stage 8). Latched: the
     // bridge publishes it once at startup, and the bin does not move.
@@ -140,6 +137,7 @@ public:
       [this](const manipulation_interfaces::msg::InitialBoxPose::SharedPtr msg) {
         bindLatchToEpisode();
         box_latch_->offer(latchSample(*msg));
+        latest_initial_box_ = msg;
       });
     initial_bin_sub_ = create_subscription<manipulation_interfaces::msg::InitialBinPose>(
       "/object_pose_estimator/initial_bin_pose", rclcpp::QoS(10),
@@ -180,8 +178,7 @@ private:
     {
       // A release ends the previous visual pose's validity. The estimator will
       // publish a fresh MEASURED result after it resumes.
-      latest_vision_observation_.reset();
-      last_accepted_vision_observation_.reset();
+      latest_initial_box_.reset();
       last_vision_sequence_processed_ = 0;
     }
     bridge_attachment_known_ = true;
@@ -189,12 +186,6 @@ private:
     latest_observation_ = msg;
     observation_cache_[msg->sample_sequence] = msg;
     while (observation_cache_.size() > 30) {observation_cache_.erase(observation_cache_.begin());}
-  }
-
-  void onVisionObservation(
-    const manipulation_interfaces::msg::VisionObjectPose::SharedPtr msg)
-  {
-    latest_vision_observation_ = msg;
   }
 
   // The lifecycle the latches belong to: bind them to the controller's current session and
@@ -214,7 +205,6 @@ private:
     latch_session_ = controller_->bridgeSession();
     latch_generation_ = controller_->generation();
     latch_failed_ = false;
-    attached_seen_ = false;
     box_latch_->reset(latch_session_, latch_generation_);
     bin_latch_->reset(latch_session_, latch_generation_);
   }
@@ -223,7 +213,6 @@ private:
   {
     latch_bound_ = false;
     latch_failed_ = false;
-    attached_seen_ = false;
   }
 
   template<typename Message>
@@ -249,14 +238,6 @@ private:
            (!config_.place_into_bin || bin_latch_->latched());
   }
 
-  // After the box has been carried and released, the task needs where the box is NOW (to
-  // verify the drop), not where it started: that goes through the stream of fresh estimates.
-  bool verifyingAfterRelease(bool bridge_attached)
-  {
-    attached_seen_ = attached_seen_ || bridge_attached;
-    return attached_seen_ && !bridge_attached;
-  }
-
   // Hands the controller this episode's place target before anything is admitted. Into the
   // bin: the latched vision bin, or the bridge's true bin for the oracle source; returns false
   // while that is not known yet, so nothing is admitted and no command is sent. Not into the
@@ -275,16 +256,18 @@ private:
         last_observation_failure_reason_ = "ORACLE_BIN_POSE_MISSING";
         return false;
       }
+      const auto & q = oracle_bin_->pose.orientation;
       bin = {oracle_bin_->pose.position.x, oracle_bin_->pose.position.y,
-        oracle_bin_->pose.position.z};
+        oracle_bin_->pose.position.z,
+        std::atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))};
     } else {
       if (!latchComplete()) {
         return false;
       }
       const auto & latched = *bin_latch_->pose();
-      bin = {latched.x, latched.y, latched.z};
+      bin = {latched.x, latched.y, latched.z, latched.yaw_rad};
     }
-    controller_->setPlacement(bin, bin.x, bin.y);
+    controller_->setPlacement(bin, bin.x, bin.y, true);
     return true;
   }
 
@@ -353,8 +336,6 @@ private:
 
     bridge = latest_observation_;
     if (!bridge) {return;}
-    const bool bridge_attached = bridge->attachment_state ==
-      manipulation_interfaces::msg::BridgeObservation::ATTACHMENT_ATTACHED;
     if (config_.observation_source == ObservationSource::kVision) {
       bindLatchToEpisode();
     }
@@ -363,10 +344,12 @@ private:
     }
     if (config_.observation_source == ObservationSource::kOracle) {
       object_pose = bridge->object_pose;
-    } else if (!verifyingAfterRelease(bridge_attached)) {
-      // Before the release the task works on the pose latched at the start of the episode,
-      // not on a stream that keeps changing. Until it is latched nothing is admitted, so the
-      // controller stays in its wait and sends no command.
+    } else if (controller_->phase() != Phase::kVerify) {
+      // Every phase but VERIFY works on the pose latched at the start of the episode, not on
+      // a stream that keeps changing; OPEN and RETRACT do not need the box at all, and while
+      // the open hand is still over the bin it can hide the box (Week 4.1 Stage 11, 11.3).
+      // Until it is latched nothing is admitted, so the controller stays in its wait and sends
+      // no command.
       if (!latchComplete()) {
         return;
       }
@@ -386,8 +369,12 @@ private:
       last_observation_confidence_ = confidence;
       last_observation_residual_m_ = residual_m;
     } else {
-      if (!latest_vision_observation_) {return;}
-      const auto vision = latest_vision_observation_;
+      // VERIFY (Week 4.1 Stage 11): where the box is NOW, from the initial-pose estimator,
+      // which emptied its window at the release and measures the box wherever it landed, in
+      // the bin as well as on the table. The older ~/object_pose detector is not used: it
+      // rejects a box lying in the bin.
+      if (!latest_initial_box_) {return;}
+      const auto vision = latest_initial_box_;
       const auto bridge_it = observation_cache_.find(vision->sample_sequence);
       if (bridge_it == observation_cache_.end() ||
         bridge_it->second->bridge_session != vision->bridge_session ||
@@ -398,43 +385,30 @@ private:
       }
       bridge = bridge_it->second;
       last_vision_sequence_processed_ = vision->sample_sequence;
-      confidence = vision->confidence;
-      residual_m = vision->residual_m;
-      state_reason = vision->state_reason;
+      confidence = std::numeric_limits<double>::quiet_NaN();
+      residual_m = std::numeric_limits<double>::quiet_NaN();
+      state_reason = vision->reason;
       last_observation_source_ = object_source;
       last_observation_confidence_ = confidence;
       last_observation_residual_m_ = residual_m;
-      const bool measured = vision->evidence_state ==
-        manipulation_interfaces::msg::VisionObjectPose::MEASURED;
-      const bool quality_ok = measured &&
-        std::isfinite(vision->confidence) && vision->confidence >= config_.vision_min_confidence &&
-        std::isfinite(vision->residual_m) && vision->residual_m <= config_.vision_max_residual_m &&
-        std::isfinite(vision->inlier_ratio) &&
-        vision->inlier_ratio >= config_.vision_min_inlier_ratio;
-      const bool current_episode_sample =
-        controller_->state() != EpisodeState::kIdle &&
-        controller_->state() != EpisodeState::kFinished &&
-        controller_->state() != EpisodeState::kFailed &&
-        vision->bridge_session == controller_->bridgeSession() &&
-        vision->generation == controller_->generation();
-      if (!quality_ok) {
-        if (current_episode_sample) {
-          const std::string reason = measured ? "VISION_LOW_CONFIDENCE" :
-            "VISION_REJECTED";
-          last_observation_failure_reason_ = reason +
-            (state_reason.empty() ? "" : ":" + state_reason);
+      if (vision->state != manipulation_interfaces::msg::InitialBoxPose::MEASURED) {
+        if (vision->state == manipulation_interfaces::msg::InitialBoxPose::NOT_MEASURED &&
+          vision->bridge_session == controller_->bridgeSession() &&
+          vision->generation == controller_->generation())
+        {
+          last_observation_failure_reason_ = "VISION_REJECTED:" + vision->reason;
           last_observation_rejected_ = true;
           RCLCPP_WARN_THROTTLE(
             get_logger(), *get_clock(), 2000,
-            "vision sample is not usable (%s); waiting for a fresh MEASURED sample",
-            last_observation_failure_reason_.c_str());
+            "box after the release not measured (%s); waiting", vision->reason.c_str());
         }
         return;
       }
-      last_accepted_vision_observation_ = vision;
       object_pose.header = vision->header;
-      object_pose.pose = vision->pose;
       object_pose.header.frame_id = "world";
+      object_pose.pose.position = vision->position;
+      object_pose.pose.orientation.w = std::cos(vision->yaw_rad / 2.0);
+      object_pose.pose.orientation.z = std::sin(vision->yaw_rad / 2.0);
     }
 
     auto snapshot = makeObservationSnapshot(
@@ -458,6 +432,21 @@ private:
     last_observation_confidence_ = confidence;
     last_observation_residual_m_ = residual_m;
     last_observation_rejected_ = false;
+    if (config_.place_into_bin && controller_->phase() == Phase::kVerify) {
+      const auto & place = controller_->placeTarget();
+      const auto & q = object_pose.pose.orientation;
+      const Containment containment = boxInBin(
+        {object_pose.pose.position.x, object_pose.pose.position.y, object_pose.pose.position.z,
+          std::atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))},
+        {place.x, place.y, place.support_z, place.yaw_rad});
+      RCLCPP_INFO_THROTTLE(
+        get_logger(), *get_clock(), 500,
+        "verify: box xyz=[%.4f %.4f %.4f] in bin: %s, smallest corner clearance %.1f mm "
+        "(needs >= 5.0), height error %.1f mm (needs |e| <= 5.0)",
+        object_pose.pose.position.x, object_pose.pose.position.y, object_pose.pose.position.z,
+        containment.inside ? "yes" : "no", containment.min_clearance_m * 1000.0,
+        containment.height_error_m * 1000.0);
+    }
     const auto actions = controller_->onObservation(
       envelope, std::chrono::steady_clock::now(), get_clock()->now().seconds());
     // Admission can end the episode on timeout or supersession before tick runs.
@@ -542,8 +531,7 @@ private:
   void onStartEpisode(const std_msgs::msg::Empty::SharedPtr)
   {
     latest_observation_.reset();
-    latest_vision_observation_.reset();
-    last_accepted_vision_observation_.reset();
+    latest_initial_box_.reset();
     observation_cache_.clear();
     last_vision_sequence_processed_ = 0;
     bridge_attachment_known_ = false;
@@ -650,8 +638,7 @@ private:
     // Drop the old ROS sample before submitting a new reset generation.
     if (actions.reset_request) {
       latest_observation_.reset();
-      latest_vision_observation_.reset();
-      last_accepted_vision_observation_.reset();
+      latest_initial_box_.reset();
       observation_cache_.clear();
       last_vision_sequence_processed_ = 0;
       bridge_attachment_known_ = false;
@@ -717,8 +704,6 @@ private:
   rclcpp::Client<manipulation_interfaces::srv::ResetScene>::SharedPtr reset_client_;
   rclcpp::Subscription<manipulation_interfaces::msg::BridgeObservation>::SharedPtr
     observation_sub_;
-  rclcpp::Subscription<manipulation_interfaces::msg::VisionObjectPose>::SharedPtr
-    vision_sub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr oracle_bin_sub_;
   geometry_msgs::msg::PoseStamped::SharedPtr oracle_bin_;
   rclcpp::Subscription<manipulation_interfaces::msg::InitialBoxPose>::SharedPtr initial_box_sub_;
@@ -731,10 +716,8 @@ private:
   uint64_t latch_session_ = 0;
   uint64_t latch_generation_ = 0;
   bool latch_failed_ = false;
-  bool attached_seen_ = false;
   manipulation_interfaces::msg::BridgeObservation::SharedPtr latest_observation_;
-  manipulation_interfaces::msg::VisionObjectPose::SharedPtr latest_vision_observation_;
-  manipulation_interfaces::msg::VisionObjectPose::SharedPtr last_accepted_vision_observation_;
+  manipulation_interfaces::msg::InitialBoxPose::SharedPtr latest_initial_box_;
   std::map<uint64_t, manipulation_interfaces::msg::BridgeObservation::SharedPtr>
   observation_cache_;
   uint64_t last_vision_sequence_processed_ = 0;

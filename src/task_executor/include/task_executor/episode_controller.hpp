@@ -153,7 +153,10 @@ public:
   // configured target and verification centre, which only differ in the deliberate
   // verify.allow_target_mismatch experiment. Set before the first admitted observation;
   // kept across retries unless set again.
-  void setPlacement(const PlaceTarget & place, double verify_x_m, double verify_y_m);
+  // into_bin: VERIFY asks boxInBin() against `place` (its x, y, support_z, yaw) instead of the
+  // radius around (verify_x_m, verify_y_m).
+  void setPlacement(
+    const PlaceTarget & place, double verify_x_m, double verify_y_m, bool into_bin = false);
   const PlaceTarget & placeTarget() const {return place_;}
 
   EpisodeActions finishEpisode(

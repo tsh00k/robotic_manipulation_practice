@@ -84,6 +84,17 @@ place    Week 4.1 Stage 8. `--source oracle|vision`, the first `--count` random 
          for vision) within 1 degree and PLACE keeps it within 0.1 degree; one attached run
          before the final release; the width at the attach at most 45 mm; C4 (legacy) the
          GRASP rotation within 1 degree of 0. Success and the box in the bin are reported.
+         `--require-success` (Week 4.1 Stage 11, G1/G2): every layout, oracle or vision, must
+         end in success with zero retries and the box inside the bin by the truth; the last
+         "verify:" line of the executor log (containment clearance) is printed.
+verify   Week 4.1 Stage 11, step 1: can the initial box detector measure the box lying in the bin
+         at VERIFY? Oracle source (truth only for judging), place.into_bin, the first --count
+         random layouts. Rules, written before the first run: F1 a MEASURED initial_box_pose
+         within 3 s of simulated time after the release; F2 every MEASURED from 1 s after the
+         release on within x, y 3 mm, z 2 mm, yaw 5 degrees (modulo 90) of the box truth of
+         the last sample; F3 layouts whose box did not end in the bin are recorded, not
+         counted, and at least 4 must count. Reported: the error of the first MEASURED after
+         the release, and whether the bin estimate stays MEASURED with the box inside it.
 episode  Bridge + estimator + executor with observation_source=vision, three episodes in a
          row, on the legacy scene (no bin; --scene bin adds the bin). Acceptance:
            E1 every episode ends in success with zero retries (the older detector path still
@@ -726,6 +737,16 @@ def run_place(args):
             inside = box_in_bin(mine[-1], bin_pose)
             geometry = release_geometry(mine)
             align_text = ''
+            if args.require_success:
+                problems = [p for p in problems if not p.startswith('B1')]
+                if not outcome.success or outcome.retries != 0:
+                    problems.append(f'G1/G2 outcome {outcome.failure_code}, retries '
+                                    f'{outcome.retries}')
+                verify_lines = [line for line in
+                                EXECUTOR_LOG.read_text(errors='replace').splitlines()
+                                if 'verify: box' in line]
+                align_text = ('; last verify log: ' + verify_lines[-1].split('verify: ')[1]
+                              if verify_lines else '; no verify log line')
             if args.align_check:
                 problems = [p for p in problems if 'target' not in p or 'PLACE z' in p]
                 if args.source == 'vision':
@@ -820,6 +841,81 @@ def run_place_legacy(args):
     return 0 if not failures else 1
 
 
+def run_verify(args):
+    failures, counted = [], 0
+    for index, layout in enumerate(make_layouts(args.count)):
+        box, bin_pose = layout['box'], layout['bin']
+        label = (f'layout {index}: box ({box[0]:.3f}, {box[1]:.3f}, {math.degrees(box[2]):.1f}), '
+                 f'bin ({bin_pose[0]:.3f}, {bin_pose[1]:.3f}, {math.degrees(bin_pose[2]):.1f})')
+        rig = Rig(args.workspace, [
+            'scene.enabled=true', 'enable_rgbd_camera=true', f'scene.box.x={box[0]}',
+            f'scene.box.y={box[1]}', f'scene.box.yaw={box[2]}', f'scene.bin.x={bin_pose[0]}',
+            f'scene.bin.y={bin_pose[1]}', f'scene.bin.yaw={bin_pose[2]}'], True,
+            executor_params=['place.into_bin=true'], source='oracle')
+        try:
+            if not rig.spin_until(lambda: rig.start.get_subscription_count() > 0, 30):
+                raise RuntimeError('executor did not come up')
+            rig.start.publish(Empty())
+            if not rig.spin_until(lambda: bool(rig.outcomes), 240):
+                failures.append(f'{label}: no outcome within 240 s')
+                continue
+            rig.spin_until(lambda: False, 3.0)  # the estimator keeps measuring after the end
+            generation = max(o.generation for o in rig.observations)
+            mine = [o for o in rig.observations if o.generation == generation]
+            if not box_in_bin(mine[-1], bin_pose):
+                print(f'{label}\n    box not in the bin ({rig.outcomes[-1].failure_code}); '
+                      f'not counted (F3)', flush=True)
+                continue
+            counted += 1
+            release = None
+            for previous, o in zip(mine, mine[1:]):
+                if (previous.attachment_state == BridgeObservation.ATTACHMENT_ATTACHED and
+                        o.attachment_state != BridgeObservation.ATTACHMENT_ATTACHED):
+                    release = stamp_ns(o.joint_state.header.stamp)
+            truth = box_truth(mine[-1])
+            after = [m for m in rig.messages
+                     if m.generation == generation and stamp_ns(m.header.stamp) > release]
+            measured = [m for m in after if m.state == InitialBoxPose.MEASURED]
+            problems = []
+            first = measured[0] if measured else None
+            if first is None or stamp_ns(first.header.stamp) - release > 3e9:
+                problems.append('F1 no MEASURED within 3 s after the release')
+            settled = [m for m in measured if stamp_ns(m.header.stamp) - release >= 1e9]
+            errors = np.array([pose_errors(m, truth) for m in settled])
+            bad = [e for e in errors if not within_limits(e, truth)]
+            if bad:
+                problems.append(f'F2 {len(bad)} of {len(settled)} settled MEASURED outside the '
+                                f'limits, first {np.round(bad[0], 2).tolist()}')
+            if not settled:
+                problems.append('F2 no MEASURED 1 s or more after the release')
+            worst = np.abs(errors).max(axis=0) if len(errors) else [math.nan] * 4
+            first_errors = pose_errors(first, truth) if first else [math.nan] * 4
+            bins = [m for m in rig.bin_messages
+                    if m.generation == generation and stamp_ns(m.header.stamp) > release and
+                    m.frames_averaged == m.frames_required]
+            bin_measured = sum(1 for m in bins if m.state == InitialBinPose.MEASURED)
+            reasons = sorted({m.reason for m in bins if m.state != InitialBinPose.MEASURED})
+            first_delay = (stamp_ns(first.header.stamp) - release) / 1e9 if first else math.nan
+            print(f'{label}\n    first MEASURED {first_delay:.2f} s after the release, its '
+                  f'error dx {first_errors[0]:.2f} dy {first_errors[1]:.2f} '
+                  f'dz {first_errors[2]:.2f} mm dyaw {first_errors[3]:.2f} deg\n'
+                  f'    {len(settled)} settled MEASURED: worst |dx| {worst[0]:.2f} |dy| '
+                  f'{worst[1]:.2f} |dz| {worst[2]:.2f} mm |dyaw| {worst[3]:.2f} deg; '
+                  f'not measured after release: {len(after) - len(measured)} of {len(after)}\n'
+                  f'    bin with the box inside: {bin_measured}/{len(bins)} MEASURED'
+                  + (f' (otherwise {reasons})' if reasons else '')
+                  + f'  {"OK" if not problems else "FAIL"}', flush=True)
+            failures += [f'{label}: {p}' for p in problems]
+        finally:
+            rig.close()
+    if counted < 4:
+        failures.append(f'F3 only {counted} layouts counted')
+    print('\nVERIFY FEASIBILITY:', 'PASS' if not failures else 'FAIL')
+    for failure in failures:
+        print('  ', failure)
+    return 0 if not failures else 1
+
+
 def run_episode(args):
     bridge_params = ['enable_rgbd_camera=true']
     if args.scene == 'bin':
@@ -904,9 +1000,12 @@ def run_episode(args):
 def main():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('command', choices=['static', 'gaps', 'latch', 'place', 'episode'])
+    parser.add_argument('command',
+                        choices=['static', 'gaps', 'latch', 'place', 'verify', 'episode'])
     parser.add_argument('--workspace', default=str(Path(__file__).resolve().parents[3]))
     parser.add_argument('--count', type=int, default=6)
+    parser.add_argument('--require-success', action='store_true',
+                        help='place: every layout must succeed (Stage 11 G1/G2)')
     parser.add_argument('--align-check', action='store_true',
                         help='place: judge the Stage 9 tool alignment instead of B1/B2')
     parser.add_argument('--source', choices=['oracle', 'vision'], default='vision',
@@ -922,7 +1021,7 @@ def main():
                         help='gaps: box-to-bin gaps in mm')
     args = parser.parse_args()
     return {'static': run_static, 'gaps': run_gaps, 'latch': run_latch, 'place': run_place,
-            'episode': run_episode}[args.command](args)
+            'verify': run_verify, 'episode': run_episode}[args.command](args)
 
 
 if __name__ == '__main__':

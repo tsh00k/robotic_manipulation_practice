@@ -30,6 +30,7 @@ add_executable(task_executor_node
   src/episode_controller.cpp
   src/observation_snapshot.cpp
   src/pose_latch.cpp
+  src/bin_containment.cpp
 )
 target_include_directories(task_executor_node PRIVATE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -62,6 +63,7 @@ if(BUILD_TESTING)
     test/test_fsm.cpp
     src/phase.cpp
     src/fsm.cpp
+    src/bin_containment.cpp
   )
   target_include_directories(test_fsm PRIVATE include)
   target_link_libraries(test_fsm mujoco_bridge::grasp_criteria)
@@ -121,6 +123,12 @@ if(BUILD_TESTING)
     Eigen3::Eigen mujoco_bridge::grasp_criteria)
   ament_target_dependencies(test_observation_snapshot sensor_msgs geometry_msgs)
 
+  ament_add_gtest(test_bin_containment
+    test/test_bin_containment.cpp
+    src/bin_containment.cpp
+  )
+  target_include_directories(test_bin_containment PRIVATE include)
+
   ament_add_gtest(test_pose_latch
     test/test_pose_latch.cpp
     src/pose_latch.cpp
@@ -131,6 +139,7 @@ if(BUILD_TESTING)
     test/test_episode_controller.cpp
     src/episode_controller.cpp
     src/fsm.cpp
+    src/bin_containment.cpp
     src/phase.cpp
     src/diff_ik_waypoint_source.cpp
   )

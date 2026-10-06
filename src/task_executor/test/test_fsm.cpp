@@ -318,6 +318,33 @@ TEST(Fsm, VerifyDoneWhenBoxNearPlaceAndReleased)
   EXPECT_EQ(d.exit_reason, ExitReason::kReached);
 }
 
+TEST(Fsm, WithABinVerifyIsDoneOnlyWhenTheBoxIsInsideTheBin)
+{
+  FsmParams params = defaultParams();
+  params.place_into_bin = true;
+  params.bin = {0.56, -0.12, 0.227, 0.3};
+  FsmInputs in;
+  in.phase = Phase::kVerify;
+  in.attachment_state = 2;
+  in.elapsed_in_phase_s = 1.0;
+  in.box_x_m = 0.56;
+  in.box_y_m = -0.12;
+  in.box_z_m = 0.247;
+  in.box_yaw_rad = 0.7;
+  EXPECT_EQ(step(in, targetAt(kHomeArm), params).next_phase, Phase::kDone);
+
+  // 45 mm off centre: inside the old 0.08 m radius, but in the bin frame a corner reaches
+  // 69 mm against the 65 mm inner face.
+  in.box_y_m = -0.12 + 0.045;
+  EXPECT_EQ(step(in, targetAt(kHomeArm), params).next_phase, Phase::kVerify);
+  // Centred but resting on a wall rim, 12 mm too high.
+  in.box_y_m = -0.12;
+  in.box_z_m = 0.259;
+  EXPECT_EQ(step(in, targetAt(kHomeArm), params).next_phase, Phase::kVerify);
+  in.elapsed_in_phase_s = 100.0;
+  EXPECT_EQ(step(in, targetAt(kHomeArm), params).exit_reason, ExitReason::kPlaceMissed);
+}
+
 TEST(Fsm, VerifyRecoversAsPlaceMissedOnTimeout)
 {
   FsmInputs in;

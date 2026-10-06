@@ -173,7 +173,7 @@ URDF hand:=true 强制加 fer_ 前缀，跨库代码须显式映射。下表采�
 
 有效观测/预测深度差绝对值 <= robot_mask.depth_tolerance_m=0.012 m 才过滤该像素，更近/更远有效深度均保留。无效输入或同过滤器生命周期中相机尺寸/内参变化报 INVALID_INPUT。当前无整帧冲突比例门，不发布 ROBOT_MODEL_MISMATCH。
 
-管线（旧路径，释放后核对仍用它）：同帧配对/TF -> 反投影与掩膜 -> world ROI/桌面过滤 -> 水平支持平面 -> 全部候选簇 OBB 覆盖检查/已知盒体表面拟合 -> ObjectTracker 候选有效性/唯一性检查 -> VisionObjectPose。只去除配置桌面高度附近的平面，不把离桌盒体表面删作桌面；在线不再以最大簇决定目标，调试 target_cluster 是实际接受的候选。通用算法来自 image_geometry/PCL；SVD 已知对应点配准入口仍仅有单测。
+管线（旧路径；Stage 11 起 executor 不再使用，估计器仍发布）：同帧配对/TF -> 反投影与掩膜 -> world ROI/桌面过滤 -> 水平支持平面 -> 全部候选簇 OBB 覆盖检查/已知盒体表面拟合 -> ObjectTracker 候选有效性/唯一性检查 -> VisionObjectPose。只去除配置桌面高度附近的平面，不把离桌盒体表面删作桌面；在线不再以最大簇决定目标，调试 target_cluster 是实际接受的候选。通用算法来自 image_geometry/PCL；SVD 已知对应点配准入口仍仅有单测。
 
 先验为单个 4 cm 立方体与已知桌面。配置 anchor_z_to_plane=true 且 bridge 非 ATTACHED 时允许支撑锚定，两个较大 OBB 主尺寸各 ≥`box_min_visible_extent_m=0.008 m`，全部主尺寸 ≤边长加 `box_extent_tolerance_m=0.015 m`（默认 55 mm），中心 z 补为桌面加半高；立方体姿态为对称不确定的规范代表值。当前没有旧 55 mm 张爪门、Supported/Transport 模型，也没有恢复旧最高点支撑判定；新增低水平点片拒绝只过滤残留，是否真的落桌仍须验证。尺寸、残差与内点质量不能证明支撑接触。ATTACHED 时暂停正常处理链，退出附着后清缓存并重新测量。OBB 不提供任意形状识别或完全遮挡恢复。
 
@@ -226,25 +226,19 @@ estimator 的 tryProcess 在当前 ATTACHED 时早退，正常 RGB-D 几何处�
 
 ### 5.5 任务观测来源与质量门
 
-observation_source 每 episode 唯一，默认 oracle。oracle 直接使用 bridge 物体真值，不受视觉 MEASURED/REJECTED 状态准入影响，但与 vision 共用附着和 FSM 阶段门。vision 在**释放之前**消费锁存的初始位姿（见下，Week 4.1 Stage 7），**释放之后**的核对消费 VisionObjectPose；关节/接触/TCP/宽度/附着仍来自 BridgeObservation。demo 的 vision 入口启动 estimator 与相机，不静默回退 oracle pose。
+observation_source 每 episode 唯一；节点参数默认 oracle，demo launch 的默认值自 Week 4.1 Stage 11 起是 vision（vision episode 第一次能完整放进 bin）。oracle 直接使用 bridge 物体真值，不受视觉 MEASURED/REJECTED 状态准入影响，但与 vision 共用附着和 FSM 阶段门。vision 在 VERIFY 之前的所有阶段消费锁存的初始位姿（见下，Week 4.1 Stage 7），VERIFY 消费新检测器重新测得的盒子（Stage 11）；executor 不再订阅 VisionObjectPose；关节/接触/TCP/宽度/附着仍来自 BridgeObservation。demo 的 vision 入口启动 estimator 与相机，不静默回退 oracle pose。
 
-**初始位姿锁存（Week 4.1 Stage 7，vision 来源）。** 每次 reset（含重试，generation 变化）后，executor 订阅 `/object_pose_estimator/initial_box_pose` 与 `initial_bin_pose`，由纯规则类 `PoseLatch` 判定：最近 `latch.frames`=5 条连续 MEASURED 的 x、y 极差 ≤ `latch.max_position_spread_m`=3 mm、yaw 的圆周极差 ≤ `latch.max_yaw_spread_deg`=3°（box 以 90° 为周期、bin 以 180° 为周期）才锁存，锁存值是这几条里最新那条；非 MEASURED 的消息使累积清零；session 或 generation 不符、序号不递增的消息被忽略；锁存后到下一次 reset 前不变。锁存完成之前控制器停在“等待首个观测”，不进入 READY，所以不发任何关节命令；等待上限是 `latch.timeout_s`=10 s（墙钟，控制器的 awaiting-observation 超时，与 5 s 的数据流看门狗分开），超时的 outcome 是 `VISION_LATCH_TIMEOUT`（沿用 `VISION_` 开头归入感知层），失败原因写明还缺哪个对象及其状态（如 `BIN:WAITING:NO_RECTANGLE_MATCHES_BIN`）。`place.into_bin`（默认 false，demo launch 随 `scene_enabled` 设置；Stage 7 时叫 `latch.require_bin`）决定是否也等 bin；默认场景没有 bin。锁存后，抓取前和搬运期的 box 位姿都取自锁存值（confidence、residual 为 NaN，质量在状态话题里），BridgeObservation 的 attachment_state 出现过 ATTACHED 又退出后才走下面的旧路径。锁存的 box yaw 决定抓取时工具的转角（Stage 9，见 [6](#6-任务与运动执行) 的姿态说明）。
+**初始位姿锁存（Week 4.1 Stage 7，vision 来源）。** 每次 reset（含重试，generation 变化）后，executor 订阅 `/object_pose_estimator/initial_box_pose` 与 `initial_bin_pose`，由纯规则类 `PoseLatch` 判定：最近 `latch.frames`=5 条连续 MEASURED 的 x、y 极差 ≤ `latch.max_position_spread_m`=3 mm、yaw 的圆周极差 ≤ `latch.max_yaw_spread_deg`=3°（box 以 90° 为周期、bin 以 180° 为周期）才锁存，锁存值是这几条里最新那条；非 MEASURED 的消息使累积清零；session 或 generation 不符、序号不递增的消息被忽略；锁存后到下一次 reset 前不变。锁存完成之前控制器停在“等待首个观测”，不进入 READY，所以不发任何关节命令；等待上限是 `latch.timeout_s`=10 s（墙钟，控制器的 awaiting-observation 超时，与 5 s 的数据流看门狗分开），超时的 outcome 是 `VISION_LATCH_TIMEOUT`（沿用 `VISION_` 开头归入感知层），失败原因写明还缺哪个对象及其状态（如 `BIN:WAITING:NO_RECTANGLE_MATCHES_BIN`）。`place.into_bin`（默认 false，demo launch 随 `scene_enabled` 设置；Stage 7 时叫 `latch.require_bin`）决定是否也等 bin；默认场景没有 bin。锁存后，VERIFY 之前所有阶段（含 OPEN、RETRACT）的 box 位姿都取自锁存值（confidence、residual 为 NaN，质量在状态话题里）；Stage 11 起按 FSM 阶段而不是附着状态切换，所以抓取时附着状态的反复不影响它。锁存的 box yaw 决定抓取时工具的转角（Stage 9，见 [6](#6-任务与运动执行) 的姿态说明）。
 
 **放置目标（Week 4.1 Stage 8）。** 每个 episode 一个 `PlaceTarget{x, y, support_z}`，由节点在第一次准入观测之前交给控制器（`setPlacement`），控制器用同一个值算 PREPLACE / PLACE / OPEN / RETRACT 的 IK 目标，并以它的 x、y 作为 VERIFY 放置区的中心。PLACE 的 TCP 高度 = `support_z` + 盒子半高 + `target.place_tcp_above_box_center_m`（0.05 m），PREPLACE、RETRACT 再加 `target.hover_height_m`。`place.into_bin` 为 true 时，vision 来源取锁存的视觉 bin（`support_z` 是检测到的内底面高度），oracle 来源取 bridge 的 `/mujoco_bridge/ground_truth/bin_pose`（PoseStamped，transient local，只在 `scene.enabled` 时由 bridge 启动时发布一次；与 `~/ground_truth/object_pose` 同类，只给 oracle 路径用，vision 不订阅），在拿到之前不准入任何观测、不发命令，**不退回配置**；为 false 时用 `target.place_x_m`、`target.place_y_m` 与桌面 0.22 m（旧场景，没有 bin），VERIFY 中心用 `verify.place_x_m`、`verify.place_y_m`，两者只在 `verify.allow_target_mismatch` 实验里不同。工具朝向不变，不要求盒子最终 yaw 等于 bin yaw。状态话题 `/task_executor/initial_pose_latch`（InitialPoseLatch，内含两个 LatchedPose）给出 WAITING / LATCHED / FAILED、各对象的锁存位姿、来源序号与时间戳、极差和未锁住的原因。
 
-**释放之后的核对与旧路径。** 非附着时，vision 与 bridge 的 session/generation/sequence 完全相等才配对，缓存有界并跳过已处理序号；只准入新的 MEASURED，且各质量指标必须有限：
+**VERIFY（Week 4.1 Stage 11）。** VERIFY 阶段，vision 来源准入 `/object_pose_estimator/initial_box_pose` 的 MEASURED：与 bridge 样本按 session、generation、序号完全相等配对，缓存有界并跳过已处理序号；估计器在释放时清空窗口，所以这是盒子落下后的新测量（约释放后 1 s 才有第一条）。非 MEASURED 记录 `VISION_REJECTED:<检测器原因>` 并等待，不创建 snapshot；持续没有可准入观测仍受 5 s 的数据流看门狗约束，可终止为 OBSERVATION_STALE。**只在 VERIFY 要求新测量**：OPEN、RETRACT 用锁存值，因为它们不需要盒子，而张开的手还在 bin 上方时会挡住盒子（若在那时就只准入新测量，控制器不推进、手不撤离，形成死锁，Stage 11 实测过）。oracle 来源用真值。
 
-| 参数 | 通过条件 |
-| --- | --- |
-| vision.min_confidence=0.5 | confidence ≥ 阈值 |
-| vision.max_residual_m=0.005 | residual_m ≤ 阈值 |
-| vision.min_inlier_ratio=0.7 | inlier_ratio ≥ 阈值 |
+**入 bin 判据。** `place.into_bin` 为 true 时 VERIFY 用纯函数 `boxInBin()`（[bin_containment.hpp](../src/task_executor/include/task_executor/bin_containment.hpp)）而不是半径：盒子（边长 40 mm，yaw 取自位姿）四角在 bin 坐标系里离内口（半宽 70 × 65 mm）至少 5 mm，且盒心高度在内底面 + 20 mm ± 5 mm 内，才算放好；其它（越界、压在壁上、离壁不到 5 mm 无法确认）一律不算，VERIFY 继续等，超时为 `PLACE_MISSED` 后按原逻辑重试。5 mm = 盒子检测限 3 mm + bin 在线最大偏差向上取 2 mm。bin 来自放置目标（vision：锁存的视觉 bin，含 yaw；oracle：bridge 的真值 bin）。VERIFY 期间日志每 0.5 s 打印一行 `verify:`，给出盒子位置、是否在内、最小角余量与高度差。没有 bin 时仍是以放置目标为圆心、`verify.place_region_radius_m` 为半径的判据。
 
-质量失败记录 VISION_REJECTED 或 VISION_LOW_CONFIDENCE 诊断并等待，不直接结束 episode、不创建新 snapshot。持续没有可准入观测仍受 controller 的 steady-clock 新鲜度看门狗约束，可终止为 OBSERVATION_STALE；不能把等待写成无限重试或 FSM 恢复。
+`vision.min_confidence`、`vision.max_residual_m`、`vision.min_inlier_ratio` 只用于旧的 VisionObjectPose 准入；executor 自 Stage 11 起不再读该话题，这三个参数仍被声明和校验，但不再起作用（随旧路径一起清理，见 Week 4.1 Stage 5 的 5.11）。
 
-ATTACHED 时（Stage 7 起）复用的是锁存的初始位姿而不是“最近已接受视觉样本”：数值保持不变，不以 TCP 外推，不发布 PREDICTED，也不证明当前物体高度。退出附着清最近视觉、已接受缓存和已处理序号，等待新的质量合格 MEASURED。释放后 VERIFY 使用新测量落点，不使用运输缓存、也不使用锁存值（它是初始位置，不是落点）。旧检测器对 bin 里的盒子仍拒绝，所以 bin 场景的 vision episode 在 VERIFY 以 OBSERVATION_STALE 结束，由 Stage 11 处理。
-
-EpisodeOutcome 记录来源、confidence、residual、失败层/原因；任务失败码与视觉 state_reason 属于不同接口。视觉质量门、附着门及 controller 准入共同决定是否推进，完整 vision 成功仍待集成验收。
+EpisodeOutcome 记录来源、confidence、residual、失败层/原因；任务失败码与视觉 state_reason 属于不同接口。附着门、入 bin 判据及 controller 准入共同决定是否推进。Stage 11 起 vision 在随机 box + bin 布局上完整成功（3 个布局），HELD-A 上的验收是 Stage 14。
 
 ## 6. 任务与运动执行
 
@@ -298,6 +292,7 @@ FSM 默认位置/GRASP-CLOSE 位置/速度容差为 0.05 rad/0.3 rad/0.05 rad/s�
 | [视觉验证](../Job_guides/my_study/week4.md#10-stage-4同帧机器人几何掩膜) | 掩膜/诊断基线、缺 TF、质量拒绝；完整视觉抓放未通过 |
 | [DepthWindow](../src/mujoco_perception/test/test_depth_window.cpp) / [初始 box 检测器](../src/mujoco_perception/test/test_initial_box_detector.cpp) / [初始 bin 检测器](../src/mujoco_perception/test/test_initial_bin_detector.cpp) / [InitialPoseEstimator](../src/mujoco_perception/test/test_initial_pose_estimator.cpp) | 单测在精确光线投射的合成场景上，答案由构造给出（相机与场景在 [workcell_camera.hpp](../src/mujoco_perception/test/workcell_camera.hpp)），共 24 项；场景固定，所以不测非法配置、不会出现的场景和相机分辨率变化。容差是像素量化界，不是调出来的（bin 的边长用检测器自己的 ±8 mm 规则） |
 | `initial_box_probe.py place` | Stage 8：随机 box + bin 布局，oracle 与 vision 各自的 PREPLACE / PLACE 目标对 bin（真值或锁存值）、释放时指尖与壁顶的余量、盒子最终是否在 bin 内（按真值判）；`--scene legacy` 核对旧场景的固定目标。仿真 |
+| [入 bin 判据单测](../src/task_executor/test/test_bin_containment.cpp) / `initial_box_probe.py verify`、`place --require-success` | Stage 11：判据的居中、越界、离壁不足余量、压壁、bin 旋转；VERIFY 时新检测器对真值的误差（6 个布局）；oracle 与 vision 在随机布局上完整成功并按真值入 bin。仿真 |
 | [PoseLatch 单测](../src/task_executor/test/test_pose_latch.cpp) / `initial_box_probe.py latch` | 前者覆盖连续一致才锁存、不一致或非 MEASURED 重新累积、其它 generation 与旧序号被忽略、yaw 按物体周期比较、锁存后不变；后者起真实 bridge + 估计器 + executor 核对：锁存前无关节命令、锁存值对真值、GRASP 目标取自锁存值、重新锁存、缺 bin 时的 `VISION_LATCH_TIMEOUT`。仿真 |
 | [initial_box_compare.py](../src/mujoco_perception/test/initial_box_compare.py) / [initial_box_probe.py](../src/mujoco_perception/test/initial_box_probe.py) | 前者在同一批录制帧上对照 C++ 与 Python 原型；后者起真实 bridge + estimator（+ executor）核对消息的状态、窗口计数与误差。验收规则写在各自的 docstring，在运行前写定；仿真，不代表真机 |
 | [当前简化接口测试](../Job_guides/my_study/week4.md#51-改动清单与验证结果) | 2026-10-03 四包 build/test 通过，tracker 11 项通过；工作区汇总 487 tests / 0 errors / 0 failures / 71 skipped（含既有其他包结果），非完整 vision 成功证据 |

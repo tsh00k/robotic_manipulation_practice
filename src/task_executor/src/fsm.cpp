@@ -182,9 +182,14 @@ FsmDecision step(const FsmInputs & in, const JointTarget & target, const FsmPara
         const double dx = in.box_x_m - params.place_x_m;
         const double dy = in.box_y_m - params.place_y_m;
         const bool released = in.attachment_state == kAttachmentReleased;
-        if (std::hypot(dx, dy) < params.place_region_radius_m && released &&
-          pastMinSettle(in, params))
-        {
+        // With a bin: resting on its floor, inside the opening by the margin (Week 4.1
+        // Stage 11). Without one: within the radius of the place target, as before.
+        const bool placed = params.place_into_bin ?
+          boxInBin(
+          {in.box_x_m, in.box_y_m, in.box_z_m, in.box_yaw_rad}, params.bin,
+          params.containment).inside :
+          std::hypot(dx, dy) < params.place_region_radius_m;
+        if (placed && released && pastMinSettle(in, params)) {
           return {Phase::kDone, ExitReason::kReached, false};
         }
         if (in.elapsed_in_phase_s > params.phase_timeout_s) {

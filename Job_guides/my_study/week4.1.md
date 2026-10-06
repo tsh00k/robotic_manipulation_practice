@@ -123,12 +123,12 @@
 | | 3 | 已完成 | **误差表**：box 与 bin 初始位姿检测离线能做到多准；是否需要颜色、壁高要不要改的依据 | 产品代码 |
 | | 4 | 已评估 | bin 壁高与夹爪净间隙：**已评估，不做**（壁保持 12 mm） | — |
 | C 落地 | 5 | 已完成 | box 位姿检测落地：x、y、yaw（消息清理推迟，见 Stage 5 的 5.11） | bin、executor |
-| | 6 | **重** | bin 位姿检测落地，不读场景配置（bin 的高度带只比桌面高 3.5 mm，检测要重新调） | 锁存、任务 |
-| | 7 | 轻 | reset 后多帧一致的锁存；重试时重新检测 | 改任何目标 |
-| D 任务接入 | 8 | 轻 | place 目标与支撑高度取自锁存 bin | `grasp_yaw`、成功判据 |
-| | 9 | 轻 | `grasp_yaw` 取自锁存 box yaw | 成功判据、防滑 |
+| | 6 | 已完成 | bin 位姿检测落地，不读场景配置（bin 的高度带只比桌面高 3.5 mm，检测要重新调） | 锁存、任务 |
+| | 7 | 已完成 | reset 后多帧一致的锁存；重试时重新检测 | 改任何目标 |
+| D 任务接入 | 8 | 已完成 | place 目标与支撑高度取自锁存 bin | `grasp_yaw`、成功判据 |
+| | 9 | 已完成 | `grasp_yaw` 取自锁存 box yaw | 成功判据、防滑 |
 | | 10 | — | **并入 Stage 11，不单独做**（编号保留） | — |
-| | 11 | **重** | 释放后 box 在 bin 内的检测（先测可行性）与入 bin 成功判据：释放后新视觉 box 完整在锁存 bin 内 | 多帧稳定 |
+| | 11 | 已完成 | 释放后 box 在 bin 内的检测（先测可行性）与入 bin 成功判据：释放后新视觉 box 完整在锁存 bin 内 | 多帧稳定 |
 | E 完整性 | 12 | 轻 | 搬运期夹爪开度窗口 | 视觉 |
 | | 13 | 轻 | 附着确认不再读 box 真值 | 开度窗口 |
 | F 验收 | 14 | **重** | 随机场景的过程验收，用留出集 | 新功能 |
@@ -1471,7 +1471,105 @@ C1、C2：工具转角与盒子 yaw（oracle 用真值，vision 用锁存值）�
 
 ## Stage 11：box 在 bin 内的检测与入 bin 成功判据
 
-**出口：** 释放后的新视觉 box 完整落在锁存的视觉 bin 内才算成功，替代 XY 半径判断。分两步：先确认检测得出来（原 Stage 10），再写判据。
+**状态（2026-10-06）：已完成，尚未提交。** 11.0、11.1 是实现之前写定的，没有改动；F1~F3、G1~G5 全部满足。**G2 第一次运行没通过**（3 个布局里 1 个死锁），原因是我的实现设计，改了实现、没改规则，见 11.3。原计划的两步保留在 11.9。验证是仿真的。**分量：重。**
+
+### 11.0 一句话总结（目标）
+
+释放后，VERIFY 用**新的初始检测器**（`~/initial_box_pose`，估计器在释放时清空窗口、重新装满后再测）给出的盒子位姿，与锁存的 bin 比：盒子四角都在 bin 内口里、留出检测误差的余量，盒心高度在内底面上，才算成功；否则不宣称成功（按现有逻辑超时、`PLACE_MISSED`、重试）。旧检测器（`~/object_pose`）不再被 executor 使用。没有 bin 的旧场景仍用以放置目标为圆心的半径判据，但盒子位姿同样改由新检测器给出。最后把 demo 的默认来源改为 vision（Stage 8 推迟到这里）。
+
+### 11.1 设计与验收（实现前写定，不因结果改动）
+
+**为什么第一步不是“新做一个检测器”。** Stage 5、6、7 的在线运行里，释放后新检测器对 bin 里的盒子一直报 MEASURED，位置约 (0.498, 0.296, 0.248)；拒绝的是旧检测器。新检测器的高度带是 [0.245, 0.30] m，盒子在 bin 地板上时顶面 0.267 m 仍在带内，bin 壁顶 0.239 m 在带外；单测 `ABoxStandingOnTheBinFloorKeepsItsMeasuredHeight` 也覆盖了这一点。所以第一步要测的是这个检测器在**真实 VERIFY 时刻**（机械臂在 bin 上方、盒子刚落下）准不准，而不是重新设计。
+
+**第一步：检测可行性。** 新命令 `initial_box_probe.py verify`：oracle 来源（真值只用来评测）、`place.into_bin`、对齐朝向开，随机布局（种子 20261008，box 与 bin 都随机）每个一个 episode。释放时刻 = 最后一段附着结束的那个样本（Stage 8 修正后的定义）。
+
+| 编号 | 规则（不因结果改动） |
+| --- | --- |
+| F1 | 释放后 3 s 仿真时间内出现 MEASURED 的 `initial_box_pose` |
+| F2 | 释放 1 s 仿真时间之后（盒子已落稳）的每一条 MEASURED，与该 episode 最后一个样本的盒子真值比：x、y ≤ 3 mm，z ≤ 2 mm，yaw（模 90°）≤ 5°。限与 Stage 5、6 的在线限相同 |
+| F3 | 抓取或放置失败（盒子没进 bin）的布局记录下来、不计入；至少 4 个布局计入，否则第一步结论不成立 |
+| 报告 | 释放后**第一条** MEASURED 的误差（窗口里混着下落中的盒子，可能偏大）；释放后 bin 的估计是否仍为 MEASURED（盒子在 bin 里，只报告，executor 用的是锁存值）；没有做“不用机器人遮罩”和“高度带按地板调整”两个变体：节点总是遮罩，高度带不需要调（见上），所以不再测 |
+
+**第二步：判据（纯函数，不依赖 ROS）。** 输入：盒子 (x, y, z, yaw)、bin (x, y, 内底面 z, yaw)。盒子边长 40 mm；bin 内口半宽 70 × 65 mm（MJCF：壁内表面距中心 0.070、0.065 m）。
+
+- **余量 5 mm** = 盒子检测的位置限 3 mm（F2）+ bin 在线最大位置偏差 1.23 mm 向上取 2 mm。在这里定死，第一步的结果不改变它（第一步不满足时第二步不做）。
+- **inside：** 盒子四角在 bin 坐标系里都满足 |x| ≤ 70 − 5、|y| ≤ 65 − 5 mm，**且** 盒心高度在 内底面 + 20 mm ± 5 mm 内（落在壁顶上的盒子盒心约 0.259 m，高 12 mm，排除）。
+- **其它一律不算成功**，包括“可能在里面但离壁不到 5 mm”的不确定情形；VERIFY 继续等，超时则是现有的 `PLACE_MISSED`，再按现有逻辑重试。不新增状态机。
+- 每次 VERIFY 判定把“最小余量”（四角离内口的最小距离，负数表示越界）和高度差写进日志，用于观察。
+- 来源：oracle 用真值盒子与 bridge 的真值 bin；vision 用新检测器的盒子与**锁存的** bin。bin 的 yaw 由此进入放置目标（`PlaceTarget` 加 `yaw`）。
+- 没有 bin（旧场景）：保持以放置目标为圆心、半径 0.08 m 的判据。
+
+**executor 的改动。** 释放之后，vision 来源准入 `~/initial_box_pose` 的 MEASURED（与 bridge 样本按 session、generation、序号配对，同旧路径），不再读 `~/object_pose`。估计器在释放时清空窗口，所以释放后第一条 MEASURED 至少晚 10 帧。
+
+| 编号 | 条件 | 预期 | 否定条件 |
+| --- | --- | --- | --- |
+| G1 | oracle，Stage 8 的同 3 个布局 | 3/3 成功、零重试；探针按真值判盒子在 bin 内；日志里最小余量为正 | 任一失败，或成功但盒子不在 bin 内 |
+| G2 | vision，同 3 个布局 | 3/3 成功、零重试（Stage 8、9 里它们都卡在 VERIFY 的 `OBSERVATION_STALE`）；盒子在 bin 内 | 同上 |
+| G3 | 单测 | 居中 inside；一角越过内口 outside；离壁 3 mm（真实在里面，但在 5 mm 余量内）不算成功；盒心高 12 mm（压在壁顶）不算成功；bin 转 90° 时用 bin 自己的坐标系；FSM 在 VERIFY 只在 inside 时到 DONE | 任一不符 |
+| G4 | 旧场景，vision 与 oracle 各 3 个 | 都成功、零重试（vision 的 VERIFY 改由新检测器给出） | 任一失败 |
+| G5 | `demo.launch.py` 的 `observation_source` 默认值 | 改为 `vision`，文档显式记录；bridge 的 launch 守卫测试仍通过 | — |
+
+**不做：** 在线的负例（让盒子真的落在壁上或 bin 外）——没有可靠的方法在仿真里稳定地制造，只用单测覆盖（G3）；多帧稳定、掉落检测（计划里明确不引入）。
+
+### 11.2 改动清单
+
+| 文件 | 内容 |
+| --- | --- |
+| [bin_containment.hpp](../../src/task_executor/include/task_executor/bin_containment.hpp) / [.cpp](../../src/task_executor/src/bin_containment.cpp) | `boxInBin(box, bin, params)`：四角在内口里且离壁 ≥ 5 mm、盒心高度在内底面 + 20 ± 5 mm；返回是否在内、最小角余量、高度差 |
+| [fsm.hpp](../../src/task_executor/include/task_executor/fsm.hpp) / [fsm.cpp](../../src/task_executor/src/fsm.cpp) | VERIFY：有 bin 时用 `boxInBin()`，否则保留半径；输入加盒子高度与 yaw |
+| [waypoint_source.hpp](../../src/task_executor/include/task_executor/waypoint_source.hpp)、[episode_controller.hpp](../../src/task_executor/include/task_executor/episode_controller.hpp) / [.cpp](../../src/task_executor/src/episode_controller.cpp) | `PlaceTarget` 加 bin 的 `yaw_rad`；`setPlacement(..., into_bin)` 把 bin 交给 FSM；控制器从位姿算盒子 yaw |
+| [task_executor_node.cpp](../../src/task_executor/src/task_executor_node.cpp) | VERIFY 阶段准入新检测器的 MEASURED，其它阶段用锁存值（按 FSM 阶段切换，原来按附着状态）；不再订阅 `~/object_pose`；放置目标带上 bin yaw；VERIFY 期间打印 `verify:` 行 |
+| [demo.launch.py](../../src/mujoco_bridge/launch/demo.launch.py) | `observation_source` 默认 `vision`（G5） |
+| 测试与工具 | [test_bin_containment.cpp](../../src/task_executor/test/test_bin_containment.cpp)（6 项）、FSM 1 项；[initial_box_probe.py](../../src/mujoco_perception/test/initial_box_probe.py) 加 `verify` 命令和 `place --require-success` |
+
+### 11.3 结果
+
+**第一步（F1~F3，`verify`，oracle，6 个随机布局，都计入）：**
+
+| 布局 | 释放后第一条 MEASURED | 第一条的误差 dx / dy / dz（mm），dyaw（°） | 落稳后最大 \|dx\| / \|dy\| / \|dz\|（mm），\|dyaw\|（°） | 盒子在里面时 bin 的估计 |
+| --- | --- | --- | --- | --- |
+| 0 | 0.93 s | 0.17 / −1.83 / 1.06，0.48 | 0.38 / 1.08 / 0.72，0.00 | 23/23 MEASURED |
+| 1 | 1.04 s | 0.48 / 0.86 / 0.71，−0.03 | 0.48 / 1.06 / 0.71，0.03 | 22/22 |
+| 2 | 1.10 s | 0.73 / −0.70 / 0.54，0.01 | 0.73 / 0.70 / 0.58，0.57 | 23/23 |
+| 3 | 1.04 s | 0.32 / 1.17 / 0.66，0.01 | 0.46 / 1.17 / 0.73，0.01 | 22/22 |
+| 4 | 0.94 s | 1.44 / 0.37 / 0.25，−0.02 | 0.54 / 1.01 / 0.69，0.02 | 23/23 |
+| 5 | 0.92 s | 0.48 / 0.92 / 0.61，−0.06 | 0.43 / 0.91 / 0.60，0.02 | 23/23 |
+
+全部满足：3 s 内都有 MEASURED（实际 0.9~1.1 s，就是重新装满 10 帧的时间）；落稳后最大偏差 1.17 mm、0.73 mm（高）、0.57°，在 3 mm、2 mm、5° 之内。释放后每个布局有 9~10 条非 MEASURED，都是窗口装帧时的 WARMING_UP。第一条 MEASURED 的误差最大 1.83 mm，比落稳后大，与 Stage 5 的“窗口刚装满时偏大”同类，但仍在限内。
+
+**第二步：**
+
+| 编号 | 结果 |
+| --- | --- |
+| G1 oracle（Stage 8 的 3 个布局） | 3/3 成功、零重试，盒子按真值在 bin 内；`verify:` 行的最小角余量 30.8、38.4、40.8 mm，高度差 −0.1 mm（修实现后用新的二进制重跑，结果相同） |
+| G2 vision（同 3 个布局） | **第一次运行 2/3**：布局 2 以 `OBSERVATION_STALE` 结束（见下）。修实现后重跑 **3/3 成功、零重试**，盒子都在 bin 内，最小角余量 39.0、30.7、41.8 mm，高度差 −0.1~−0.3 mm。**这是 vision 第一次把盒子完整放进 bin 并通过 VERIFY** |
+| G3 单测 | executor 包 259 项、0 失败；判据 6 项（居中、越界 5 mm、离壁 3 mm 不认、压壁 12 mm 不认、bin 转 90° 的坐标系、未知位姿）与 FSM 1 项 |
+| G4 旧场景 | vision 3/3、oracle 3/3 成功、零重试（vision 的 VERIFY 已改由新检测器给出） |
+| G5 | `observation_source` 默认值改为 `vision`；bridge 包 217 项（含 launch 守卫）通过 |
+
+**G2 第一次失败：一个我设计时没想到的死锁。** 11.1 里我写的是“释放之后，vision 准入新检测器的 MEASURED”。布局 2（盒子 41°，工具也转了 41°）里，OPEN 阶段张开的手指还停在 bin 正上方，挡住了盒子的边，检测器一直回答 `NO_RECTANGLE_MATCHES_BOX`。控制器每推进一步都要一个新准入的观测；没有观测，它就停在 OPEN、不发 RETRACT；手不撤离，盒子就一直被挡。5 s 后 `OBSERVATION_STALE`。第一步用的是 oracle，机械臂照常撤离，所以没有暴露。**修法：** OPEN、RETRACT 本来就不用盒子位姿，所以改成**只有 VERIFY 阶段**才要求新测量，之前各阶段都用锁存值。这只改了实现，没改 G2 的规则；改后用新二进制把 G1、G2、G4 都重跑了。
+
+**修的时候我又犯了一个错：** 删掉旧的 `verifyingAfterRelease()` 时把紧跟其后的 `applyPlacement()` 也删了，构建失败；而我在同一条命令里接着跑了在线检查，所以那一轮在线结果其实是旧二进制跑的（仍是 2/3）。发现后从上一个提交取回该函数、重新构建，上表是之后的结果。教训：构建失败时不要在同一条命令里继续跑在线检查。
+
+### 11.4 你没问但值得注意的
+
+- **（E 可测试性）控制器“没有观测就不推进”是一类会造成死锁的耦合。** 这次是 OPEN 阶段被自己的手挡住。任何“某个阶段需要视觉、而那个阶段的动作会挡住视觉”的设计都会撞上它。现在 VERIFY 时手在 RETRACT 位姿（TCP 在 bin 内底面上方约 0.17 m），第一步的 6 次和 G2 的 3 次都没挡住；但如果 RETRACT 高度或相机位置改了，VERIFY 也可能遇到同样的事，到时的症状同样是 `OBSERVATION_STALE`。
+- **（E 可测试性）这次的判据从来没在线上判过“不在里面”。** 9 次 bin 场景 episode 的最小角余量都在 26 mm 以上，盒子都落在中间附近；“越界”“压壁”“离壁不足余量”只有单测。11.1 里说过在线负例不做，这条局限要带到 Stage 14。
+- **（C 可观测性）VERIFY 的结论只在日志里。** `verify:` 行给出余量和高度差，但 outcome 里只有成功或 `PLACE_MISSED`，看不到“差多少”。Stage 14 要统计入 bin 的余量分布时，要么解析日志，要么把它放进 outcome。
+- **Stage 8 提出的附着判断问题顺带解决了。** 原来按“见过附着又不是附着”切换路径，会被抓取时的附着反复骗到；现在按 FSM 阶段切换，不再看附着状态。bridge 的门槛缓冲问题本身还在悬挂清单里。
+- **demo 默认改成 vision 后，默认启动的是 4 个节点（bridge、估计器、executor、rviz），而且要开相机。** 只想看 oracle 的人要显式传 `observation_source:=oracle`。
+
+### 11.5 本阶段边界与后续
+
+做完了：VERIFY 时的盒子来自新检测器；入 bin 判据（带余量、排除压壁）；executor 不再使用旧检测器；demo 默认 vision。
+
+**没有做：** 在线负例；把 VERIFY 余量放进 outcome；清理旧检测路径和三个已不起作用的 `vision.*` 参数（与 Stage 5 的 5.11 一起）；`VisionObjectPose` 的消费者现在只剩离线工具。
+
+**没有验证：** 盒子落在壁上或 bin 外时的在线表现；VERIFY 时手挡住盒子；bin 倾斜；真实噪声。
+
+**验证精简的落实：** 单测 7 项新增；没有变异检查、没有基线构建；探针扩展了现有脚本。G2 失败和误删函数各多跑了一轮在线检查；三个包的整包测试一次通过（Python lint 这次也先在本地按包的配置检查了）。前置满足，下一阶段是 Stage 12（搬运期夹爪开度窗口）。
+
+### 11.9 原计划的两步（2026-10-06 之前写的，保留作对照）
 
 ### 第一步：检测可行性（原 Stage 10）
 

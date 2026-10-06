@@ -40,11 +40,13 @@ EpisodeController::EpisodeController(
 }
 
 void EpisodeController::setPlacement(
-  const PlaceTarget & place, double verify_x_m, double verify_y_m)
+  const PlaceTarget & place, double verify_x_m, double verify_y_m, bool into_bin)
 {
   place_ = place;
   fsm_params_.place_x_m = verify_x_m;
   fsm_params_.place_y_m = verify_y_m;
+  fsm_params_.place_into_bin = into_bin;
+  fsm_params_.bin = {place.x, place.y, place.support_z, place.yaw_rad};
 }
 
 // Current: any state, including an active or terminal episode.
@@ -258,6 +260,12 @@ EpisodeActions EpisodeController::tick(double sim_time_s, TimePoint wall_now)
   in.attachment_state = frame.attachment_state;
   in.box_x_m = frame.object_pose.x;
   in.box_y_m = frame.object_pose.y;
+  in.box_z_m = frame.object_pose.z;
+  in.box_yaw_rad = std::atan2(
+    2.0 * (frame.object_pose.qw * frame.object_pose.qz +
+    frame.object_pose.qx * frame.object_pose.qy),
+    1.0 - 2.0 * (frame.object_pose.qy * frame.object_pose.qy +
+    frame.object_pose.qz * frame.object_pose.qz));
   in.elapsed_in_phase_s = sim_time_s - phase_start_sim_time_s_;
   in.retry_count = retry_count_;
   const auto decision = step(in, target, fsm_params_);

@@ -19,6 +19,7 @@
 
 #include <mujoco_bridge/grasp_criteria.hpp>
 
+#include "task_executor/bin_containment.hpp"
 #include "task_executor/phase.hpp"
 #include "task_executor/waypoint_source.hpp"
 
@@ -68,6 +69,9 @@ struct FsmInputs
   // box-relative-to-tcp distance, not box-relative-to-a-place-target distance --
   // two different questions), so it travels separately here.
   double box_x_m = 0.0;
+  // kVerify with a bin (Week 4.1 Stage 11): the box height and yaw too.
+  double box_z_m = 0.0;
+  double box_yaw_rad = 0.0;
   double box_y_m = 0.0;
   double elapsed_in_phase_s = 0.0;
   int retry_count = 0;
@@ -126,6 +130,10 @@ struct FsmParams
   double place_x_m = 0.0;
   double place_y_m = 0.0;
   double place_region_radius_m = 0.06;
+  // With a bin, kVerify asks boxInBin() instead of the radius (Week 4.1 Stage 11).
+  bool place_into_bin = false;
+  PlanarPose bin;
+  ContainmentParams containment;
 };
 
 struct FsmDecision
