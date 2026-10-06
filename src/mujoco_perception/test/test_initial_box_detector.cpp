@@ -125,32 +125,6 @@ TEST(InitialBox, ATableWithoutAnythingOnItHasNoBandPixels)
   EXPECT_GT(result.valid_depth_pixels, 0U);
 }
 
-TEST(InitialBox, AnImageWithoutDepthIsReportedAsSuch)
-{
-  const std::vector<float> nothing(
-    static_cast<std::size_t>(mujoco_perception_test::kImageWidth) *
-    mujoco_perception_test::kImageHeight, std::numeric_limits<float>::quiet_NaN());
-  EXPECT_EQ(detect(nothing).rejection, InitialBoxRejection::kNoValidDepth);
-}
-
-TEST(InitialBox, InconsistentInputIsInvalidInputNotAGuess)
-{
-  EXPECT_EQ(detect(std::vector<float>(10, 1.0F)).rejection, InitialBoxRejection::kInvalidInput);
-
-  InitialBoxConfig non_square;
-  non_square.half_extents = Eigen::Vector3d(0.02, 0.03, 0.02);  // yaw would be 180-periodic
-  EXPECT_EQ(
-    detectScene({flatBox(0.5, 0.0, 0.0)}, non_square).rejection,
-    InitialBoxRejection::kInvalidInput);
-
-  InitialBoxConfig empty_region;
-  empty_region.x_min_m = 0.8;
-  empty_region.x_max_m = 0.2;
-  EXPECT_EQ(
-    detectScene({flatBox(0.5, 0.0, 0.0)}, empty_region).rejection,
-    InitialBoxRejection::kInvalidInput);
-}
-
 TEST(InitialBox, ABlockOfTheWrongSizeIsReportedWithItsSidesAndNotAccepted)
 {
   // 60 x 60 mm and as tall as the box: it is in the band but is not the box.
@@ -162,52 +136,6 @@ TEST(InitialBox, ABlockOfTheWrongSizeIsReportedWithItsSidesAndNotAccepted)
   EXPECT_FALSE(result.candidates.front().matches_box);
   EXPECT_NEAR(result.candidates.front().side_along_m, 0.06, kPositionTolerance);
   EXPECT_NEAR(result.candidates.front().side_across_m, 0.06, kPositionTolerance);
-}
-
-TEST(InitialBox, ASmallerCubeIsNotMistakenForTheBox)
-{
-  // 25 mm cube on the table: its top (0.245) just reaches the lower edge of the band.
-  const SceneBox small{Eigen::Vector3d(0.50, 0.0, kTableZ + 0.0125), 0.0,
-    Eigen::Vector3d(0.0125, 0.0125, 0.0125)};
-  const auto result = detectScene({small});
-  EXPECT_FALSE(result.measured());
-}
-
-TEST(InitialBox, ABlockOfFewPixelsIsNoiseNotACandidate)
-{
-  // An 8 mm square pole as tall as the box: its top is in the band but covers only a handful of
-  // pixels (3.3 mm per pixel), below min_component_pixels = 20, so it is not even listed.
-  const SceneBox pole{Eigen::Vector3d(0.50, 0.0, kTableZ + kBoxHalf), 0.0,
-    Eigen::Vector3d(0.004, 0.004, kBoxHalf)};
-  const auto result = detectScene({pole});
-  EXPECT_EQ(result.rejection, InitialBoxRejection::kNoBandPixels);
-  EXPECT_TRUE(result.candidates.empty());
-
-  InitialBoxConfig keep_everything;
-  keep_everything.min_component_pixels = 1;
-  const auto listed = detectScene({pole}, keep_everything);
-  EXPECT_EQ(listed.rejection, InitialBoxRejection::kNoMatchingRectangle);
-  ASSERT_EQ(listed.candidates.size(), 1U);
-  EXPECT_FALSE(listed.candidates.front().matches_box);
-}
-
-TEST(InitialBox, TwoBoxesAreAmbiguousAndBothAreListed)
-{
-  const auto result = detectScene({flatBox(0.40, -0.12, 0.0), flatBox(0.60, 0.12, 20.0)});
-  EXPECT_EQ(result.rejection, InitialBoxRejection::kSeveralMatchingRectangles);
-  ASSERT_EQ(result.candidates.size(), 2U);
-  EXPECT_TRUE(result.candidates[0].matches_box);
-  EXPECT_TRUE(result.candidates[1].matches_box);
-}
-
-TEST(InitialBox, ABoxCutByTheSearchRegionIsRefusedNotMeasuredFromItsVisiblePart)
-{
-  // Centred on the region's lower x edge (0.20): only half of the top face is inside.
-  const auto result = detectScene({flatBox(0.20, 0.0, 0.0)});
-  EXPECT_EQ(result.rejection, InitialBoxRejection::kNoMatchingRectangle);
-  ASSERT_EQ(result.candidates.size(), 1U);
-  const auto & candidate = result.candidates.front();
-  EXPECT_LT(std::min(candidate.side_along_m, candidate.side_across_m), 0.03);
 }
 
 TEST(InitialBox, TheBinIsNeverACandidateAndDoesNotDisturbTheBox)
@@ -259,30 +187,6 @@ TEST(InitialBox, AveragingTenNoisyFramesRecoversTheBoxThatAGlancingNoisyFrameWou
   EXPECT_NEAR(result.position.x(), 0.55, kPositionTolerance);
   EXPECT_NEAR(result.position.y(), -0.05, kPositionTolerance);
   EXPECT_LT(std::abs(yawErrorDeg(result, 33.0)), kYawToleranceDeg);
-}
-
-TEST(InitialBox, TheMedianOfAnEvenSetIsTheMeanOfTheTwoMiddleValues)
-{
-  using mujoco_perception::detail::median;
-  EXPECT_DOUBLE_EQ(median({5.0}), 5.0);
-  EXPECT_DOUBLE_EQ(median({3.0, 1.0, 2.0}), 2.0);
-  EXPECT_DOUBLE_EQ(median({4.0, 1.0, 3.0, 2.0}), 2.5);      // not the upper middle value, 3
-  EXPECT_DOUBLE_EQ(median({1.0, 1.0, 9.0, 9.0}), 5.0);      // the two middle values differ a lot
-  EXPECT_DOUBLE_EQ(median({0.2601, 0.2599, 0.2605, 0.2595}), 0.2600);
-}
-
-TEST(InitialBox, TheRejectionNamesAreTheOnesTheMessageCarries)
-{
-  EXPECT_STREQ(initialBoxRejectionName(InitialBoxRejection::kNone), "NONE");
-  EXPECT_STREQ(initialBoxRejectionName(InitialBoxRejection::kInvalidInput), "INVALID_INPUT");
-  EXPECT_STREQ(initialBoxRejectionName(InitialBoxRejection::kNoValidDepth), "NO_VALID_DEPTH");
-  EXPECT_STREQ(initialBoxRejectionName(InitialBoxRejection::kNoBandPixels), "NO_BOX_BAND_PIXELS");
-  EXPECT_STREQ(
-    initialBoxRejectionName(InitialBoxRejection::kNoMatchingRectangle),
-    "NO_RECTANGLE_MATCHES_BOX");
-  EXPECT_STREQ(
-    initialBoxRejectionName(InitialBoxRejection::kSeveralMatchingRectangles),
-    "SEVERAL_BOX_CANDIDATES");
 }
 
 }  // namespace

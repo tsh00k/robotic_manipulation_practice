@@ -50,13 +50,12 @@ namespace mujoco_perception
 class DepthWindow
 {
 public:
-  // max_spread_m > 0; infinity switches the spread rule off.
+  // max_spread_m: infinity switches the spread rule off.
   explicit DepthWindow(
     std::size_t capacity, double min_valid_fraction = 0.5, double max_spread_m = 0.02);
 
-  // Append a frame, dropping the oldest when the window is full. A frame whose size differs
-  // from the frames already held starts a new window (the camera changed): the old frames are
-  // not comparable.
+  // Append a frame, dropping the oldest when the window is full. All frames must have the same
+  // size (one camera; changing the camera mid-run is not supported).
   void push(const std::vector<float> & depth);
 
   void clear();

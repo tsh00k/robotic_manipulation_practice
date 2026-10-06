@@ -17,7 +17,6 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
-#include <stdexcept>
 
 namespace mujoco_perception
 {
@@ -25,22 +24,10 @@ namespace mujoco_perception
 DepthWindow::DepthWindow(std::size_t capacity, double min_valid_fraction, double max_spread_m)
 : capacity_(capacity), min_valid_fraction_(min_valid_fraction), max_spread_m_(max_spread_m)
 {
-  if (capacity == 0) {
-    throw std::invalid_argument("DepthWindow capacity must be at least 1");
-  }
-  if (!(min_valid_fraction >= 0.0 && min_valid_fraction <= 1.0)) {
-    throw std::invalid_argument("DepthWindow min_valid_fraction must be in [0, 1]");
-  }
-  if (!(max_spread_m > 0.0)) {  // also rejects NaN
-    throw std::invalid_argument("DepthWindow max_spread_m must be positive");
-  }
 }
 
 void DepthWindow::push(const std::vector<float> & depth)
 {
-  if (!frames_.empty() && frames_.front().size() != depth.size()) {
-    frames_.clear();
-  }
   frames_.push_back(depth);
   while (frames_.size() > capacity_) {
     frames_.pop_front();

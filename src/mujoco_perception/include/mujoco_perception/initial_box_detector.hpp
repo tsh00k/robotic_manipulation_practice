@@ -74,7 +74,7 @@ struct InitialBoxConfig
 enum class InitialBoxRejection
 {
   kNone,                       // a box was measured
-  kInvalidInput,               // inconsistent image, camera or configuration
+  kInvalidInput,               // the depth image does not match the camera info size
   kNoValidDepth,               // the image has no usable depth at all
   kNoBandPixels,               // nothing in the height band forms a block
   kNoMatchingRectangle,        // blocks exist but none has the box's two sides
@@ -82,13 +82,6 @@ enum class InitialBoxRejection
 };
 
 const char * initialBoxRejectionName(InitialBoxRejection reason);
-
-namespace detail
-{
-// The median of a set of values: the middle one, or the mean of the two middle ones for an even
-// count. Exposed only so that it can be tested directly.
-double median(std::vector<double> values);
-}  // namespace detail
 
 // One block of the height band, whether or not it was taken for the box. Reported so that a
 // miss can be explained from the message alone (which blocks, how big, how far off).

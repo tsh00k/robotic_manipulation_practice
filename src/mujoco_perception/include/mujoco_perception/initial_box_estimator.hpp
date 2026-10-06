@@ -54,7 +54,6 @@ struct InitialBoxEstimate
 class InitialBoxEstimator
 {
 public:
-  // frames >= 1; frames == 1 means no averaging.
   InitialBoxEstimator(std::size_t frames, const InitialBoxConfig & config);
 
   // Add one usable depth frame (metres, row-major, NaN or <= 0 where there is no measurement,

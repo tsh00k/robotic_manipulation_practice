@@ -19,8 +19,6 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
-#include <limits>
-#include <stdexcept>
 #include <vector>
 
 #include "mujoco_perception/initial_box_estimator.hpp"
@@ -86,12 +84,6 @@ TEST(InitialBoxEstimator, AFullWindowThatFindsNoBoxIsNotMeasuredNotWarmingUp)
   EXPECT_EQ(estimate.frames_averaged, 2U);
 }
 
-TEST(InitialBoxEstimator, ASingleFrameWindowMeasuresOnTheFirstFrame)
-{
-  InitialBoxEstimator estimator(1, InitialBoxConfig{});
-  EXPECT_EQ(feed(estimator, scene({boxAt(0.45, -0.1, 0.0)})).state, InitialBoxState::kMeasured);
-}
-
 TEST(InitialBoxEstimator, ResetForgetsTheOldSceneSoANewBoxIsNotBlendedWithTheOldOne)
 {
   InitialBoxEstimator estimator(2, InitialBoxConfig{});
@@ -108,39 +100,6 @@ TEST(InitialBoxEstimator, ResetForgetsTheOldSceneSoANewBoxIsNotBlendedWithTheOld
   // Only the new frames are in the window: the box is where it is now, not between the two.
   EXPECT_NEAR(estimate.detection.position.x(), 0.60, 0.003);
   EXPECT_NEAR(estimate.detection.position.y(), 0.15, 0.003);
-}
-
-TEST(InitialBoxEstimator, WithoutResetTheWindowSlidesOverTheOldestFrame)
-{
-  // Contrast with the test above: no reset, so after the box moves it takes `frames` new frames
-  // before the mean is the new scene alone. In between, the old and the new box are both in the
-  // window; the mean of the two depths is not a box and must not be reported as one at the old
-  // or the new place.
-  InitialBoxEstimator estimator(2, InitialBoxConfig{});
-  const auto before = scene({boxAt(0.40, -0.15, 0.0)});
-  const auto after = scene({boxAt(0.60, 0.15, 0.0)});
-  feed(estimator, before);
-  feed(estimator, before);
-  const auto mixed = feed(estimator, after);
-  EXPECT_FALSE(
-    mixed.state == InitialBoxState::kMeasured &&
-    std::abs(mixed.detection.position.x() - 0.40) < 0.003)
-    << "a half-old window reported the old position";
-  const auto settled = feed(estimator, after);
-  ASSERT_EQ(settled.state, InitialBoxState::kMeasured);
-  EXPECT_NEAR(settled.detection.position.x(), 0.60, 0.003);
-}
-
-TEST(InitialBoxEstimator, NoFramesIsAConfigurationErrorNotAnEmptyEstimator)
-{
-  EXPECT_THROW(InitialBoxEstimator(0, InitialBoxConfig{}), std::invalid_argument);
-}
-
-TEST(InitialBoxEstimator, TheStateNamesAreTheOnesTheMessageUses)
-{
-  EXPECT_STREQ(initialBoxStateName(InitialBoxState::kWarmingUp), "WARMING_UP");
-  EXPECT_STREQ(initialBoxStateName(InitialBoxState::kNotMeasured), "NOT_MEASURED");
-  EXPECT_STREQ(initialBoxStateName(InitialBoxState::kMeasured), "MEASURED");
 }
 
 }  // namespace

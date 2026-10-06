@@ -14,8 +14,6 @@
 
 #include "mujoco_perception/initial_box_estimator.hpp"
 
-#include <stdexcept>
-
 namespace mujoco_perception
 {
 
@@ -35,9 +33,6 @@ const char * initialBoxStateName(InitialBoxState state)
 InitialBoxEstimator::InitialBoxEstimator(std::size_t frames, const InitialBoxConfig & config)
 : window_(frames), config_(config)
 {
-  if (frames == 0) {
-    throw std::invalid_argument("InitialBoxEstimator needs at least one frame");
-  }
 }
 
 InitialBoxEstimate InitialBoxEstimator::update(

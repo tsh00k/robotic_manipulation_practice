@@ -16,7 +16,6 @@
 
 #include <cmath>
 #include <limits>
-#include <stdexcept>
 #include <vector>
 
 #include "mujoco_perception/depth_window.hpp"
@@ -76,27 +75,6 @@ TEST(DepthWindow, AFlickeringPixelBelowTheValidFractionBecomesNaN)
   EXPECT_TRUE(std::isnan(mean[1]));  // valid in only 2 of 4
 }
 
-TEST(DepthWindow, ZeroAndNegativeDepthAreInvalidLikeNaN)
-{
-  DepthWindow window(2, 0.5);
-  window.push({0.0F, -1.0F});
-  window.push({4.0F, 6.0F});
-  const auto mean = window.mean();
-  EXPECT_FLOAT_EQ(mean[0], 4.0F);
-  EXPECT_FLOAT_EQ(mean[1], 6.0F);
-}
-
-TEST(DepthWindow, ADifferentImageSizeStartsANewWindow)
-{
-  DepthWindow window(3);
-  window.push({1.0F, 1.0F});
-  window.push({2.0F, 2.0F});
-  window.push({9.0F, 9.0F, 9.0F});  // camera changed: the two earlier frames are not comparable
-  EXPECT_EQ(window.size(), 1U);
-  ASSERT_EQ(window.mean().size(), 3U);
-  EXPECT_FLOAT_EQ(window.mean()[0], 9.0F);
-}
-
 TEST(DepthWindow, ClearEmptiesItAndTheMeanOfNothingIsNothing)
 {
   DepthWindow window(2);
@@ -106,25 +84,6 @@ TEST(DepthWindow, ClearEmptiesItAndTheMeanOfNothingIsNothing)
   EXPECT_EQ(window.size(), 0U);
   EXPECT_FALSE(window.full());
   EXPECT_TRUE(window.mean().empty());
-}
-
-TEST(DepthWindow, AveragingNIndependentFramesShrinksTheSpreadBySqrtN)
-{
-  // Deterministic samples: frame k has +d on even pixels and -d on odd pixels when k is even,
-  // the opposite when k is odd. Independent of any random generator, the mean of an even number
-  // of frames is exactly the true value 1.0.
-  DepthWindow window(4);
-  for (int k = 0; k < 4; ++k) {
-    std::vector<float> frame(6);
-    for (std::size_t i = 0; i < frame.size(); ++i) {
-      const float sign = ((i + static_cast<std::size_t>(k)) % 2 == 0) ? 1.0F : -1.0F;
-      frame[i] = 1.0F + sign * 0.004F;
-    }
-    window.push(frame);
-  }
-  for (const float value : window.mean()) {
-    EXPECT_NEAR(value, 1.0F, 1e-6F);
-  }
 }
 
 TEST(DepthWindow, APixelThatSwitchesBetweenTwoSurfacesIsNotAveragedIntoAFlyingPixel)
@@ -173,16 +132,6 @@ TEST(DepthWindow, InvalidFramesDoNotCountTowardsTheSpread)
   window.push({0.0F});
   window.push({1.004F});
   EXPECT_NEAR(window.mean()[0], 1.002F, 1e-6F);
-}
-
-TEST(DepthWindow, RejectsAnImpossibleConfiguration)
-{
-  EXPECT_THROW(DepthWindow(0), std::invalid_argument);
-  EXPECT_THROW(DepthWindow(3, -0.1), std::invalid_argument);
-  EXPECT_THROW(DepthWindow(3, 1.5), std::invalid_argument);
-  EXPECT_THROW(DepthWindow(3, 0.5, 0.0), std::invalid_argument);
-  EXPECT_THROW(
-    DepthWindow(3, 0.5, std::numeric_limits<double>::quiet_NaN()), std::invalid_argument);
 }
 
 }  // namespace

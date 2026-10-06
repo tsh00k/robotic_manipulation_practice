@@ -291,7 +291,7 @@ FSM 默认位置/GRASP-CLOSE 位置/速度容差为 0.05 rad/0.3 rad/0.05 rad/s�
 | [掩膜单测](../src/mujoco_perception/test/test_robot_mask.cpp) / [probe](../src/mujoco_perception/test/robot_mask_probe.py) | 表面过滤、前后景保留、缺 TF/标定变化；probe 仅离线使用 oracle 统计误掩/残留 |
 | [Cartesian 回归](../Job_guides/my_study/week3.md#11-stage-ocartesian-任务几何与离线-ik-适配) / [编排回归](../Job_guides/my_study/week3.5.md#15-p5回归架构记录和收尾) | 固定 oracle 场景连续 20/20，不外推随机姿态、视觉或真机 |
 | [视觉验证](../Job_guides/my_study/week4.md#10-stage-4同帧机器人几何掩膜) | 掩膜/诊断基线、缺 TF、质量拒绝；完整视觉抓放未通过 |
-| [DepthWindow](../src/mujoco_perception/test/test_depth_window.cpp) / [初始 box 检测器](../src/mujoco_perception/test/test_initial_box_detector.cpp) / [InitialBoxEstimator](../src/mujoco_perception/test/test_initial_box_estimator.cpp) | 单测在精确光线投射的合成场景上，答案由构造给出（相机与场景在 [workcell_camera.hpp](../src/mujoco_perception/test/workcell_camera.hpp)）；故意改坏实现的变异检查全部被抓到。容差是像素量化界，不是调出来的 |
+| [DepthWindow](../src/mujoco_perception/test/test_depth_window.cpp) / [初始 box 检测器](../src/mujoco_perception/test/test_initial_box_detector.cpp) / [InitialBoxEstimator](../src/mujoco_perception/test/test_initial_box_estimator.cpp) | 单测在精确光线投射的合成场景上，答案由构造给出（相机与场景在 [workcell_camera.hpp](../src/mujoco_perception/test/workcell_camera.hpp)），共 20 项；场景固定，所以不测非法配置、不会出现的场景和相机分辨率变化。容差是像素量化界，不是调出来的 |
 | [initial_box_compare.py](../src/mujoco_perception/test/initial_box_compare.py) / [initial_box_probe.py](../src/mujoco_perception/test/initial_box_probe.py) | 前者在同一批录制帧上对照 C++ 与 Python 原型；后者起真实 bridge + estimator（+ executor）核对消息的状态、窗口计数与误差。验收规则写在各自的 docstring，在运行前写定；仿真，不代表真机 |
 | [当前简化接口测试](../Job_guides/my_study/week4.md#51-改动清单与验证结果) | 2026-10-03 四包 build/test 通过，tracker 11 项通过；工作区汇总 487 tests / 0 errors / 0 failures / 71 skipped（含既有其他包结果），非完整 vision 成功证据 |
 

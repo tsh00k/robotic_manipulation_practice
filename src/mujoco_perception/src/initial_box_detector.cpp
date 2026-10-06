@@ -29,15 +29,17 @@ namespace mujoco_perception
 namespace
 {
 
-bool validConfig(const InitialBoxConfig & c)
+// Median in the usual sense: the middle value, or the mean of the two middle values when the
+// count is even (taking the upper one would bias an even-sized set high by half the gap).
+double median(std::vector<double> values)
 {
-  return std::isfinite(c.plane_z_m) && c.half_extents.allFinite() &&
-         (c.half_extents.array() > 0.0).all() &&
-         std::abs(c.half_extents.x() - c.half_extents.y()) < 1e-6 &&
-         c.band_below_top_m >= 0.0 && c.band_above_top_m > 0.0 &&
-         c.x_min_m < c.x_max_m && c.y_min_m < c.y_max_m && c.depth_min_m > 0.0 &&
-         c.depth_max_m > c.depth_min_m && c.min_component_pixels > 0 &&
-         c.side_tolerance_m > 0.0 && c.top_face_depth_m > 0.0;
+  const auto middle = values.begin() + static_cast<std::ptrdiff_t>(values.size() / 2);
+  std::nth_element(values.begin(), middle, values.end());
+  if (values.size() % 2 == 1) {
+    return *middle;
+  }
+  const double lower = *std::max_element(values.begin(), middle);
+  return 0.5 * (lower + *middle);
 }
 
 // OpenCV (4.5.1 and later) reports angle in (0, 90]: the `width` side points along `angle`
@@ -68,24 +70,6 @@ void foldRectangle(
 
 }  // namespace
 
-namespace detail
-{
-
-// Median in the usual sense: the middle value, or the mean of the two middle values when the
-// count is even (taking the upper one would bias an even-sized set high by half the gap).
-double median(std::vector<double> values)
-{
-  const auto middle = values.begin() + static_cast<std::ptrdiff_t>(values.size() / 2);
-  std::nth_element(values.begin(), middle, values.end());
-  if (values.size() % 2 == 1) {
-    return *middle;
-  }
-  const double lower = *std::max_element(values.begin(), middle);
-  return 0.5 * (lower + *middle);
-}
-
-}  // namespace detail
-
 const char * initialBoxRejectionName(InitialBoxRejection reason)
 {
   switch (reason) {
@@ -108,10 +92,9 @@ InitialBoxResult detectInitialBox(
   InitialBoxResult result;
   const std::size_t width = camera_info.width;
   const std::size_t height = camera_info.height;
-  if (!validConfig(config) || width == 0 || height == 0 || camera_info.k[0] <= 0.0 ||
-    camera_info.k[4] <= 0.0 || depth.size() != width * height ||
-    !world_from_optical.matrix().allFinite())
-  {
+  // The configuration (square box, positive sizes, region) is fixed by the scene and is not
+  // checked; only the image size is, because a mismatch would read outside the vector.
+  if (width == 0 || height == 0 || depth.size() != width * height) {
     result.rejection = InitialBoxRejection::kInvalidInput;
     return result;
   }
@@ -247,7 +230,7 @@ InitialBoxResult detectInitialBox(
   }
   const double center_z = top_heights.empty() ?
     config.plane_z_m + config.half_extents.z() :
-    detail::median(top_heights) - config.half_extents.z();
+    median(top_heights) - config.half_extents.z();
   result.position = Eigen::Vector3d(box.center_xy.x(), box.center_xy.y(), center_z);
   result.yaw_rad = box.yaw_rad;
   return result;
