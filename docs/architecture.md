@@ -19,7 +19,7 @@
 | `robot_description` | vendor MJCF/mesh 与项目自有场景 | 官方 URDF 从系统包读取 |
 | `mujoco_bridge` | 物理步进、命令执行、reset、clock、TF、同一步观测、RGB-D 与附着生命周期 | 仿真 ground truth 的唯一发布者，不执行视觉估计 |
 | `manipulation_interfaces` | 观测、视觉、结果和 reset 消息/服务 | ROS 数据契约 |
-| `mujoco_perception` | 同帧机器人掩膜、几何候选检查与视觉证据 | 不读取物体真值/接触，不推断夹持或生成预测 |
+| `mujoco_perception` | 同帧机器人掩膜、几何候选检查与视觉证据；初始 box 位姿（深度均值 + 最小面积矩形） | 不读取物体真值/接触，不推断夹持或生成预测 |
 | `arm_kinematics` | FK/Jacobian、加权 DLS 与离线 IK | 纯 C++/Eigen/yaml-cpp，不依赖 ROS、MoveIt、MuJoCo |
 | `task_executor` | 观测适配、episode 编排、FSM、waypoint 与结果发布 | ROS 节点适配纯 C++ 控制器，当前单线程 executor |
 
@@ -29,7 +29,7 @@
 
 默认使用 oracle 观测与 diff_ik waypoint，keyframe 保留对照。固定 oracle 场景曾通过回归；完整 vision 抓放尚未验收。
 
-当前 Stage 5 已简化为 bridge 权威附着、视觉暂停/释放重测与 executor 缓存准入，见 [Week 4 Stage 5](../Job_guides/my_study/week4.md#stage-5视觉接口收紧与简化状态机)。四包构建/测试通过；2026-10-03 修复抬升前附着循环依赖并补 LIFT 到位门，见 [ADR 012](adr/012-prelift-attachment-confirmation.md)。oracle 持续注入视觉拒绝的真实回归为 20/20 成功、零重试，两包 build/test 通过（工作区汇总 492 tests、0 errors、0 failures、71 skipped）；详情见 Week 4 Stage 5；当前接口 replay 和完整 vision episode 未执行。旧独立夹持与 TCP 预测实验只作为历史证据；[ADR 009](adr/009-robot-aware-stateful-vision.md)、[ADR 010](adr/010-grasp-conditioned-object-state.md)、[ADR 011](adr/011-vision-object-pose-contract-tightening.md) 保留当时决策快照，不能代替下文当前契约。原 Stage 6（可配置 bin 与运输监控）已废弃并回退，不在代码中，见 [Week 4 6.9](../Job_guides/my_study/week4.md#69-回退决定与存档) 与 [ADR 015](adr/015-rollback-stage6-perception-side-transport-diagnostics.md)；后续改动按 [Week 4.1](../Job_guides/my_study/week4.1.md) 的阶段计划逐个加入，每个阶段通过后再更新本页。MoveIt 规划与 learned policy 尚未完成。
+当前 Stage 5 已简化为 bridge 权威附着、视觉暂停/释放重测与 executor 缓存准入，见 [Week 4 Stage 5](../Job_guides/my_study/week4.md#stage-5视觉接口收紧与简化状态机)。四包构建/测试通过；2026-10-03 修复抬升前附着循环依赖并补 LIFT 到位门，见 [ADR 012](adr/012-prelift-attachment-confirmation.md)。oracle 持续注入视觉拒绝的真实回归为 20/20 成功、零重试，两包 build/test 通过（工作区汇总 492 tests、0 errors、0 failures、71 skipped）；详情见 Week 4 Stage 5；当前接口 replay 和完整 vision episode 未执行。旧独立夹持与 TCP 预测实验只作为历史证据；[ADR 009](adr/009-robot-aware-stateful-vision.md)、[ADR 010](adr/010-grasp-conditioned-object-state.md)、[ADR 011](adr/011-vision-object-pose-contract-tightening.md) 保留当时决策快照，不能代替下文当前契约。原 Stage 6（可配置 bin 与运输监控）已废弃并回退，不在代码中，见 [Week 4 6.9](../Job_guides/my_study/week4.md#69-回退决定与存档) 与 [ADR 015](adr/015-rollback-stage6-perception-side-transport-diagnostics.md)；后续改动按 [Week 4.1](../Job_guides/my_study/week4.1.md) 的阶段计划逐个加入，每个阶段通过后再更新本页。Week 4.1 Stage 5 已加入初始 box 检测（`~/initial_box_pose`，见 [5.2](#52-机器人掩膜与几何估计) 末尾与 [5.3](#53-视觉消息与原因契约)，决策见 [ADR 018](adr/018-initial-box-detection-in-the-estimator.md)），估计器不再配对 RGB；executor 尚未消费它（Stage 7 起）。MoveIt 规划与 learned policy 尚未完成。
 
 ## 2. 模型与场景
 
@@ -154,13 +154,13 @@ URDF hand:=true 强制加 fer_ 前缀，跨库代码须显式映射。下表采�
 | 安装 | 项目 MJCF camera_link：world 平移 `(0.5,-0.45,1.0) m`，xyaxes=`1 0 0 0 0.857 0.514` |
 | 光学轴 | MuJoCo +X 右/+Y 上/-Z 前；到 optical 绕 X 转 π，变成 +X 右/+Y 下/+Z 前 |
 | 启用 | enable_rgbd_camera=true；bridge 默认关闭，vision 入口启用 |
-| 图像 | /mujoco_bridge/camera/color/image_raw：rgb8；同前缀 depth/image_raw：32FC1 |
+| 图像 | /mujoco_bridge/camera/color/image_raw：rgb8；同前缀 depth/image_raw：32FC1。estimator 只消费深度（Stage 5 起不订阅 RGB） |
 | 内参 | color/camera_info、depth/camera_info，相同零畸变内参；320×240、fovy=50°、fx=fy=257.34083046 px、cx=159.5/cy=119.5 |
 | 深度 | 米制光轴 z-depth；OpenGL 缓冲经近远平面换算，无效/远裁剪写 NaN |
 | 时间/frame | RGB、depth、两份 CameraInfo 共用物理步后仿真 stamp 与 camera_optical_frame |
 | 频率 | 相机 10 Hz、TF/observation 100 Hz、物理步长 0.002 s |
 
-反投影 `[(u-cx)z/fx,(v-cy)z/fy,z]` 后经静态 TF 转 world。四份相机消息与 BridgeObservation 按**完全相等 stamp（0 ns 容差）**配对，获取生命周期键并拒绝旧 generation，不能取各话题最新值拼接。相机 decimation 必须为 TF/observation decimation 整数倍。安装位置减轻 home 遮挡，但中心像素始终属于 box 不是不变量。
+反投影 `[(u-cx)z/fx,(v-cy)z/fy,z]` 后经静态 TF 转 world。相机消息与 BridgeObservation 按**完全相等 stamp（0 ns 容差）**配对，获取生命周期键并拒绝旧 generation，不能取各话题最新值拼接；estimator 配对的是深度图、深度相机信息、BridgeObservation 和机器人 TF，不再等待 RGB 及彩色相机信息（去掉后，旧路径 `object_pose` 在非附着深度帧上的发布比例由 62%、76% 变为 100%，丢帧原因未查，见 [Week 4.1 5.5.5](../Job_guides/my_study/week4.1.md#555-在线-episode-检查)）。相机 decimation 必须为 TF/observation decimation 整数倍。安装位置减轻 home 遮挡，但中心像素始终属于 box 不是不变量。
 
 ### 5.2 机器人掩膜与几何估计
 
@@ -172,7 +172,7 @@ URDF hand:=true 强制加 fer_ 前缀，跨库代码须显式映射。下表采�
 
 有效观测/预测深度差绝对值 <= robot_mask.depth_tolerance_m=0.012 m 才过滤该像素，更近/更远有效深度均保留。无效输入或同过滤器生命周期中相机尺寸/内参变化报 INVALID_INPUT。当前无整帧冲突比例门，不发布 ROBOT_MODEL_MISMATCH。
 
-管线：同帧配对/TF -> 反投影与掩膜 -> world ROI/桌面过滤 -> 水平支持平面 -> 全部候选簇 OBB 覆盖检查/已知盒体表面拟合 -> ObjectTracker 候选有效性/唯一性检查 -> VisionObjectPose。只去除配置桌面高度附近的平面，不把离桌盒体表面删作桌面；在线不再以最大簇决定目标，调试 target_cluster 是实际接受的候选。通用算法来自 image_geometry/PCL；SVD 已知对应点配准入口仍仅有单测。
+管线（旧路径，释放后核对仍用它）：同帧配对/TF -> 反投影与掩膜 -> world ROI/桌面过滤 -> 水平支持平面 -> 全部候选簇 OBB 覆盖检查/已知盒体表面拟合 -> ObjectTracker 候选有效性/唯一性检查 -> VisionObjectPose。只去除配置桌面高度附近的平面，不把离桌盒体表面删作桌面；在线不再以最大簇决定目标，调试 target_cluster 是实际接受的候选。通用算法来自 image_geometry/PCL；SVD 已知对应点配准入口仍仅有单测。
 
 先验为单个 4 cm 立方体与已知桌面。配置 anchor_z_to_plane=true 且 bridge 非 ATTACHED 时允许支撑锚定，两个较大 OBB 主尺寸各 ≥`box_min_visible_extent_m=0.008 m`，全部主尺寸 ≤边长加 `box_extent_tolerance_m=0.015 m`（默认 55 mm），中心 z 补为桌面加半高；立方体姿态为对称不确定的规范代表值。当前没有旧 55 mm 张爪门、Supported/Transport 模型，也没有恢复旧最高点支撑判定；新增低水平点片拒绝只过滤残留，是否真的落桌仍须验证。尺寸、残差与内点质量不能证明支撑接触。ATTACHED 时暂停正常处理链，退出附着后清缓存并重新测量。OBB 不提供任意形状识别或完全遮挡恢复。
 
@@ -182,6 +182,8 @@ URDF hand:=true 强制加 fer_ 前缀，跨库代码须显式映射。下表采�
 
 PCL ICP/GICP 已在离线真值标注点云与平面 fixture 上比较，仅作为评测工具；默认保持 OBB。当前全表面模型到局部点云的 ICP 可收敛但有约 20 mm 平面偏差，GICP 的运行成本与遮挡退化尚不满足默认在线要求；此结果不否定采用可见面模型等其他配准配置。评测入口为 `registration_benchmark.py` / `compare_registration`，oracle 标签只用于离线选取评测目标像素与计算误差。
 
+**初始 box 检测（Week 4.1 Stage 5，与上面的旧路径并行，输入是同一帧掩膜后的深度）。** `DepthWindow` 对最近 `initial_box.frames`（默认 10）帧做逐像素均值：某像素有效帧不足一半，或有效帧的深度最大值与最小值之差超过 20 mm（它在窗口内看到过两个表面），则该像素无效。`detectInitialBox()` 对均值深度图：反投影到 world；取高度在 `[顶面 − 15 mm, 顶面 + 40 mm]`（桌面 0.22 m、盒高 40 mm 时为 [0.245, 0.30] m）、x ∈ [0.2, 0.8]、y ∈ [−0.4, 0.4] 的像素；图像上 8 邻域连通域（`cv::connectedComponentsWithStats`，至少 20 像素）；每块丢掉 z，对 x–y 求最小面积外接矩形（`cv::minAreaRect`）；两边都在 40 ± 5 mm 的块才是 box，恰好一个才算检出。位置 x、y 取矩形中心，z 取顶面像素的中位数减半高，yaw 取矩形边方向并折到 [−45°, 45°)。bin（壁顶 0.239 m）整个在高度带之下，不会成为候选。不用颜色、不读真值、不用历史。窗口在新 session/generation 与 ATTACHED→非 ATTACHED 时清空，ATTACHED 时不喂入。`InitialBoxEstimator` 把窗口与检测器合在一起并给出 WARMING_UP / NOT_MEASURED / MEASURED 三态；检测器、窗口与估计器类不创建节点，只用 sensor_msgs 的 CameraInfo 类型和 image_geometry，各有单测。已知局限：多帧平均假设各帧噪声独立（仿真深度几乎无帧间噪声，评测噪声为人为叠加）；只验证了 HOME 位姿、平放单个盒子；检测不判断场景何时变化，靠节点在已知事件清空窗口。
+
 调试 topic 前缀 /object_pose_estimator/debug/：robot_predicted_depth、robot_mask、filtered_depth、foreground_points、target_cluster、robot_mask_diagnostics，共用图像 stamp。mask=mono8（255 过滤），深度=米制 32FC1，点云=world。诊断带生命周期键、投影/掩掉/比较/冲突像素数、簇点数、容差与耗时。
 
 comparison_pixels 为有效预测/观测重合数；mismatch_pixels 仅统计观测更远且超容差的像素。零比较数时比例无定义，不能报零冲突率；计数提示投影不一致，不能直接定位原因。
@@ -189,6 +191,8 @@ comparison_pixels 为有效预测/观测重合数；mismatch_pixels 仅统计观
 moveit_mesh_filter 依赖 X11/OpenGL，demo 为感知设置 LIBGL_ALWAYS_SOFTWARE=1。无显示部署需虚拟 X 或经过验证的无头后端；当前不支持运行中改变相机标定。
 
 ### 5.3 视觉消息与原因契约
+
+`/object_pose_estimator/initial_box_pose` 类型为 InitialBoxPose（Stage 5），header 的 frame 为 world、stamp 为窗口里最新一帧，携带 bridge_session/generation/sample_sequence。非附着时每个可处理的深度帧发布一条，ATTACHED 期间不发布。`state` 为 WARMING_UP=0（窗口未满，`reason`=WINDOW_FILLING）、NOT_MEASURED=1（窗口已满而检测器拒绝，或这一帧不可用）、MEASURED=2；`reason` 为空表示 MEASURED，否则是检测器的拒绝名（NO_VALID_DEPTH、NO_BOX_BAND_PIXELS、NO_RECTANGLE_MATCHES_BOX、SEVERAL_BOX_CANDIDATES、INVALID_INPUT），不可用的帧为 INVALID_INPUT 或 MISSING_ROBOT_TRANSFORM（这样的帧不进窗口）。`frames_averaged`/`frames_required` 给出窗口进度；`position`（world，盒子中心）与 `yaw_rad`（[−π/4, π/4)，正方形每 90° 重复）只在 MEASURED 时有值，否则为 NaN；不用 Pose，因为 roll、pitch 没有被测量。`candidates[]` 列出高度带里每一块的像素数、矩形两边长、中心、是否被当作 box，用来在漏检时说明原因。没有置信度、残差、内点比。
 
 主结果 `/object_pose_estimator/object_pose` 类型为 VisionObjectPose，header 表达 world 与图像 stamp，携带 bridge_session/generation/sample_sequence。当前生产 evidence_state 为 REJECTED=0、MEASURED=1、OCCLUDED=3；PREDICTED=2 常量仍在，但当前无生产路径。MEASURED 要求恰好一个有效候选，不排除同时存在无效候选。
 
@@ -217,7 +221,7 @@ BridgeObservation.attachment_state 为唯一权威：ATTACHMENT_NOT_ATTACHED=0�
 
 这套确认依赖仿真物体真值/接触；vision 替换的是任务物体位姿来源，不代表完全没有 oracle 信息。闭爪滑落可能仍为 ATTACHED，FSM 附着门也无法补足这一盲区。
 
-estimator 的 tryProcess 在当前 ATTACHED 时早退，正常 RGB-D 几何处理及结果输出暂停，订阅回调/缓存仍可运行。ATTACHED→RELEASED 或 NOT_ATTACHED 时重置 tracker，清 RGB/depth/CameraInfo、pending 与 processed，避免直接消费附着期旧图像；生命周期切换也重置历史。释放状态不证明物体已落桌，须重新得到合格测量。
+estimator 的 tryProcess 在当前 ATTACHED 时早退，正常 RGB-D 几何处理及结果输出暂停，订阅回调/缓存仍可运行。ATTACHED→RELEASED 或 NOT_ATTACHED 时重置 tracker，清 depth/CameraInfo、pending 与 processed，并清空初始 box 的深度窗口，避免直接消费附着期旧图像；生命周期切换也重置历史（含该窗口）。释放状态不证明物体已落桌，须重新得到合格测量。
 
 ### 5.5 任务观测来源与质量门
 
@@ -287,6 +291,8 @@ FSM 默认位置/GRASP-CLOSE 位置/速度容差为 0.05 rad/0.3 rad/0.05 rad/s�
 | [掩膜单测](../src/mujoco_perception/test/test_robot_mask.cpp) / [probe](../src/mujoco_perception/test/robot_mask_probe.py) | 表面过滤、前后景保留、缺 TF/标定变化；probe 仅离线使用 oracle 统计误掩/残留 |
 | [Cartesian 回归](../Job_guides/my_study/week3.md#11-stage-ocartesian-任务几何与离线-ik-适配) / [编排回归](../Job_guides/my_study/week3.5.md#15-p5回归架构记录和收尾) | 固定 oracle 场景连续 20/20，不外推随机姿态、视觉或真机 |
 | [视觉验证](../Job_guides/my_study/week4.md#10-stage-4同帧机器人几何掩膜) | 掩膜/诊断基线、缺 TF、质量拒绝；完整视觉抓放未通过 |
+| [DepthWindow](../src/mujoco_perception/test/test_depth_window.cpp) / [初始 box 检测器](../src/mujoco_perception/test/test_initial_box_detector.cpp) / [InitialBoxEstimator](../src/mujoco_perception/test/test_initial_box_estimator.cpp) | 单测在精确光线投射的合成场景上，答案由构造给出（相机与场景在 [workcell_camera.hpp](../src/mujoco_perception/test/workcell_camera.hpp)）；故意改坏实现的变异检查全部被抓到。容差是像素量化界，不是调出来的 |
+| [initial_box_compare.py](../src/mujoco_perception/test/initial_box_compare.py) / [initial_box_probe.py](../src/mujoco_perception/test/initial_box_probe.py) | 前者在同一批录制帧上对照 C++ 与 Python 原型；后者起真实 bridge + estimator（+ executor）核对消息的状态、窗口计数与误差。验收规则写在各自的 docstring，在运行前写定；仿真，不代表真机 |
 | [当前简化接口测试](../Job_guides/my_study/week4.md#51-改动清单与验证结果) | 2026-10-03 四包 build/test 通过，tracker 11 项通过；工作区汇总 487 tests / 0 errors / 0 failures / 71 skipped（含既有其他包结果），非完整 vision 成功证据 |
 
 link0..link4、link6、link7、hand 的 collision STL 在 apt/vendor 中 SHA256 相同；link5 与手指表示不同，不能推断全身碰撞结果一致。TCP FK/Jacobian 测试不验证可见网格投影。
