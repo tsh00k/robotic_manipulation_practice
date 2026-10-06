@@ -65,6 +65,11 @@ install(DIRECTORY include/ DESTINATION include)
 if(BUILD_TESTING)
   add_executable(compare_registration test/compare_registration.cpp)
   target_link_libraries(compare_registration mujoco_perception_geometry)
+  # Measurement tool, not a test: replays recorded depth frames through the existing box
+  # detector so that a new detector can be compared with it (Week 4.1 Stage 5). Run by
+  # test/baseline_compare.py; built here only because it needs the same PCL/ROS flags.
+  add_executable(baseline_replay test/baseline_replay.cpp)
+  target_link_libraries(baseline_replay mujoco_perception_geometry)
   find_package(ament_cmake_gtest REQUIRED)
   ament_add_gtest(test_object_tracker test/test_object_tracker.cpp)
   target_link_libraries(test_object_tracker mujoco_perception_geometry)
