@@ -36,6 +36,7 @@ PickPlaceGeometry PlacementTask::geometry() const
   result.hover_height_m = hover_height_m;
   result.place_tcp_above_box_center_m = tcp_above_box_center_m;
   result.tool_yaw_rad = tool_yaw_rad;
+  result.align_tool_to_box_yaw = align_tool_to_box_yaw;
   return result;
 }
 
@@ -89,6 +90,8 @@ TaskExecutorConfig loadTaskExecutorConfig(rclcpp::Node & node)
   config.task.tcp_above_box_center_m = node.declare_parameter(
     "target.place_tcp_above_box_center_m", 0.05);
   config.task.tool_yaw_rad = node.declare_parameter("target.tool_yaw_rad", 0.0);
+  config.task.align_tool_to_box_yaw = node.declare_parameter(
+    "target.align_tool_to_box_yaw", config.task.align_tool_to_box_yaw);
   const bool legacy = mode == "keyframe";
   config.verification.box_target_x_m = node.declare_parameter(
     "verify.place_x_m", legacy ? 0.43 : 0.5);

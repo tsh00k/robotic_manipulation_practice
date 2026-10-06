@@ -53,6 +53,7 @@ struct PlacementTask
   double hover_height_m = 0.15;
   double tcp_above_box_center_m = 0.05;
   double tool_yaw_rad = 0.0;
+  bool align_tool_to_box_yaw = true;
 
   PickPlaceGeometry geometry() const;
   PlaceTarget fixedPlace() const {return {tcp_target_x_m, tcp_target_y_m, table_top_z_m};}

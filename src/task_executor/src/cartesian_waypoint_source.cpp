@@ -40,6 +40,18 @@ Eigen::Isometry3d downwardPose(double x, double y, double z, double tool_yaw_rad
 }
 }  // namespace
 
+double foldedBoxYaw(const ObjectPose & box)
+{
+  const double yaw = std::atan2(
+    2.0 * (box.qw * box.qz + box.qx * box.qy), 1.0 - 2.0 * (box.qy * box.qy + box.qz * box.qz));
+  const double quarter = M_PI / 2.0;
+  double folded = std::fmod(yaw + quarter / 2.0, quarter);
+  if (folded < 0.0) {
+    folded += quarter;
+  }
+  return folded - quarter / 2.0;
+}
+
 PickPlaceCartesianWaypointSource::PickPlaceCartesianWaypointSource(PickPlaceGeometry geometry)
 : geometry_(std::move(geometry))
 {
@@ -73,6 +85,8 @@ CartesianWaypoint PickPlaceCartesianWaypointSource::waypointFor(
 
   CartesianWaypoint waypoint;
   waypoint.phase = phase;
+  const double tool_yaw = geometry_.tool_yaw_rad +
+    (geometry_.align_tool_to_box_yaw ? foldedBoxYaw(object_pose) : 0.0);
   // Box centre resting on the support surface: the table, or the bin floor (Stage 8).
   const double place_box_z = place.support_z + geometry_.box_half_height_m;
   switch (phase) {
@@ -82,13 +96,12 @@ CartesianWaypoint PickPlaceCartesianWaypointSource::waypointFor(
     case Phase::kPregrasp:
     case Phase::kLift:
       waypoint.world_to_hand_tcp = downwardPose(
-        object_pose.x, object_pose.y, object_pose.z + geometry_.hover_height_m,
-        geometry_.tool_yaw_rad);
+        object_pose.x, object_pose.y, object_pose.z + geometry_.hover_height_m, tool_yaw);
       break;
     case Phase::kGrasp:
     case Phase::kClose:
       waypoint.world_to_hand_tcp = downwardPose(
-        object_pose.x, object_pose.y, object_pose.z, geometry_.tool_yaw_rad);
+        object_pose.x, object_pose.y, object_pose.z, tool_yaw);
       break;
     case Phase::kPreplace:
     case Phase::kRetract:
@@ -98,13 +111,13 @@ CartesianWaypoint PickPlaceCartesianWaypointSource::waypointFor(
     case Phase::kFailed:
       waypoint.world_to_hand_tcp = downwardPose(
         place.x, place.y,
-        place_box_z + geometry_.hover_height_m, geometry_.tool_yaw_rad);
+        place_box_z + geometry_.hover_height_m, tool_yaw);
       break;
     case Phase::kPlace:
     case Phase::kOpen:
       waypoint.world_to_hand_tcp = downwardPose(
         place.x, place.y,
-        place_box_z + geometry_.place_tcp_above_box_center_m, geometry_.tool_yaw_rad);
+        place_box_z + geometry_.place_tcp_above_box_center_m, tool_yaw);
       break;
   }
   if (phase == Phase::kClose || phase == Phase::kLift || phase == Phase::kPreplace ||

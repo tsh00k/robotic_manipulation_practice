@@ -79,6 +79,11 @@ place    Week 4.1 Stage 8. `--source oracle|vision`, the first `--count` random 
               grasp (Week 4.1 8.3).
          `--scene legacy`: no bin, place.into_bin false, three episodes in one run (B4): each
          succeeds with zero retries and the PLACE target is (0.5, 0.3, 0.29).
+         `--align-check` (Week 4.1 Stage 9) judges instead, per episode: C1/C2 the tool
+         rotation of GRASP equals the box yaw folded to [-45, 45) (truth for oracle, latched
+         for vision) within 1 degree and PLACE keeps it within 0.1 degree; one attached run
+         before the final release; the width at the attach at most 45 mm; C4 (legacy) the
+         GRASP rotation within 1 degree of 0. Success and the box in the bin are reported.
 episode  Bridge + estimator + executor with observation_source=vision, three episodes in a
          row, on the legacy scene (no bin; --scene bin adds the bin). Acceptance:
            E1 every episode ends in success with zero retries (the older detector path still
@@ -570,6 +575,44 @@ def run_latch(args):
 
 PHASE_TARGET = re.compile(
     r'phase (PREPLACE|PLACE) target_frame=world tcp_xyz=\[([-\d.]+) ([-\d.]+) ([-\d.]+)\]')
+PHASE_ROTATION = re.compile(
+    r'phase (GRASP|PLACE) target_frame=world tcp_xyz=\[[^\]]*\] '
+    r'tcp_qwxyz=\[([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+)\]')
+
+
+def tool_yaw_deg(qw, qx, qy, qz):
+    """Rotation about world z of a TCP orientation relative to the downward reference."""
+    # Reference: pi about (1, 1, 0) / sqrt(2), i.e. q0 = (0, 1/sqrt2, 1/sqrt2, 0).
+    # q_rel = q * conj(q0); for a pure rotation about z only w and z of q_rel are non-zero.
+    a = 1.0 / math.sqrt(2.0)
+    w = qx * a + qy * a
+    z = qy * a - qx * a  # Rz(t) * q0 = (0, a(cos - sin), a(cos + sin), 0) with t/2 angles
+    return math.degrees(2.0 * math.atan2(z, w))
+
+
+def logged_rotations():
+    """Return [(phase, tool yaw in degrees)] of the GRASP and PLACE targets in the log."""
+    if not EXECUTOR_LOG.exists():
+        return []
+    return [(m.group(1), tool_yaw_deg(*(float(v) for v in m.groups()[1:])))
+            for m in PHASE_ROTATION.finditer(EXECUTOR_LOG.read_text(errors='replace'))]
+
+
+def attach_runs_and_width(observations):
+    """Return (attached runs before the last release, gripper width at the first attach)."""
+    runs, width, previous = 0, None, None
+    for o in observations:
+        attached = o.attachment_state == BridgeObservation.ATTACHMENT_ATTACHED
+        if attached and previous is not True:
+            runs += 1
+            if width is None:
+                names = list(o.joint_state.name)
+                width = sum(o.joint_state.position[names.index(n)]
+                            for n in ('finger_joint1', 'finger_joint2'))
+        previous = attached
+    return runs, width
+
+
 BIN_INNER = (0.070, 0.065)  # inner faces of the bin walls, half extents in the bin frame
 ON_FLOOR_Z_MAX = 0.252      # box centre above this rests on a wall rim, not on the floor
 FINGERTIP_BELOW_TCP = 0.0089
@@ -682,13 +725,41 @@ def run_place(args):
                         problems.append(f'PLACE z {z:.4f}, expected {reference[2] + 0.07:.4f}')
             inside = box_in_bin(mine[-1], bin_pose)
             geometry = release_geometry(mine)
-            if args.source == 'oracle' and not ik_failed:
+            align_text = ''
+            if args.align_check:
+                problems = [p for p in problems if 'target' not in p or 'PLACE z' in p]
+                if args.source == 'vision':
+                    latched_box = [e[1].box for e in rig.events if e[0] == 'latch' and
+                                   e[1].state == InitialPoseLatch.LATCHED]
+                    box_yaw = math.degrees(latched_box[-1].yaw_rad) if latched_box else math.nan
+                else:
+                    box_yaw = math.degrees(yaw_of(mine[0].object_pose.pose.orientation))
+                expected = fold(box_yaw, 90.0)
+                rotations = logged_rotations()
+                grasp = [r for p_, r in rotations if p_ == 'GRASP']
+                placed = [r for p_, r in rotations if p_ == 'PLACE']
+                runs, width = attach_runs_and_width(mine)
+                if not grasp or abs(fold(grasp[0] - expected, 360.0)) > 1.0:
+                    problems.append(f'C1/C2 GRASP rotation {grasp[:1]} vs box {expected:.2f}')
+                if grasp and placed and abs(fold(placed[-1] - grasp[0], 360.0)) > 0.1:
+                    problems.append(f'C1/C2 PLACE rotation {placed[-1]:.2f} != GRASP '
+                                    f'{grasp[0]:.2f}')
+                if runs != 1:
+                    problems.append(f'C1/C2 {runs} attached runs')
+                if width is None or width > 0.045:
+                    problems.append(f'C1/C2 width at attach {width}')
+                align_text = (f'; box yaw folded {expected:.2f}, GRASP rotation '
+                              f'{grasp[0] if grasp else math.nan:.2f}, PLACE rotation '
+                              f'{placed[-1] if placed else math.nan:.2f} deg; attached runs '
+                              f'{runs}, width at attach '
+                              f'{(width or math.nan) * 1000:.1f} mm')
+            if args.source == 'oracle' and not ik_failed and not args.align_check:
                 if not outcome.success or outcome.retries != 0:
                     problems.append(f'B1 outcome {outcome.failure_code}, retries '
                                     f'{outcome.retries}')
                 else:
                     successes += 1
-            if not ik_failed and not inside:
+            if not ik_failed and not inside and not args.align_check:
                 problems.append('the box is not inside the bin at the end')
             if geometry and geometry[0] < 0:
                 problems.append(f'B3 fingertip {geometry[0]:.1f} mm below the wall top')
@@ -702,11 +773,11 @@ def run_place(args):
                   + (f'; at release fingertip {geometry[0]:.1f} mm above the wall top, box '
                      f'bottom {geometry[1]:.1f} mm above the floor; attachment runs '
                      f'{geometry[2]}' if geometry else '')
-                  + f'  {"OK" if not problems else "FAIL"}', flush=True)
+                  + align_text + f'  {"OK" if not problems else "FAIL"}', flush=True)
             failures += [f'{label}: {p}' for p in problems]
         finally:
             rig.close()
-    if args.source == 'oracle' and successes == 0:
+    if args.source == 'oracle' and successes == 0 and not args.align_check:
         failures.append('B1 no layout succeeded')
     print('\nPLACE ACCEPTANCE:', 'PASS' if not failures else 'FAIL')
     for failure in failures:
@@ -731,8 +802,12 @@ def run_place_legacy(args):
             outcome = rig.outcomes[-1]
             place = [t for t in phase_targets() if t[0] == 'PLACE']
             target = place[-1][1:] if place else None
+            grasp = [r for p_, r in logged_rotations() if p_ == 'GRASP']
+            if args.align_check and (not grasp or abs(grasp[-1]) > 1.0):
+                failures.append(f'C4 episode {episode}: GRASP rotation {grasp[-1:]}')
             print(f'episode {episode}: success={outcome.success} retries={outcome.retries} '
-                  f'PLACE target {target}', flush=True)
+                  f'PLACE target {target}, GRASP rotation '
+                  f'{grasp[-1] if grasp else math.nan:.2f} deg', flush=True)
             if not outcome.success or outcome.retries != 0:
                 failures.append(f'B4 episode {episode}: {outcome.failure_code}')
             if target is None or max(abs(a - b) for a, b in zip(target, (0.5, 0.3, 0.29))) > 1e-4:
@@ -832,6 +907,8 @@ def main():
     parser.add_argument('command', choices=['static', 'gaps', 'latch', 'place', 'episode'])
     parser.add_argument('--workspace', default=str(Path(__file__).resolve().parents[3]))
     parser.add_argument('--count', type=int, default=6)
+    parser.add_argument('--align-check', action='store_true',
+                        help='place: judge the Stage 9 tool alignment instead of B1/B2')
     parser.add_argument('--source', choices=['oracle', 'vision'], default='vision',
                         help='place: the executor\'s observation source')
     parser.add_argument('--episodes', type=int, default=3)

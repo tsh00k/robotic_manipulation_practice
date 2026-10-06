@@ -82,6 +82,28 @@ TEST(DiffIkWaypointSource, RejectsUnreachableObjectWithoutPublishingACommand)
     source.jointTargetFor(Phase::kPregrasp, {5.0, 5.0, 5.0}, kTable), std::runtime_error);
 }
 
+TEST(DiffIkWaypointSource, TheWristKeepsThePregraspRotationWhileTheBoxTurnsInTheHand)
+{
+  auto source = makeSource();
+  source.setSeed(home());
+  const double half = 20.0 * M_PI / 360.0;
+  const ObjectPose box{0.5, 0.0, 0.241, std::cos(half), 0.0, 0.0, std::sin(half)};
+  source.jointTargetFor(Phase::kPregrasp, box, kTable);
+  source.setSeed(home());
+  source.jointTargetFor(Phase::kPlace, box, kTable);
+  const Eigen::Matrix3d planned = source.diagnostics()->tcp_target.linear();
+
+  auto turned_source = makeSource();
+  turned_source.setSeed(home());
+  turned_source.jointTargetFor(Phase::kPregrasp, box, kTable);
+  turned_source.setSeed(home());
+  // While carried the box has turned by 15 degrees; the place rotation must not follow.
+  const double turned = 35.0 * M_PI / 360.0;
+  turned_source.jointTargetFor(
+    Phase::kPlace, {0.5, 0.3, 0.30, std::cos(turned), 0.0, 0.0, std::sin(turned)}, kTable);
+  EXPECT_TRUE(turned_source.diagnostics()->tcp_target.linear().isApprox(planned, 1e-12));
+}
+
 TEST(DiffIkWaypointSource, ConsumesInjectedCartesianTaskTarget)
 {
   auto cartesian_source = std::make_shared<PickPlaceCartesianWaypointSource>();

@@ -63,10 +63,11 @@ JointTarget DiffIkWaypointSource::jointTargetFor(
     grasp_object_pose_ = object_pose;
   }
 
-  const bool grasp_side = phase == Phase::kPregrasp || phase == Phase::kGrasp ||
-    phase == Phase::kClose || phase == Phase::kLift;
-  const ObjectPose & task_object =
-    grasp_side ? grasp_object_pose_.value_or(object_pose) : object_pose;
+  // Every phase after PREGRASP uses the box pose seen at PREGRASP: the grasp targets must not
+  // follow the box once it is touched, and the tool rotation (taken from the box yaw, Week 4.1
+  // Stage 9) must not change while the box is held. Place-side positions come from the place
+  // target and do not read the box pose.
+  const ObjectPose & task_object = grasp_object_pose_.value_or(object_pose);
   const CartesianWaypoint waypoint = cartesian_source_->waypointFor(phase, task_object, place);
   const Eigen::Isometry3d & tcp_target = waypoint.world_to_hand_tcp;
   const auto result = arm_kinematics::solveIk(model_, seed_, tcp_target);

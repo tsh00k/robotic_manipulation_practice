@@ -91,6 +91,7 @@ if(BUILD_TESTING)
   ament_add_gtest(test_cartesian_waypoint_source
     test/test_cartesian_waypoint_source.cpp
     src/cartesian_waypoint_source.cpp
+    src/phase.cpp
   )
   target_include_directories(test_cartesian_waypoint_source PRIVATE include)
   target_link_libraries(test_cartesian_waypoint_source Eigen3::Eigen)

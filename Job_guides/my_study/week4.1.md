@@ -1399,11 +1399,69 @@ oracle 来源的行为没有变（连看门狗也是原来的 5 s）；`VisionOb
 
 ## Stage 9：`grasp_yaw` 取自锁存 box yaw
 
-**出口：** 抓取时的 TCP yaw 与 box 的锁存 yaw（90° 等价类内取最近）对齐。
+**状态（2026-10-06）：已完成，尚未提交。** 9.0、9.1 是实现之前写定的，没有改动；C1、C2、C4 全部满足。验证是仿真的：Stage 8 的同 3 个随机布局各跑 oracle 与 vision 一次，旧场景两种来源各 3 次。**分量：轻。**
 
-- **范围：** [cartesian_waypoint_source.cpp](../../src/task_executor/src/cartesian_waypoint_source.cpp) 的几行，归一到 ±45°。
-- **验收要点：** [test_cartesian_waypoint_source.cpp](../../src/task_executor/test/test_cartesian_waypoint_source.cpp) 覆盖不同 yaw 与等价类边界；真实运行检查 CLOSE 宽度与附着。**不以成功率为出口**：旋转时打滑暂缓，只记录现象。
-- **前置：** Stage 7（以及 Stage 2(b) 的朝向容差）。
+### 9.0 一句话总结（目标）
+
+抓取时工具绕世界 z 的转角对齐盒子的 yaw：盒子 yaw 折到 [−45°, 45°)（正方形每 90° 重复，取离当前工具朝向最近的那条边），加到配置的 `target.tool_yaw_rad` 上。这个转角在 PREGRASP 定下，**一直保持到 RETRACT**，抓住盒子之后不再转腕，所以“旋转时打滑”（用户暂缓）不会被引入；放进 bin 时盒子的 yaw 不要求与 bin 对齐（Stage 8 已定）。HOME 不变。vision 来源用锁存的 box yaw，oracle 来源用真值。
+
+### 9.1 设计与出口断言（实现前写定，不因结果改动）
+
+**做法。** `PickPlaceCartesianWaypointSource` 从传入的盒子位姿取 yaw（四元数绕 z 的分量），折到 [−45°, 45°)，除 HOME 外所有阶段的工具转角 = `tool_yaw_rad` + 折后的 yaw。`DiffIkWaypointSource` 现在只在抓取一侧用 PREGRASP 时锁定的盒子位姿，放置一侧用当前位姿；改成所有阶段都用 PREGRASP 时锁定的位姿，这样搬运中盒子在手里的转动（oracle 的真值会转）不会让工具跟着转。放置一侧的位置本来就只取自放置目标，不读盒子位姿，所以这一改只影响转角。新参数 `target.align_tool_to_box_yaw`（默认 true），false 时与 Stage 8 完全相同，用于对照。
+
+| 编号 | 条件 | 预期 | 否定条件 |
+| --- | --- | --- | --- |
+| C1 | oracle，scene 开，Stage 8 的同 3 个布局（box yaw 84.3°、27.9°、41.0°，折后 −5.7°、27.9°、41.0°） | 日志里 GRASP 的工具转角与盒子真值 yaw（折后）相差 ≤ 1°；PLACE 的工具转角与 GRASP 相同（≤ 0.1°）；**附着序列在最终释放之前只有一段附着**（Stage 8 看到的夹紧时反复不再出现）；附着那一刻的夹爪宽度 ≤ 45 mm（夹在平面上约 38~40 mm；斜夹时是 49.7 mm） | 任一项不满足 |
+| C2 | vision，同 3 个布局 | GRASP 的工具转角与**锁存的** box yaw（折后）相差 ≤ 1°，其余同 C1 | 同上 |
+| C3 | 报告，不判定 | C1 的成功率与盒子是否进 bin（Stage 8 布局 2 因抓取失败；预期这次能抓起） | — |
+| C4 | 旧场景，vision 与 oracle 各 3 个 episode | 都成功、零重试；GRASP 工具转角 ≤ 1°（盒子 yaw 是 0） | 任一失败 |
+
+单测：折叠（含 ±45° 边界与 90° 的等价类）、HOME 不转、PLACE 与 GRASP 同角、关掉参数时与原来一致；IK 源在搬运中盒子转了也不跟着转。
+
+### 9.2 改动清单
+
+| 文件 | 内容 |
+| --- | --- |
+| [cartesian_waypoint_source.hpp](../../src/task_executor/include/task_executor/cartesian_waypoint_source.hpp) / [.cpp](../../src/task_executor/src/cartesian_waypoint_source.cpp) | `foldedBoxYaw()`；除 HOME 外所有阶段的工具转角 = `tool_yaw_rad` + 折后的盒子 yaw；`PickPlaceGeometry::align_tool_to_box_yaw` |
+| [diff_ik_waypoint_source.cpp](../../src/task_executor/src/diff_ik_waypoint_source.cpp) | PREGRASP 之后**所有**阶段都用 PREGRASP 时锁定的盒子位姿（原来只有抓取一侧），所以搬运中工具不转 |
+| [task_executor_config.hpp](../../src/task_executor/include/task_executor/task_executor_config.hpp) / [.cpp](../../src/task_executor/src/task_executor_config.cpp) | `target.align_tool_to_box_yaw`（默认 true） |
+| 测试与工具 | Cartesian 源 2 项（9 个 yaw 的折叠含 ±45° 边界、HOME 不转、PLACE 与 GRASP 同角；关掉参数不转），IK 源 1 项（搬运中盒子转了 15°，放置的工具姿态不变）；[initial_box_probe.py](../../src/mujoco_perception/test/initial_box_probe.py) 的 `place` 加 `--align-check` |
+
+### 9.3 验证结果
+
+**单测：** executor 包 239 项、0 失败。
+
+| 布局（box yaw，折后） | 来源 | GRASP 工具转角 | PLACE 转角 | 附着段数 / 附着时宽度 | 结局 |
+| --- | --- | --- | --- | --- | --- |
+| 0（84.3°，−5.65°） | oracle | −5.65° | −5.65° | 1 / 38.5 mm | 成功、零重试，盒子在 bin 内 |
+| 1（27.9°） | oracle | 27.91° | 27.91° | 1 / 38.8 mm | 同上 |
+| 2（41.0°） | oracle | 41.01° | 41.01° | 1 / 38.6 mm | 同上（**Stage 8 里这个布局抓取失败**） |
+| 0 | vision（锁存 −5.66°） | −5.67° | −5.67° | 1 / 38.8 mm | 盒子在 bin 内；VERIFY `OBSERVATION_STALE`（预期，Stage 11） |
+| 1 | vision（锁存 27.89°） | 27.90° | 27.90° | 1 / 38.5 mm | 同上 |
+| 2 | vision（锁存 41.02°） | 41.02° | 41.02° | 1 / 38.2 mm | 同上 |
+
+旧场景（C4）：vision 与 oracle 各 3/3 成功、零重试，GRASP 转角 0.00°，PLACE 目标仍是 (0.5, 0.3, 0.29)。
+
+C1、C2：工具转角与盒子 yaw（oracle 用真值，vision 用锁存值）相差 ≤ 0.01°，远在 1° 之内；PLACE 与 GRASP 同角；只有一段附着；附着时宽度 38.2~38.8 mm（≤ 45 mm）。C3（报告）：oracle 3/3 成功并进 bin，包括 Stage 8 失败的布局 2。vision 的工具转角跟锁存值而不是真值，两者在这 3 个布局里相差 ≤ 0.02°。
+
+**探针公式的一处错，运行前改了。** 探针从日志里的 TCP 四元数反算工具转角，我第一版写的公式符号反了（会把 +27.9° 读成 −27.9°）；运行前用显式的四元数乘法核对了 6 个角度，发现后改正，再跑在线检查。
+
+### 9.4 你没问但值得注意的
+
+- **（E 可测试性）工具转角只能从日志反算。** 探针解析执行器日志里的 `tcp_qwxyz`；没有话题携带它。这次日志格式与反算公式都核对过，但日志格式一改，这条检查就会静默失效（解析不到时报“GRASP rotation []”，会判失败而不是通过，这一点是安全的）。
+- **±45° 边界上，工具可能在两个方向之间跳 90°。** 盒子 yaw 正好在 45° 附近时，锁存值的 0.1° 抖动就能让工具转到 +45° 或 −45°；两种都夹在平面上，所以不影响抓取，但同一布局两次运行的手臂姿态可能差很大。这次的布局最接近边界的是 41°，没有碰到。
+- **转腕的范围变大了。** 工具转角现在在 ±45° 之间（原来恒为 0）；这 6 次的 IK 都收敛了，但我没有查各关节离极限多远，也没有专门测靠近 ±45° 时 IK 是否仍收敛。
+- **搬运中盒子在手里转了，工具不跟。** 这是有意的（不引入旋转打滑），代价是盒子以手里的姿态落进 bin；bin 内口 140 × 130 mm、盒子对角线 56.6 mm，所以不是问题。
+
+### 9.5 本阶段边界与后续
+
+做完了：抓取时工具对齐盒子 yaw、搬运中不转腕、关掉参数可恢复旧行为。附着反复（Stage 8 发现）在这 6 次里消失了。
+
+**没有做：** 附着门槛的缓冲（悬挂清单，Stage 12、13）；靠近 ±45° 边界的 IK；把工具转角放进消息。
+
+**没有验证：** 盒子 yaw 接近 ±45°；vision 的锁存 yaw 偏差较大时（仿真里锁存值与真值只差 0.02°）；FSM 重试后重新对齐（这 6 次都没有重试）。
+
+**验证精简的落实：** 单测 3 项新增；没有变异检查、没有基线构建；在线检查扩展了现有探针；executor 整包测试两轮（第一轮是新测试缺链接 `phase.cpp`），Python 的 lint 这次先在本地检查了，但我直接跑的 `ament_flake8` 没有用包里的配置，漏了一处空行（E305），整包测试才发现；下次在本地用 `colcon test --ctest-args -R "flake8|pep257"`，它用的是包的配置。前置满足，下一阶段是 Stage 11（Stage 10 已并入）。
 
 ## Stage 10：并入 Stage 11，不单独做
 
@@ -1476,6 +1534,8 @@ oracle 来源的行为没有变（连看门狗也是原来的 5 s）；`VisionOb
 | 桌面高度是 0.22 m 的已知先验 | 真实场景需要平面拟合 | 接真实相机前加平面拟合变体并重测误差表 |
 | 误差表只覆盖独立高斯噪声 | 真实传感器有边缘飞点、量化、外参误差 | 接真实 RGB-D 后重测；仿真里可加飞点模型 |
 | 估计器 `onTf()` 对同 stamp 覆盖集合 | 当前没有第二个 TF 广播者，不触发 | 将来任何节点要在同一 stamp 广播 TF 前先修（合并而不是覆盖） |
+| bridge 附着判定的门槛没有缓冲 | 附着上限与释放门槛都是 40 + 10 = 50 mm；斜着夹住转了 27.9° 的盒子时宽度停在 49.7~50.3 mm，夹紧时状态在附着与释放之间反复（Stage 8，8.4 与 Stage 9 开始前的复查）。Stage 9 对齐朝向后，6 个 bin 场景 episode 都只有一段附着、附着时宽度 38.2~38.8 mm，反复没有再出现；门槛本身没有改，盒子朝向估计偏了或被碰歪时仍可能出现 | Stage 12、13 改附着规则时一起处理（如释放门槛高于附着上限） |
+| 盒子 yaw 接近 ±45° 时工具转角在 +45° 与 −45° 之间切换 | 抓取仍正确（两侧都正对一对平面），同一 episode 内不变；但重试或重跑时手臂姿态可能差约 90°；边界附近 IK 是否收敛、离关节极限多远没有测（Stage 9 讨论后用户决定先不处理） | 看到边界附近 IK 失败或 Stage 14 统计里“同一布局表现不一致”时，先测 44.9°/45.0°/45.1° 三个角度，再考虑滞回或换切换点；比较工具转角与真值时按 90° 取模 |
 | RGB 在传输上大量丢帧，原因未明 | Stage 5 已去掉估计器的 RGB 配对，旧路径处理比例由 62%、76% 变为 100%（2 个 episode）；没有人消费 RGB，所以不影响 | 用颜色时单独调查 QoS 与传输 |
 | 任意 roll/pitch 的 6D 恢复、完全遮挡恢复 | 盒子平放（roll、pitch 为 0）是先验 | 扩大范围前先建立退化 fixture 与误差范围 |
 | 真实 RGB-D 标定、真机安全停止 | 缺设备和安全参照 | 接设备后单独建立标定和执行边界 |

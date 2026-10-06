@@ -46,7 +46,15 @@ struct PickPlaceGeometry
   double place_tcp_above_box_center_m = 0.05;
   // Rotation about world z relative to the downward reference, not Euler yaw.
   double tool_yaw_rad = 0.0;
+  // Add the box's yaw, folded to [-45, 45) degrees (a square repeats every 90), to the tool
+  // rotation in every phase but HOME, so that the fingers close on two faces (Week 4.1
+  // Stage 9). The caller passes the box pose seen at PREGRASP for all of them, so the wrist
+  // does not turn while the box is held.
+  bool align_tool_to_box_yaw = true;
 };
+
+// The box's yaw about world z folded to [-pi/4, pi/4).
+double foldedBoxYaw(const ObjectPose & box);
 
 // Stage geometry in world coordinates.
 class PickPlaceCartesianWaypointSource : public CartesianWaypointSource

@@ -17,6 +17,7 @@
 #include <cmath>
 #include <limits>
 #include <stdexcept>
+#include <utility>
 
 #include "task_executor/cartesian_waypoint_source.hpp"
 
@@ -123,6 +124,50 @@ TEST(CartesianWaypointSource, ThePlaceTargetAndItsSupportHeightComeFromTheEpisod
   EXPECT_THROW(
     source.waypointFor(Phase::kPlace, box, PlaceTarget{0.5, std::nan(""), 0.227}),
     std::invalid_argument);
+}
+
+ObjectPose boxWithYaw(double yaw_deg)
+{
+  const double half = yaw_deg * M_PI / 360.0;
+  return ObjectPose{0.5, 0.0, 0.24, std::cos(half), 0.0, 0.0, std::sin(half)};
+}
+
+// The tool's rotation about world z relative to the HOME rotation.
+double toolYawDeg(const CartesianWaypoint & waypoint, const CartesianWaypoint & home)
+{
+  const Eigen::Matrix3d relative =
+    waypoint.world_to_hand_tcp.linear() * home.world_to_hand_tcp.linear().transpose();
+  return std::atan2(relative(1, 0), relative(0, 0)) * 180.0 / M_PI;
+}
+
+TEST(CartesianWaypointSource, TheToolTurnsWithTheBoxModuloNinetyDegreesExceptAtHome)
+{
+  const PickPlaceCartesianWaypointSource source;
+  const auto home = source.waypointFor(Phase::kHome, boxWithYaw(0.0), kTable);
+  // 84.3 is the same square as -5.7; 135 as 45 -> folded to -45; 44.9 stays.
+  const std::pair<double, double> cases[] = {
+    {0.0, 0.0}, {27.9, 27.9}, {41.0, 41.0}, {84.3, -5.7}, {-30.0, -30.0},
+    {44.9, 44.9}, {45.0, -45.0}, {135.0, -45.0}, {-100.0, -10.0}};
+  for (const auto & [box_deg, tool_deg] : cases) {
+    const ObjectPose box = boxWithYaw(box_deg);
+    for (const Phase phase : {Phase::kPregrasp, Phase::kGrasp, Phase::kLift, Phase::kPlace,
+        Phase::kRetract})
+    {
+      EXPECT_NEAR(toolYawDeg(source.waypointFor(phase, box, kTable), home), tool_deg, 1e-9)
+        << "box " << box_deg << " phase " << phaseName(phase);
+    }
+    EXPECT_NEAR(toolYawDeg(source.waypointFor(Phase::kHome, box, kTable), home), 0.0, 1e-9);
+  }
+}
+
+TEST(CartesianWaypointSource, WithoutAlignmentTheToolKeepsItsConfiguredRotation)
+{
+  PickPlaceGeometry geometry;
+  geometry.align_tool_to_box_yaw = false;
+  const PickPlaceCartesianWaypointSource source(geometry);
+  const auto home = source.waypointFor(Phase::kHome, boxWithYaw(0.0), kTable);
+  EXPECT_NEAR(
+    toolYawDeg(source.waypointFor(Phase::kGrasp, boxWithYaw(30.0), kTable), home), 0.0, 1e-9);
 }
 
 TEST(CartesianWaypointSource, RejectsInvalidPoseAndGeometry)
