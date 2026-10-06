@@ -173,6 +173,24 @@ TEST(InitialBox, ASmallerCubeIsNotMistakenForTheBox)
   EXPECT_FALSE(result.measured());
 }
 
+TEST(InitialBox, ABlockOfFewPixelsIsNoiseNotACandidate)
+{
+  // An 8 mm square pole as tall as the box: its top is in the band but covers only a handful of
+  // pixels (3.3 mm per pixel), below min_component_pixels = 20, so it is not even listed.
+  const SceneBox pole{Eigen::Vector3d(0.50, 0.0, kTableZ + kBoxHalf), 0.0,
+    Eigen::Vector3d(0.004, 0.004, kBoxHalf)};
+  const auto result = detectScene({pole});
+  EXPECT_EQ(result.rejection, InitialBoxRejection::kNoBandPixels);
+  EXPECT_TRUE(result.candidates.empty());
+
+  InitialBoxConfig keep_everything;
+  keep_everything.min_component_pixels = 1;
+  const auto listed = detectScene({pole}, keep_everything);
+  EXPECT_EQ(listed.rejection, InitialBoxRejection::kNoMatchingRectangle);
+  ASSERT_EQ(listed.candidates.size(), 1U);
+  EXPECT_FALSE(listed.candidates.front().matches_box);
+}
+
 TEST(InitialBox, TwoBoxesAreAmbiguousAndBothAreListed)
 {
   const auto result = detectScene({flatBox(0.40, -0.12, 0.0), flatBox(0.60, 0.12, 20.0)});
