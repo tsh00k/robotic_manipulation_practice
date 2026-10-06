@@ -107,6 +107,13 @@ carry    Week 4.1 Stage 12, the carry width window. `--mode normal`: oracle and 
          decision sees no contact at all, only the width, the finger speed and the
          command). The time from the CLOSE command to the
          attach is printed.
+held     Week 4.1 Stage 14 on HELD-A (seed 20261006, 40 layouts, Stage 3's generator): one
+         bridge + estimator + executor and one episode per layout, `--source vision|oracle`;
+         each episode's process assertions P1..P6 and failure class go to one JSON line in
+         `--out` (outside the repo). `--truth-offset` sets the bridge fault
+         fault.truth_offset_x_m (N3). The rules are in week4.1 14.1.
+held-summary  Read the JSON lines of the vision and oracle runs (and the N3 runs) and judge the
+         Stage 14 acceptance rules.
 episode  Bridge + estimator + executor with observation_source=vision, three episodes in a
          row, on the legacy scene (no bin; --scene bin adds the bin). Acceptance:
            E1 every episode ends in success with zero retries (the older detector path still
@@ -128,6 +135,8 @@ The bridge's poses are used to judge the result and are never given to a node un
 """
 
 import argparse
+import collections
+import json
 import math
 import os
 import re
@@ -320,7 +329,7 @@ def within_limits(errors, truth):
             abs(dz) <= Z_LIMIT_M * 1000 and abs(dyaw) <= truth['yaw_limit'])
 
 
-def clear_of_bin(box, bin_pose):
+def clear_of_bin(box, bin_pose, margin=CLEARANCE + 0.001):
     """Return True if the box footprint is clear of the bin by the bridge's rule (+ 1 mm)."""
     box_x, box_y, box_yaw = box
     bin_x, bin_y, bin_yaw = bin_pose
@@ -334,7 +343,6 @@ def clear_of_bin(box, bin_pose):
                             -math.sin(bin_yaw) * dx + math.cos(bin_yaw) * dy))
     low = [min(c[i] for c in corners) for i in (0, 1)]
     high = [max(c[i] for c in corners) for i in (0, 1)]
-    margin = CLEARANCE + 0.001
     overlaps = all(high[i] > -BIN_HALF[i] - margin and low[i] < BIN_HALF[i] + margin
                    for i in (0, 1))
     return not overlaps
@@ -1075,6 +1083,240 @@ def run_carry(args):
     return 0 if not failures else 1
 
 
+HELD_SEED = 20261006
+CARRY_ALERT = re.compile(r'CARRY_WIDTH_LOW')
+GRASP_TARGET = re.compile(
+    r'phase GRASP target_frame=world tcp_xyz=\[([-\d.]+) ([-\d.]+) ([-\d.]+)\] '
+    r'tcp_qwxyz=\[([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+)\]')
+PLACE_TARGET = re.compile(
+    r'phase PLACE target_frame=world tcp_xyz=\[([-\d.]+) ([-\d.]+) ([-\d.]+)\]')
+
+
+def held_layouts(count):
+    """HELD-A with Stage 3's generator; too-close layouts resampled by the bridge's own rule."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import layout_capture  # noqa: E402  (only needs numpy and the message types)
+    base, rng = layout_capture.make_layouts(HELD_SEED, count)
+    layouts, resampled = [], 0
+    for layout in base:
+        while True:
+            layout.update(layout_capture.sample_position(rng))
+            box = (layout['box_x'], layout['box_y'], layout['box_yaw'])
+            bin_pose = (layout['bin_x'], layout['bin_y'], layout['bin_yaw'])
+            if clear_of_bin(box, bin_pose, margin=CLEARANCE):
+                break
+            resampled += 1
+        layouts.append(dict(box=box, bin=bin_pose, judged=True))
+    return layouts, resampled
+
+
+def inside_bin(x, y, z, yaw, bin_pose):
+    """All four box corners inside the bin's inner walls and the box on the floor (truth)."""
+    bx, by, byaw = bin_pose
+    for sx in (-1, 1):
+        for sy in (-1, 1):
+            cx = x + BOX_HALF * (sx * math.cos(yaw) - sy * math.sin(yaw))
+            cy = y + BOX_HALF * (sx * math.sin(yaw) + sy * math.cos(yaw))
+            lx = math.cos(byaw) * (cx - bx) + math.sin(byaw) * (cy - by)
+            ly = -math.sin(byaw) * (cx - bx) + math.cos(byaw) * (cy - by)
+            if abs(lx) > BIN_INNER[0] or abs(ly) > BIN_INNER[1]:
+                return False
+    return z < ON_FLOOR_Z_MAX
+
+
+def list_scene_parameters(rig, node_name):
+    client = rig.node.create_client(ListParameters, f'/{node_name}/list_parameters')
+    if not client.wait_for_service(timeout_sec=10.0):
+        return None
+    future = client.call_async(ListParameters.Request())
+    rig.spin_until(future.done, 10.0)
+    return [n for n in future.result().result.names if n.startswith('scene.')]
+
+
+def held_episode(args, index, layout, offset):
+    """Run one HELD-A layout; return a dict with the assertions and the failure class."""
+    box, bin_pose = layout['box'], layout['bin']
+    if EXECUTOR_LOG.exists():
+        EXECUTOR_LOG.unlink()
+    params = layout_params(layout) + ([f'fault.truth_offset_x_m={offset}'] if offset else [])
+    record = dict(index=index, source=args.source, offset=offset, box=box, bin=bin_pose)
+    try:
+        rig = Rig(args.workspace, params, True, executor_params=['place.into_bin=true'],
+                  source=args.source)
+    except RuntimeError as error:
+        record.update(cls='invalid generation', note=str(error))
+        return record
+    try:
+        if index == 0:
+            record['N2'] = {n: list_scene_parameters(rig, n)
+                            for n in ('object_pose_estimator', 'task_executor')}
+        if not rig.spin_until(lambda: rig.start.get_subscription_count() > 0, 30):
+            record.update(cls='invalid generation', note='executor did not come up')
+            return record
+        rig.start.publish(Empty())
+        if not rig.spin_until(lambda: bool(rig.outcomes), 300):
+            record.update(cls='execution/place failure', note='no outcome within 300 s')
+            return record
+        rig.spin_until(lambda: False, 2.0)
+        outcome = rig.outcomes[-1]
+        log = EXECUTOR_LOG.read_text(errors='replace')
+        # The bridge publishes generation 0 before the episode's first reset; the attempts are
+        # the generations after it (a fresh rig per layout).
+        generations = sorted({o.generation for o in rig.observations if o.generation >= 1})
+        first_gen = generations[0]
+        last_gen = generations[-1]
+        first_obs = next(o for o in rig.observations if o.generation == first_gen)
+        last_obs = [o for o in rig.observations if o.generation == last_gen][-1]
+        p0 = first_obs.object_pose.pose
+        box_truth = dict(x=p0.position.x - offset, y=p0.position.y, z=p0.position.z,
+                         yaw_deg=math.degrees(yaw_of(p0.orientation)), period=90.0,
+                         yaw_limit=BOX_YAW_LIMIT_DEG)
+        record.update(success=bool(outcome.success), failure=outcome.failure_code,
+                      retries=int(outcome.retries), layer=outcome.observation_failure_layer,
+                      reason=outcome.observation_failure_reason)
+        checks = {}
+        latched = {}
+        if args.source == 'vision':
+            for gen in generations:
+                found = [(i, e[1]) for i, e in enumerate(rig.events)
+                         if e[0] == 'latch' and e[1].generation == gen]
+                hit = [(i, m) for i, m in found if m.state == InitialPoseLatch.LATCHED]
+                if found and hit:
+                    commands = sum(1 for i in range(found[0][0], hit[0][0])
+                                   if rig.events[i][0] == 'cmd')
+                    checks.setdefault('P1', True)
+                    checks['P1'] = checks['P1'] and commands == 0
+                    latched[gen] = hit[0][1]
+            if first_gen in latched:
+                m = latched[first_gen]
+                box_err = pose_errors(m.box, box_truth)
+                bin_err = pose_errors(m.bin, bin_truth(bin_pose))
+                checks['P2'] = within_limits(box_err, box_truth) and \
+                    within_limits(bin_err, bin_truth(bin_pose))
+                record['latch_box_err'] = [round(e, 3) for e in box_err]
+                record['latch_bin_err'] = [round(e, 3) for e in bin_err]
+                ref_box = (m.box.position.x, m.box.position.y, math.degrees(m.box.yaw_rad))
+                ref_bin = (m.bin.position.x, m.bin.position.y, m.bin.position.z)
+            else:
+                ref_box = ref_bin = None
+        else:
+            ref_box = (box_truth['x'] + offset, box_truth['y'], box_truth['yaw_deg'])
+            ref_bin = (bin_pose[0], bin_pose[1], BIN_FLOOR_Z)
+        grasp = GRASP_TARGET.search(log)
+        if grasp and ref_box:
+            gx, gy = float(grasp.group(1)), float(grasp.group(2))
+            rot = tool_yaw_deg(*(float(v) for v in grasp.groups()[3:]))
+            dxy = 1000.0 * max(abs(gx - ref_box[0]), abs(gy - ref_box[1]))
+            dyaw = abs(fold(rot - fold(ref_box[2], 90.0), 360.0))
+            checks['P3'] = dxy <= 1.0 and dyaw <= 1.0
+            record['grasp_err'] = [round(dxy, 3), round(dyaw, 3)]
+        place = PLACE_TARGET.search(log)
+        if place and ref_bin:
+            px, py, pz = (float(place.group(i)) for i in (1, 2, 3))
+            dxy = 1000.0 * max(abs(px - ref_bin[0]), abs(py - ref_bin[1]))
+            dz = 1000.0 * abs(pz - (ref_bin[2] + 0.07))
+            checks['P4'] = dxy <= 1.0 and dz <= 1.0
+            record['place_err'] = [round(dxy, 3), round(dz, 3)]
+        if grasp:
+            checks['P5'] = CARRY_ALERT.search(log) is None
+        lp = last_obs.object_pose.pose
+        in_bin = inside_bin(lp.position.x - offset, lp.position.y, lp.position.z,
+                            yaw_of(lp.orientation), bin_pose)
+        record['box_in_bin'] = in_bin
+        checks['P6'] = (not outcome.success) or in_bin
+        if args.source == 'vision':
+            state = {}
+            for o in rig.observations:
+                state[(o.generation, o.sample_sequence)] = o.attachment_state
+            leaked = sum(1 for m in rig.messages if state.get((m.generation, m.sample_sequence))
+                         == BridgeObservation.ATTACHMENT_ATTACHED)
+            record['N1_leaked'] = leaked
+        record['checks'] = checks
+        if outcome.failure_code == 'VISION_LATCH_TIMEOUT':
+            record['cls'] = 'not observable'
+        elif checks.get('P2') is False:
+            record['cls'] = 'perception failure'
+        elif outcome.failure_code == 'IK_FAILED':
+            record['cls'] = 'IK failure'
+        elif not outcome.success:
+            record['cls'] = 'execution/place failure'
+        elif not in_bin:
+            record['cls'] = 'false success'
+        else:
+            record['cls'] = 'success'
+        return record
+    finally:
+        rig.close()
+
+
+def run_held(args):
+    layouts, resampled = held_layouts(40)
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    print(f'HELD-A: 40 layouts, {resampled} resampled for being too close; source '
+          f'{args.source}, truth offset {args.truth_offset} m; writing {out}', flush=True)
+    with open(out, 'a', encoding='utf-8') as handle:
+        for index, layout in enumerate(layouts[:args.count]):
+            record = held_episode(args, index, layout, args.truth_offset)
+            record['resampled'] = resampled
+            handle.write(json.dumps(record) + '\n')
+            handle.flush()
+            print(f'{index:2d} {record.get("cls")}: {record.get("failure")} retries '
+                  f'{record.get("retries")} in_bin {record.get("box_in_bin")} checks '
+                  f'{record.get("checks")} latch box {record.get("latch_box_err")} bin '
+                  f'{record.get("latch_bin_err")}', flush=True)
+    return 0
+
+
+def run_held_summary(args):
+    def load(path):
+        return [json.loads(line) for line in Path(path).read_text().splitlines() if line]
+    vision, oracle = load(args.vision), load(args.oracle)
+    n3_vision, n3_oracle = load(args.n3_vision), load(args.n3_oracle)
+    failures = []
+    for name, rows in (('vision', vision), ('oracle', oracle)):
+        counts = collections.Counter(r['cls'] for r in rows)
+        summary = ', '.join(f'{k} {v}' for k, v in sorted(counts.items()))
+        print(f'{name}: {len(rows)} episodes, {summary}')
+        for key in ('P1', 'P2', 'P3', 'P4', 'P5', 'P6'):
+            values = [r['checks'][key] for r in rows if key in r.get('checks', {})]
+            bad = [r['index'] for r in rows if r.get('checks', {}).get(key) is False]
+            print(f'    {key}: checked {len(values)}, failed {len(bad)} {bad}')
+            if bad:
+                failures.append(f'{name} {key} failed on layouts {bad}')
+        if counts.get('false success'):
+            failures.append(f'{name} has false successes')
+    leaked = sum(r.get('N1_leaked', 0) for r in vision)
+    print(f'N1: estimator messages for ATTACHED samples over the vision run: {leaked}')
+    if leaked:
+        failures.append('N1')
+    n2 = next((r['N2'] for r in vision + oracle if 'N2' in r), None)
+    print(f'N2: scene.* parameters {n2}')
+    if n2 is None or any(v is None or v for v in n2.values()):
+        failures.append('N2')
+    n3_ok = all(r['success'] and r['box_in_bin'] for r in n3_vision) and len(n3_vision) >= 3
+    control_ok = all(not r.get('success') for r in n3_oracle) and len(n3_oracle) >= 1
+    print(f'N3: vision with the truth shifted {[(r["cls"], r["box_in_bin"]) for r in n3_vision]};'
+          f' oracle control {[(r["cls"], r.get("failure")) for r in n3_oracle]}')
+    if not (n3_ok and control_ok):
+        failures.append('N3')
+    vs = sum(1 for r in vision if r['cls'] == 'success')
+    os_ = sum(1 for r in oracle if r['cls'] == 'success')
+    print(f'rule 4: vision successes {vs}, oracle successes {os_}')
+    if vs < os_ - 2:
+        failures.append(f'rule 4: vision {vs} < oracle {os_} - 2')
+    by_index = {r['index']: r for r in oracle}
+    for r in vision:
+        o = by_index.get(r['index'])
+        if r['cls'] != 'success' and o and o['cls'] == 'success':
+            print(f'    vision failed, oracle succeeded: layout {r["index"]}: {r["cls"]} '
+                  f'{r.get("failure")} {r.get("reason")}')
+    print('\nSTAGE 14 ACCEPTANCE:', 'PASS' if not failures else 'FAIL')
+    for failure in failures:
+        print('  ', failure)
+    return 0 if not failures else 1
+
+
 def run_episode(args):
     bridge_params = ['enable_rgbd_camera=true']
     if args.scene == 'bin':
@@ -1161,9 +1403,15 @@ def main():
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('command',
                         choices=['static', 'gaps', 'latch', 'place', 'verify', 'carry',
-                                 'episode'])
+                                 'held', 'held-summary', 'episode'])
     parser.add_argument('--workspace', default=str(Path(__file__).resolve().parents[3]))
     parser.add_argument('--count', type=int, default=6)
+    parser.add_argument('--out', default='/tmp/stage14/held.jsonl', help='held: JSON lines')
+    parser.add_argument('--truth-offset', type=float, default=0.0,
+                        help='held: bridge fault.truth_offset_x_m (N3)')
+    for name in ('vision', 'oracle', 'n3-vision', 'n3-oracle'):
+        parser.add_argument(f'--{name}', default=f'/tmp/stage14/{name}.jsonl',
+                            help='held-summary: input file')
     parser.add_argument('--mode', choices=['normal', 'inject', 'attach'], default='normal',
                         help='carry: normal runs (W1) or the fault injection (W2, W3)')
     parser.add_argument('--require-success', action='store_true',
@@ -1183,7 +1431,8 @@ def main():
                         help='gaps: box-to-bin gaps in mm')
     args = parser.parse_args()
     return {'static': run_static, 'gaps': run_gaps, 'latch': run_latch, 'place': run_place,
-            'verify': run_verify, 'carry': run_carry, 'episode': run_episode}[args.command](args)
+            'verify': run_verify, 'carry': run_carry, 'held': run_held,
+            'held-summary': run_held_summary, 'episode': run_episode}[args.command](args)
 
 
 if __name__ == '__main__':

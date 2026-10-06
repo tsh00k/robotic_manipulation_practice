@@ -59,6 +59,23 @@ def scene_parameters(context):
     return parameters
 
 
+def camera_enabled(context):
+    """
+    Resolve enable_rgbd_camera: 'auto' follows observation_source.
+
+    vision needs the camera (no image, nothing for the estimator to detect); oracle does
+    not. An explicit true or false is passed through unchanged.
+    """
+    text = LaunchConfiguration('enable_rgbd_camera').perform(context).strip().lower()
+    if text == 'auto':
+        source = LaunchConfiguration('observation_source').perform(context).strip().lower()
+        return source == 'vision'
+    if text not in ('true', 'false'):
+        raise RuntimeError(
+            f"launch argument enable_rgbd_camera:={text!r} must be auto, true or false")
+    return text == 'true'
+
+
 def make_bridge_node(context):
     return [Node(
         package='mujoco_bridge',
@@ -76,7 +93,7 @@ def make_bridge_node(context):
             'tf_rate_hz': LaunchConfiguration('tf_rate_hz'),
             'enable_debug_viewer': LaunchConfiguration('enable_debug_viewer'),
             'debug_viewer_rate_hz': LaunchConfiguration('debug_viewer_rate_hz'),
-            'enable_rgbd_camera': LaunchConfiguration('enable_rgbd_camera'),
+            'enable_rgbd_camera': camera_enabled(context),
             'camera_rate_hz': LaunchConfiguration('camera_rate_hz'),
         }],
         # Same fix, same reason as rviz_node's additional_env below: with
@@ -114,7 +131,9 @@ def generate_launch_description():
     tf_rate_hz_arg = DeclareLaunchArgument('tf_rate_hz', default_value='100.0')
     enable_debug_viewer_arg = DeclareLaunchArgument('enable_debug_viewer', default_value='false')
     debug_viewer_rate_hz_arg = DeclareLaunchArgument('debug_viewer_rate_hz', default_value='30.0')
-    enable_rgbd_camera_arg = DeclareLaunchArgument('enable_rgbd_camera', default_value='false')
+    # 'auto': on with observation_source:=vision, off with oracle (Week 4.1 Stage 14: vision
+    # became the default in Stage 11 while this stayed false, so a plain launch had no image).
+    enable_rgbd_camera_arg = DeclareLaunchArgument('enable_rgbd_camera', default_value='auto')
     camera_rate_hz_arg = DeclareLaunchArgument('camera_rate_hz', default_value='10.0')
     # vision is the demo's default from Week 4.1 Stage 11 on, when the vision episode first
     # completes into the bin; oracle remains for comparison.

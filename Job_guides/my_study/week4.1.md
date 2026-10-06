@@ -1,6 +1,6 @@
 # Week 4.1 学习笔记
 
-> **状态（2026-10-06）：** Stage 1~5 已完成并提交：Stage 1 `d992d81`；Stage 2、3 的测量与离线工具 `40c49aa`、`b4d4f20`；Stage 4 评估后不做；**Stage 5（box 初始位姿检测落地）** `8a46e5e`~`f79c725`，见 [Stage 5](#stage-5box-位姿检测落地xyyaw) 和 [ADR 018](../../docs/adr/018-initial-box-detection-in-the-estimator.md)。Stage 6 起尚未做。结果在 [2.3](#23-结果)、[3.4](#34-v0单帧的结果)、[3.5](#35-v1对静止场景平均多帧)。原计划的 Stage 2（附着期持续视觉）实验已做、代码取消，记录在[附录 A](#附录-a已取消的附着期持续视觉实验原-stage-2)。方向调整的依据与决定见 [ADR 016](../../docs/adr/016-initial-pose-detection-and-gripper-width-carry-check.md)：视觉只做初始位姿检测，搬运期看夹爪开度，先测容差与误差再落地。Stage 2、3 是**测量阶段**，不改产品代码，只新增离线工具。本周以 Stage 5 提交 `e37dcb2` 为代码基线；原 Stage 6 的完整实现归档在分支 `archive/stage6-transport-monitor`（提交 `3587adf`，不合并，只按阶段挑选可移植部分）。[Week 4 Stage 6](week4.md#stage-6可配置单物体入-bin-与搬运监测) 的笔记保留作为记录，回退经过见其 [6.9](week4.md#69-回退决定与存档)。Week 4.5 继续 [HOLD UP](week4.5.md)，旋转打滑优化暂缓。
+> **状态（2026-10-06）：Stage 1~14 全部完成**（4 评估后不做，10 并入 11），Stage 14 的留出集验收通过，见 [Stage 14](#stage-14随机场景的过程验收)。早期记录：Stage 1~5 已完成并提交：Stage 1 `d992d81`；Stage 2、3 的测量与离线工具 `40c49aa`、`b4d4f20`；Stage 4 评估后不做；**Stage 5（box 初始位姿检测落地）** `8a46e5e`~`f79c725`，见 [Stage 5](#stage-5box-位姿检测落地xyyaw) 和 [ADR 018](../../docs/adr/018-initial-box-detection-in-the-estimator.md)。Stage 6 起尚未做。结果在 [2.3](#23-结果)、[3.4](#34-v0单帧的结果)、[3.5](#35-v1对静止场景平均多帧)。原计划的 Stage 2（附着期持续视觉）实验已做、代码取消，记录在[附录 A](#附录-a已取消的附着期持续视觉实验原-stage-2)。方向调整的依据与决定见 [ADR 016](../../docs/adr/016-initial-pose-detection-and-gripper-width-carry-check.md)：视觉只做初始位姿检测，搬运期看夹爪开度，先测容差与误差再落地。Stage 2、3 是**测量阶段**，不改产品代码，只新增离线工具。本周以 Stage 5 提交 `e37dcb2` 为代码基线；原 Stage 6 的完整实现归档在分支 `archive/stage6-transport-monitor`（提交 `3587adf`，不合并，只按阶段挑选可移植部分）。[Week 4 Stage 6](week4.md#stage-6可配置单物体入-bin-与搬运监测) 的笔记保留作为记录，回退经过见其 [6.9](week4.md#69-回退决定与存档)。Week 4.5 继续 [HOLD UP](week4.5.md)，旋转打滑优化暂缓。
 
 原 Stage 6 把“场景与实体 bin、搬运期间的视觉辅助估计、掉落/释放/稳定判定”绑在一起，回退后第一版计划又沿着“搬运期持续视觉”的思路拆成 18 个阶段。Stage 2 的真实运行与带真值标注的离线分析表明，这条思路的前提不成立：搬运期没有控制环路消费视觉，视觉被拒也不是因为看不见盒子，而是判据用包围盒边长去衡量部分可见的物体。于是整体计划按新方向重排为 14 个单一出口的阶段（2026-10-06 起 Stage 10 并入 Stage 11，实际 13 个出口，编号不重排）。本周的方法目标不变：**每个阶段只有一个可验证出口；先有可读的观测，再决定是否需要状态；测量先于实现，评测协议先于测量。**
 
@@ -131,7 +131,7 @@
 | | 11 | 已完成 | 释放后 box 在 bin 内的检测（先测可行性）与入 bin 成功判据：释放后新视觉 box 完整在锁存 bin 内 | 多帧稳定 |
 | E 完整性 | 12 | 已完成 | 搬运期夹爪开度窗口 | 视觉 |
 | | 13 | 已完成 | 附着确认不再读 box 真值 | 开度窗口 |
-| F 验收 | 14 | **重** | 随机场景的过程验收，用留出集 | 新功能 |
+| F 验收 | 14 | 已完成 | 随机场景的过程验收，用留出集 | 新功能 |
 
 **分量与骨架。** 轻阶段是接线或规则加几行接线，笔记只写 5 块：N.0 一句话总结、N.1 改动清单、N.2 验证结果（一张表）、N.3 你没问但值得注意（2~4 条，CLAUDE.md 要求）、N.4 边界与后续；失败模式表和排查记录只在真有内容时写；用户追问的问题仍按 STUDY_NOTES_GUIDE 用 `>` 引用保留。重阶段用 Stage 2、3 的完整骨架（0 一句话总结、1 改动清单、2 机制与权衡、3 预期轨迹与验收、4 失败模式、5 你没问但值得注意的、6 边界与后续）。Stage 1~5 已按各自当时的骨架写完；Stage 6~14 目前只写出口、范围、验收要点和前置条件，依赖前面阶段的实测结果，**开始前**按对应分量补全并先写预期。
 
@@ -1756,6 +1756,144 @@ bridge 的附着确认现在读了两样盒子的真值：**盒子到 TCP 的水
 
 ## Stage 14：随机场景的过程验收
 
+**状态（2026-10-06）：已完成，尚未提交。按 14.1 写定的规则验收通过。** 14.0、14.1 是运行前写定的，没有改动；HELD-A 在此之前没有生成、没有看过。判定之后为调查唯一的失败重跑了 HELD-A 的一个布局，所以 **HELD-A 从此改称回归集**，新的留出集见 14.5。原计划保留在 14.9。**分量：重。**
+
+### 14.0 一句话总结（目标）
+
+在从未用过的留出集 HELD-A 上，用 vision 和 oracle 两种来源各跑一遍整条链（检测、锁存、抓取、放进 bin、VERIFY），每个 episode 核对过程断言，再加一组负向断言，按失败层分类统计。结论不只是“几个成功”，而是“链的每一环在哪些布局上成立、在哪里断、断在哪一层”。
+
+### 14.1 协议（运行前写定，不因结果改动）
+
+**布局（HELD-A）。** 种子 20261006，40 个，生成规则与 Stage 3 的 DEV-A 相同（`layout_capture.py` 的 `make_layouts` / `sample_position`）：box 与 bin 的中心 x ∈ [0.38, 0.62]、y ∈ [−0.22, 0.22] 均匀；box yaw 在 [0°, 90°) 分 8 层、bin yaw 在 [0°, 180°) 分 8 层，层的配对随机；roll = pitch = 0。box 与 bin 太近的布局按 bridge 的规则（外轮廓间距 < 20 mm）从同一随机流重采，重采次数计数报告。**不再排除大 yaw**（Stage 8 的布局 2 因 41° 抓取失败，是 Stage 9 之前的事；Stage 9 之后抓取朝向跟随盒子）。声明的条件：盒子与 bin 都平放、在桌内、在相机视野内（Stage 6 的范围）、不重叠；可达性不事先筛，IK 不可达按 `IK_FAILED` 计入。
+
+**每个布局各起一套 bridge + 估计器 + executor，一个 episode（含 FSM 自己的重试），超时 300 s。** vision 与 oracle 各跑 40 个，同一组布局。
+
+**过程断言（每个 episode；只在流程走到那一步时检查，没走到的记为“未到达”）：**
+
+| 编号 | 断言 | 适用 |
+| --- | --- | --- |
+| P1 | 第一条 LATCHED 之前没有关节命令 | vision |
+| P2 | 锁存的 box 与 bin 对真值：x、y ≤ 3 mm，z ≤ 2 mm，yaw box ≤ 5°（模 90°）、bin ≤ 3°（模 180°） | vision |
+| P3 | 第一次 GRASP 的 TCP x、y 与盒子（vision：锁存值；oracle：真值）相差 ≤ 1 mm，工具转角与盒子 yaw（折到 ±45°）相差 ≤ 1° | 两者 |
+| P4 | 第一次 PLACE 的 TCP x、y 与 bin（vision：锁存值；oracle：真值）相差 ≤ 1 mm，z = 内底面 + 0.07 m（± 1 mm） | 两者 |
+| P5 | 搬运期没有开度告警 | 两者 |
+| P6 | **outcome 成功 ⇒ 按真值盒子在 bin 内**（四角在内口里、盒心在地板高度）。成功而盒子不在 bin 内 = 假成功 | 两者 |
+
+**负向断言（每条一次，任何一条失败即验收失败，不能以成功率抵消）：**
+
+| 编号 | 断言 | 怎么查 |
+| --- | --- | --- |
+| N1 | 估计器在 ATTACHED 期间不发布 | 在线：vision 的 40 个 episode 里，没有一条 `initial_box_pose` 的 bridge 样本是 ATTACHED |
+| N2 | 估计器与 executor 的参数里没有 `scene.*` | 在线：第一个布局时调 `list_parameters` |
+| N3 | **oracle 不进 vision 的决策** | 在线：bridge 新故障参数 `fault.truth_offset_x_m`（默认 0）只把发布的盒子真值（`BridgeObservation.object_pose`、`~/ground_truth/object_pose`）平移 +0.08 m，物理不动。HELD-A 前 3 个布局：vision 仍成功且按真值（扣掉平移）盒子在 bin 内；**对照**：oracle 在第 1 个布局上同样平移后不成功（证明平移确实有效） |
+| N4 | 搬运期 executor 用的是锁存位姿，不是视觉 | 在线：P3、P4 的目标等于锁存值；加上 Stage 11 起 executor 只在 VERIFY 准入新测量（代码），所以搬运期没有视觉位姿进入 |
+| N5 | 没有 transport / drop 状态机 | 静态：源码里没有 Week 4 Stage 6 存档里的 `TransportMonitor` / `CONFIRMED_DROP` 等（`grep`） |
+
+**失败分类（每个 episode 一类，按先后取第一个成立的）：** 无效生成（bridge 拒绝布局）→ 不可观测（`VISION_LATCH_TIMEOUT`）→ 感知失败（锁存了但 P2 不满足）→ IK 失败（`IK_FAILED`）→ 执行/放置失败（其它失败码）→ 假成功（P6 不满足）→ 成功。
+
+**验收规则：**
+
+1. 负向断言 N1~N5 全部成立；
+2. 零假成功（P6）；
+3. 走到的每一步，P1~P5 全部成立；
+4. **vision 的成功数不少于 oracle 的成功数减 2**（40 个里）。成功率本身不设门槛：oracle 的失败是执行与可达性的边界，vision 要证明的是“没有因为视觉多丢”；vision 失败而 oracle 成功的布局逐个给出失败层。
+
+**不在本阶段做（原计划的“最低矩阵”里的项，逐条说明去向）：** 小初始倾角——盒子平放是先验，倾斜的盒子会被当成平放（Stage 5），倾斜的 bin 未测，都记为范围外；受限边缘——HELD-A 的范围不含桌边，不另造；视觉漏检、目标不可见——Stage 7 的 A3（缺 bin 的 `VISION_LATCH_TIMEOUT`）已在线覆盖；遮挡——Stage 6 的 E4；旧 generation——Stage 7 的 A4；释放后不稳定——VERIFY 要求最小 settle 时间，盒子落到壁上的情形只有单测（Stage 11）。
+
+**产物：** 每个 episode 一行 JSON，写到仓库外 `/tmp/stage14/`（会随重启丢失）；文档记录命令和摘要。
+
+### 14.2 改动清单
+
+| 文件 | 内容 |
+| --- | --- |
+| [mujoco_bridge_node.cpp](../../src/mujoco_bridge/src/mujoco_bridge_node.cpp) | 仿真故障 `fault.truth_offset_x_m`（默认 0）：只平移 bridge **发布**的盒子真值（`BridgeObservation.object_pose`、`~/ground_truth/object_pose`），物理不动；用于 N3 |
+| [initial_box_probe.py](../../src/mujoco_perception/test/initial_box_probe.py) | `held`（逐个 HELD-A 布局跑一个 episode，写一行 JSON：P1~P6、失败类别、锁存误差）与 `held-summary`（按 14.1 判定） |
+
+产品代码只改了这一个默认关闭的故障参数。
+
+**复现：**
+
+```bash
+P=src/mujoco_perception/test/initial_box_probe.py   # 在容器里，source install/setup.bash 之后
+ROS_DOMAIN_ID=84 /usr/bin/python3 $P held --source vision --count 40 --out /tmp/stage14/vision.jsonl
+ROS_DOMAIN_ID=84 /usr/bin/python3 $P held --source oracle --count 40 --out /tmp/stage14/oracle.jsonl
+ROS_DOMAIN_ID=84 /usr/bin/python3 $P held --source vision --count 3 --truth-offset 0.08 --out /tmp/stage14/n3-vision.jsonl
+ROS_DOMAIN_ID=84 /usr/bin/python3 $P held --source oracle --count 1 --truth-offset 0.08 --out /tmp/stage14/n3-oracle.jsonl
+/usr/bin/python3 $P held-summary
+```
+
+全部约 26 分钟墙钟（vision 12 分钟、oracle 12 分钟、N3 2 分钟）。产物在 `/tmp/stage14/`，重启会丢。
+
+### 14.3 结果
+
+**生成：** HELD-A 40 个布局，bridge 的间距规则重采 23 次（与 DEV-A 的 23 次相同；同一生成器、不同种子，这个相同是巧合，没有查）；没有无效生成。
+
+| 类别 | vision（40） | oracle（40） |
+| --- | --- | --- |
+| 成功（且按真值盒子在 bin 内） | **39** | **40** |
+| 执行/放置失败 | 1（布局 16，见下） | 0 |
+| 不可观测、感知失败、IK 失败、假成功 | 0 | 0 |
+| 有重试的 episode | 0 | 0 |
+
+**过程断言（走到那一步的才检查）：**
+
+| 编号 | vision | oracle | 实测 |
+| --- | --- | --- | --- |
+| P1 锁存前无命令 | 40/40 | — | |
+| P2 锁存对真值 | 40/40 | — | box 最大 \|dx\| 0.63、\|dy\| 1.19、\|dz\| 0.17 mm、\|dyaw\| 0.18°；bin 最大 0.52、1.20、0.75 mm、0.09° |
+| P3 GRASP 目标 | 40/40 | 40/40 | 位置差最大 0.05 mm，工具转角差最大 0.007° |
+| P4 PLACE 目标 | 40/40 | 40/40 | 位置差最大 0.05 mm，高度差最大 0.05 mm |
+| P5 无开度告警 | 40/40 | 40/40 | |
+| P6 无假成功 | 40/40 | 40/40 | |
+
+**负向断言：**
+
+| 编号 | 结果 |
+| --- | --- |
+| N1 | vision 40 个 episode 里，估计器为 ATTACHED 样本发布的消息：**0** 条 |
+| N2 | 估计器与 executor 的 `scene.*` 参数：都是空 |
+| N3 | 盒子真值平移 +0.08 m 后，vision 前 3 个布局 **3/3 成功**、零重试，按真值（扣掉平移）盒子都在 bin 内；对照 oracle 在布局 0 上平移后 **`GRASP_EMPTY`、重试 3 次后失败**（抓向了 8 cm 外的空处）。平移是有效的，而 vision 不受影响 |
+| N4 | 由 P3、P4（目标等于锁存值）加上代码（Stage 11 起只在 VERIFY 准入新测量）成立 |
+| N5 | Week 4 Stage 6 存档分支里的 `TransportMonitor`、`CONFIRMED_DROP`、`transport_state` 在 `main` 的 `src/` 里都不存在 |
+
+**规则 4：** vision 39 ≥ oracle 40 − 2。
+
+**验收：通过**（N1~N5 成立；零假成功；走到的 P1~P6 全部成立；规则 4 满足）。
+
+**唯一的失败：vision 布局 16。** box (0.390, 0.206, 36.3°)，bin (0.579, −0.215, 58.4°)。锁存、抓取、放置都正常（P1~P5 成立），盒子按真值落在 bin 里；VERIFY 时新检测器一直回答 `NO_RECTANGLE_MATCHES_BOX`，5 s 后 `OBSERVATION_STALE`，没有重试。oracle 在同一布局成功。**判定之后**我重跑了这一个布局并记下候选块：只有一块，167 像素，矩形 **39.8 × 30.0 mm**，一条边少了 10 mm，不满足 40 ± 5 mm。这个布局的 bin 在 y = −0.215，是 HELD-A 里离相机（y = −0.45）最近的一类，盒子落在 bin 里靠相机一侧。**我的推测（没有看图像证实）：** RETRACT 时张开的手停在 bin 中心正上方，从相机看过去挡住了盒子顶面靠 bin 中心的一条边；机器人遮罩把手的像素去掉，于是盒子被截断。这正是 Stage 11 的 11.4 预言过的情形（“如果 RETRACT 高度或相机位置改了，VERIFY 也可能遇到同样的事”）——这里不是改了什么，而是 bin 离相机近，手与盒子在视线上重叠。
+
+### 14.4 你没问但值得注意的
+
+- **（E 可测试性）验收里的“成功”只覆盖了 HELD-A 的范围。** 盒子与 bin 都平放、在 x ∈ [0.38, 0.62]、y ∈ [−0.22, 0.22]、两者间距 ≥ 20 mm；没有桌边、倾斜、遮挡物、真实噪声。仿真深度几乎没有帧间噪声，所以锁存的一致性判据、多帧平均和检测余量在 80 个 episode 里都没有被真正考验过：锁存误差最大 1.2 mm，而限是 3 mm。
+- **（E 可测试性）布局 16 的失败是确定性的。** 仿真没有随机性，同一布局重跑结果相同（我重跑了一次，候选块完全一样）。所以“39/40”不是一个概率估计，而是“HELD-A 里恰好有一个布局落在手挡住盒子的区域”。要估计这个区域有多大，要专门扫 bin 的 y。
+- **（C 可观测性）成功的 outcome 里残留了失败原因。** vision 的 39 个成功里有 7 个，`observation_failure_reason` 是 `VISION_REJECTED:NO_RECTANGLE_MATCHES_BOX`：VERIFY 期间检测器有过 NOT_MEASURED（多半是盒子刚落下或手还在视线里的那几帧，没有逐个查），节点记下了原因，之后成功时没有清空。统计“失败原因”时会被误读。
+- **（C 可观测性）一个 VERIFY 看不见盒子的失败，最后报的是 `OBSERVATION_STALE`，失败层是 `execution`。** 实际上是感知在 VERIFY 时失败。分类里我把它归为“执行/放置失败”，因为规则是按失败码分的；按真正的原因应当是“感知失败（VERIFY）”。这条分类规则是我事先写的，结果不改，但它把一个感知问题藏进了执行层。
+
+### 14.5 本阶段边界与后续
+
+**做完了：** 留出集验收，vision 39/40、oracle 40/40，所有断言成立，零假成功。
+
+**HELD-A 从此是回归集**（判定后为调查重跑过布局 16）。下一个留出集 **HELD-B 定为种子 20261009**，同样的生成规则，现在只记录种子，不生成、不看。
+
+**留给后续（不在本周做）：**
+
+1. **VERIFY 被手挡住**（布局 16）：可能的做法有 RETRACT 抬得更高、RETRACT 时把手移出相机与 bin 的视线、或 VERIFY 看不见时报感知层失败而不是 `OBSERVATION_STALE`；要先用图像证实原因，再扫 bin 的 y 量出受影响的区域。
+2. 成功时清空 `observation_failure_reason`。
+3. 告警时立刻重试（Stage 12 留给你定的）。
+3b. 默认 bin 位置在视觉范围外（14.6 第 2 条）。
+4. 旧检测路径与 `VisionObjectPose`、三个已不起作用的 `vision.*` 参数的清理（Stage 5 的 5.11、Stage 11）。
+5. 悬挂清单里的其余各项（第 4 节）。
+
+**收尾（原计划要求）：** 本周的文档、architecture、ADR 在这次提交后冻结；后续学习周期由你决定，Week 4.5 不自动恢复。
+
+### 14.6 验收之后发现的两件事（用户要启动命令时）
+
+**1. 默认参数直接 launch，vision 没有图像（已修）。** Stage 11 把 `observation_source` 的默认值改成 `vision`，`enable_rgbd_camera` 却仍默认 `false`；直接 `ros2 launch mujoco_bridge demo.launch.py` 会起 vision 的 executor 而相机是关的，锁存 10 s 超时。Stage 11 的 G5 只检查了“默认值改了、launch 守卫测试通过”，没有用默认参数真跑一次。修法：launch 参数 `enable_rgbd_camera` 默认改为 `auto`，随 `observation_source` 走（vision 开、oracle 关），显式 true/false 照办；`test_scene_launch.py` 加了 2 项（`auto` 的四种组合与非法值、默认值组合给 vision 开相机）。用 `ros2 launch mujoco_bridge demo.launch.py scene_enabled:=true` 只加这一个参数真跑：相机开、估计器起来——**但又碰到了第 2 件事**。
+
+**2. bridge 的默认 bin 位置 (0.5, 0.3) 在视觉看得见的范围之外（未修，等你定）。** 上面那次运行以 `VISION_LATCH_TIMEOUT` 结束，原因 `BIN:WAITING:NO_RECTANGLE_MATCHES_BIN`。bin 检测器看到的块只有 151 × 76 mm，中心在 y = 0.268（真值 0.30），**远离相机的那一半没了**。把 bin 沿 y 移动量了一次：y = 0.30 和 0.25 检不出（块宽 76、126 mm），0.22 和 0.20 检得出。本周所有视觉验证用的布局 y 都在 [−0.22, 0.22]（Stage 3 的协议），从没测过默认位置。**原因是推断，没有看图像：** 机械臂在 HOME 时手在 (0.55, 0, 0.52) 附近，从相机 (0.5, −0.45, 1.0) 看向 y ≈ 0.3 的视线正好从手和前臂旁边经过，挡住 bin 远侧；机器人遮罩把这些像素去掉，bin 就被截断了。加上 `bin_y:=0.2` 后同一条 launch 命令真跑：vision 成功、零重试，盒子在 bin 内（最小角余量 39.1 mm）。
+
+### 14.9 原计划（2026-10-06 之前写的，保留作对照）
+
 **出口：** 用留出集 HELD-A 和预先定义的过程断言证明整条链，并明确失败范围，而不是只报 N/N 成功。
 
 - **范围：** 整理现有 probe 和小规模运行矩阵，不另建一套 recorder。报告版本、种子、实际位置与旋转、定位误差、过程断言结果、outcome；产物放仓库外，文档记录可重现命令与摘要。
@@ -1767,6 +1905,8 @@ bridge 的附着确认现在读了两样盒子的真值：**盒子到 TCP 的水
 - **前置：** Stage 13。
 
 ## 3. 本周最终出口
+
+**状态（2026-10-06，Stage 14 之后）：** 1、2、3 达到（3 里“决策不消费物体真值位姿”由 Stage 13 与 Stage 14 的 N3 在线证明）；4 达到，HELD-A 上 vision 39/40、oracle 40/40，失败层逐个给出（Stage 14 的 14.3）。限于仿真与 HELD-A 的布局范围。
 
 1. box/bin 任务位姿来自单摄像头视觉的一次性检测并锁存，配置只在 bridge 里生成场景；决策不消费物体真值位姿（Stage 13 之后）。
 2. 容差表与误差表都存在，检测精度满足预先写定的接受规则；不满足时有记录和下一步，而不是放宽规则。

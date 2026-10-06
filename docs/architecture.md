@@ -154,7 +154,7 @@ URDF hand:=true 强制加 fer_ 前缀，跨库代码须显式映射。下表采�
 | --- | --- |
 | 安装 | 项目 MJCF camera_link：world 平移 `(0.5,-0.45,1.0) m`，xyaxes=`1 0 0 0 0.857 0.514` |
 | 光学轴 | MuJoCo +X 右/+Y 上/-Z 前；到 optical 绕 X 转 π，变成 +X 右/+Y 下/+Z 前 |
-| 启用 | enable_rgbd_camera=true；bridge 默认关闭，vision 入口启用 |
+| 启用 | bridge 节点参数 enable_rgbd_camera 默认 false；demo launch 的同名参数默认 `auto`，随 observation_source 走（vision 开、oracle 关），显式 true/false 照办（Week 4.1 Stage 14 修正：Stage 11 把来源默认改成 vision 后，相机仍默认关闭，直接 launch 没有图像） |
 | 图像 | /mujoco_bridge/camera/color/image_raw：rgb8；同前缀 depth/image_raw：32FC1。estimator 只消费深度（Stage 5 起不订阅 RGB） |
 | 内参 | color/camera_info、depth/camera_info，相同零畸变内参；320×240、fovy=50°、fx=fy=257.34083046 px、cx=159.5/cy=119.5 |
 | 深度 | 米制光轴 z-depth；OpenGL 缓冲经近远平面换算，无效/远裁剪写 NaN |
@@ -222,7 +222,9 @@ BridgeObservation.attachment_state 为唯一权威：ATTACHMENT_NOT_ATTACHED=0�
 
 Stage 13 起这套确认不再读物体真值（位置与接触身份），但接触本身仍由仿真产生，附着权威仍在仿真 bridge；手指被盒子以外的东西挡住、停在 30~50 mm 时会误确认（与真实 `is_grasped` 同样的局限，未在线测过）；20 mm/s 的阈值只来自一个 episode 的实测。闭爪滑落仍为 ATTACHED（锁存只在张开超过 50 mm 时解除）；Week 4.1 Stage 12 起 executor 用搬运期开度窗口发现它，见 [5.5](#55-任务观测来源与质量门)，但只告警、不改变 episode。
 
-**仿真故障注入（Stage 12，默认关闭）。** bridge 参数 `fault.drop_box_after_attach_s`（默认 −1，关闭；launch 不暴露）：附着持续到该仿真时长时，把盒子的自由关节移回 reset keyframe 里的位置、速度清零，整个 bridge 运行期间只做一次，以便重试能成功。它改的是“世界”，不是机器人；用来复现“盒子滑出、手指合拢到约 0、附着锁存不变”。
+**仿真故障注入（默认关闭，launch 不暴露）。** Stage 14 加了 `fault.truth_offset_x_m`（默认 0）：只把 bridge **发布**的盒子真值（`BridgeObservation.object_pose`、`~/ground_truth/object_pose`）沿 world x 平移，物理不动；用来在线证明 vision 来源不读真值。下面是 Stage 12 的那一个。
+
+**（Stage 12）** bridge 参数 `fault.drop_box_after_attach_s`（默认 −1，关闭；launch 不暴露）：附着持续到该仿真时长时，把盒子的自由关节移回 reset keyframe 里的位置、速度清零，整个 bridge 运行期间只做一次，以便重试能成功。它改的是“世界”，不是机器人；用来复现“盒子滑出、手指合拢到约 0、附着锁存不变”。
 
 estimator 的 tryProcess 在当前 ATTACHED 时早退，正常 RGB-D 几何处理及结果输出暂停，订阅回调/缓存仍可运行。ATTACHED→RELEASED 或 NOT_ATTACHED 时重置 tracker，清 depth/CameraInfo、pending 与 processed，并清空初始 box 的深度窗口，避免直接消费附着期旧图像；生命周期切换也重置历史（含该窗口）。释放状态不证明物体已落桌，须重新得到合格测量。
 
@@ -296,6 +298,7 @@ FSM 默认位置/GRASP-CLOSE 位置/速度容差为 0.05 rad/0.3 rad/0.05 rad/s�
 | [视觉验证](../Job_guides/my_study/week4.md#10-stage-4同帧机器人几何掩膜) | 掩膜/诊断基线、缺 TF、质量拒绝；完整视觉抓放未通过 |
 | [DepthWindow](../src/mujoco_perception/test/test_depth_window.cpp) / [初始 box 检测器](../src/mujoco_perception/test/test_initial_box_detector.cpp) / [初始 bin 检测器](../src/mujoco_perception/test/test_initial_bin_detector.cpp) / [InitialPoseEstimator](../src/mujoco_perception/test/test_initial_pose_estimator.cpp) | 单测在精确光线投射的合成场景上，答案由构造给出（相机与场景在 [workcell_camera.hpp](../src/mujoco_perception/test/workcell_camera.hpp)），共 24 项；场景固定，所以不测非法配置、不会出现的场景和相机分辨率变化。容差是像素量化界，不是调出来的（bin 的边长用检测器自己的 ±8 mm 规则） |
 | `initial_box_probe.py place` | Stage 8：随机 box + bin 布局，oracle 与 vision 各自的 PREPLACE / PLACE 目标对 bin（真值或锁存值）、释放时指尖与壁顶的余量、盒子最终是否在 bin 内（按真值判）；`--scene legacy` 核对旧场景的固定目标。仿真 |
+| `initial_box_probe.py held` / `held-summary` | Week 4.1 Stage 14：留出集 HELD-A（40 个随机 box + bin 布局）上 vision 39/40、oracle 40/40；过程断言 P1~P6（锁存前无命令、锁存误差、抓取与放置目标、无开度告警、无假成功）、负向断言 N1~N5（含用 `fault.truth_offset_x_m` 平移发布的真值，vision 不受影响而 oracle 失败）。仿真，HELD-A 此后为回归集 |
 | [附着确认单测](../src/mujoco_bridge/test/test_grasp_criteria.cpp) / `initial_box_probe.py carry --mode attach` | Stage 13：持续 0.1 s 才确认、空夹/手指仍在动/无合拢命令/宽度不符不确认、断一个样本重新计时；在线核对附着时手指确实碰到盒子（评测端）、合拢到附着的时间。仿真 |
 | [开度窗口单测](../src/task_executor/test/test_carry_width_monitor.cpp) / `initial_box_probe.py carry` | Stage 12：窗口内不报、短暂低于下限不报、持续 0.2 s 报一次、只看搬运期；正常运行不误报，注入 `fault.drop_box_after_attach_s` 后 0.5 s 内报出。仿真 |
 | [入 bin 判据单测](../src/task_executor/test/test_bin_containment.cpp) / `initial_box_probe.py verify`、`place --require-success` | Stage 11：判据的居中、越界、离壁不足余量、压壁、bin 旋转；VERIFY 时新检测器对真值的误差（6 个布局）；oracle 与 vision 在随机布局上完整成功并按真值入 bin。仿真 |

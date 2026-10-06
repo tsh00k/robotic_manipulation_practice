@@ -186,6 +186,11 @@ public:
     // it, so that the fingers close on nothing while the attachment stays latched. Changes the
     // world, not the robot; done once per bridge run, so that a retry can succeed.
     fault_drop_box_after_attach_s_ = declare_parameter("fault.drop_box_after_attach_s", -1.0);
+    // Simulation fault, for Week 4.1 Stage 14 only, off by default: shift the box pose this
+    // bridge PUBLISHES as truth (BridgeObservation.object_pose, ~/ground_truth/object_pose)
+    // along world x. The physics is untouched. A consumer that still reads the truth then acts
+    // on a wrong box; one that does not is unaffected.
+    fault_truth_offset_x_m_ = declare_parameter("fault.truth_offset_x_m", 0.0);
     grasp_criteria_.lift_height_threshold_m =
       declare_parameter("grasp.lift_height_threshold_m", 0.26);
     grasp_criteria_.region_radius_m = declare_parameter("grasp.region_radius_m", 0.05);
@@ -985,7 +990,7 @@ private:
     geometry_msgs::msg::PoseStamped msg;
     msg.header.stamp = simTime();
     msg.header.frame_id = "world";
-    msg.pose.position.x = data_->xpos[3 * object_body_id_ + 0];
+    msg.pose.position.x = data_->xpos[3 * object_body_id_ + 0] + fault_truth_offset_x_m_;
     msg.pose.position.y = data_->xpos[3 * object_body_id_ + 1];
     msg.pose.position.z = data_->xpos[3 * object_body_id_ + 2];
     msg.pose.orientation.w = data_->xquat[4 * object_body_id_ + 0];
@@ -1171,7 +1176,8 @@ private:
     msg.joint_state = joint_state_msg_;
     msg.object_pose.header.stamp = simTime();
     msg.object_pose.header.frame_id = "world";
-    msg.object_pose.pose.position.x = data_->xpos[3 * object_body_id_ + 0];
+    msg.object_pose.pose.position.x = data_->xpos[3 * object_body_id_ + 0] +
+      fault_truth_offset_x_m_;
     msg.object_pose.pose.position.y = data_->xpos[3 * object_body_id_ + 1];
     msg.object_pose.pose.position.z = data_->xpos[3 * object_body_id_ + 2];
     msg.object_pose.pose.orientation.w = data_->xquat[4 * object_body_id_ + 0];
@@ -1296,6 +1302,7 @@ private:
   double commanded_gripper_width_m_ = 0.08;
   AttachmentConfirmer attachment_confirmer_;
   double fault_drop_box_after_attach_s_ = -1.0;
+  double fault_truth_offset_x_m_ = 0.0;
   double attached_since_s_ = 0.0;
   bool fault_done_ = false;
   manipulation_interfaces::msg::BridgeObservation::_attachment_state_type attachment_state_ =

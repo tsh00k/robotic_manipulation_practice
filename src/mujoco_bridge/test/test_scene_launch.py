@@ -46,6 +46,33 @@ def context(scene_enabled='false', **given):
     return ctx
 
 
+def camera_context(camera, source):
+    ctx = LaunchContext()
+    ctx.launch_configurations['enable_rgbd_camera'] = camera
+    ctx.launch_configurations['observation_source'] = source
+    return ctx
+
+
+def test_the_camera_follows_the_observation_source_unless_told():
+    assert demo.camera_enabled(camera_context('auto', 'vision')) is True
+    assert demo.camera_enabled(camera_context('auto', 'oracle')) is False
+    assert demo.camera_enabled(camera_context('true', 'oracle')) is True
+    assert demo.camera_enabled(camera_context('false', 'vision')) is False
+    with pytest.raises(RuntimeError, match='enable_rgbd_camera'):
+        demo.camera_enabled(camera_context('yes', 'vision'))
+
+
+def test_the_defaults_give_vision_a_camera():
+    defaults = {a.name: a.default_value for a in demo.generate_launch_description().entities
+                if hasattr(a, 'default_value') and hasattr(a, 'name')}
+    ctx = LaunchContext()
+    for name in ('enable_rgbd_camera', 'observation_source'):
+        ctx.launch_configurations[name] = ''.join(
+            part.perform(ctx) for part in defaults[name])
+    assert ctx.launch_configurations['observation_source'] == 'vision'
+    assert demo.camera_enabled(ctx) is True
+
+
 def test_scene_is_off_by_default_and_passes_nothing_else():
     assert demo.scene_parameters(context()) == {'scene.enabled': False}
 
