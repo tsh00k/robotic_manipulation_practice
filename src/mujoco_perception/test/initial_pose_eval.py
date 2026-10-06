@@ -76,8 +76,25 @@ def project(point):
     return FOCAL * p[0] / p[2] + CX, FOCAL * p[1] / p[2] + CY, p[2]
 
 
-def min_area_rect(xy, step=0.25):
-    """Return (angle deg in [0,90), centre, sizes along angle and angle+90)."""
+def min_area_rect(xy, step=0.25, mode='scan'):
+    """
+    Return (angle deg in [0, 90), centre, sizes along angle and angle + 90) of the points.
+
+    mode 'scan' tries every angle in `step` degrees and keeps the smallest bounding area
+    (the original prototype, see Week 4.1 3.2.3 for why the smallest area gives the
+    orientation). mode 'opencv' calls cv2.minAreaRect, which finds the same rectangle exactly
+    from the convex hull; it is what the C++ detector uses.
+    """
+    if mode == 'opencv':
+        origin = xy.mean(axis=0)
+        # float32 inputs: subtract the mean first so that the coordinates are small.
+        (cx, cy), (width, height), angle = cv2.minAreaRect((xy - origin).astype(np.float32))
+        # OpenCV (4.5.1 and later) returns angle in (0, 90]: the `width` side points along
+        # angle from +x toward +y and the `height` side along angle + 90. An angle of 90
+        # is the same orientation as 0 with the two sides exchanged.
+        if angle >= 90.0 - 1e-6:
+            angle, width, height = 0.0, height, width
+        return float(angle), origin + np.array([cx, cy]), np.array([width, height])
     best = None
     for theta in np.arange(0.0, 90.0, step):
         c, s = math.cos(math.radians(theta)), math.sin(math.radians(theta))
@@ -100,14 +117,24 @@ def quat_yaw_deg(q):
     return math.degrees(math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z)))
 
 
-def components(mask):
-    count, labels, stats, _ = cv2.connectedComponentsWithStats(
-        mask.astype(np.uint8), connectivity=8)
+def components(mask, open_px=0):
+    """
+    Label the 8-connected pixel groups of `mask` and return one boolean image per group.
+
+    open_px > 0 first applies a morphological opening with an open_px x open_px square: erode
+    then dilate, which removes every pixel group thinner than the square (isolated pixels and
+    one- or two-pixel protrusions) and leaves bodies thicker than it unchanged.
+    """
+    image = mask.astype(np.uint8)
+    if open_px > 0:
+        image = cv2.morphologyEx(
+            image, cv2.MORPH_OPEN, np.ones((open_px, open_px), np.uint8))
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(image, connectivity=8)
     return [labels == i for i in range(1, count)
             if stats[i, cv2.CC_STAT_AREA] >= MIN_COMPONENT_PIXELS]
 
 
-def detect(depth, rng=None, sigma_m=0.0, frames=1):
+def detect(depth, rng=None, sigma_m=0.0, frames=1, rect='scan', open_px=0):
     """
     Detect the box and the bin; each result is None or a dict.
 
@@ -129,9 +156,9 @@ def detect(depth, rng=None, sigma_m=0.0, frames=1):
         band_mask = inside & (w[..., 2] > band[0]) & (w[..., 2] < band[1])
         want = sorted(sides)
         found = []
-        for comp in components(band_mask):
+        for comp in components(band_mask, open_px):
             pts = w[comp]
-            theta, centre, size = min_area_rect(pts[:, :2])
+            theta, centre, size = min_area_rect(pts[:, :2], mode=rect)
             if all(abs(a - b) < tol for a, b in zip(sorted(size), want)):
                 found.append((comp, pts, theta, centre, size))
         return found
@@ -211,6 +238,11 @@ def main():
     parser.add_argument('--trials', type=int, default=3)
     parser.add_argument('--frames', type=int, default=1,
                         help='frames averaged per detection (1 = detector v0)')
+    parser.add_argument('--rect', choices=['scan', 'opencv'], default='scan',
+                        help='minimum-area rectangle: own 0.25 deg scan (default) or OpenCV')
+    parser.add_argument('--open-px', type=int, default=0,
+                        help='morphological opening (square side in pixels) of the height '
+                             'band before labelling; 0 = off, the registered detector')
     parser.add_argument('--json', default=None)
     args = parser.parse_args()
     if args.bin_yaw_sensitive == 'yes' and args.t_bin_yaw is None:
@@ -218,8 +250,8 @@ def main():
 
     files = sorted(Path(args.dataset).glob('layout_*.npz'))
     frames = [(p.name, dict(np.load(p))) for p in files]
-    print(f'{len(frames)} layouts from {args.dataset}; '
-          f'frames averaged per detection: {args.frames}')
+    print(f'{len(frames)} layouts from {args.dataset}; frames averaged per detection: '
+          f'{args.frames}; rectangle: {args.rect}; opening: {args.open_px} px')
     print('self-check:')
     print('\n'.join(self_check(frames)))
 
@@ -230,7 +262,8 @@ def main():
         for name, f in frames:
             trials = 1 if sigma == 0 else args.trials
             for t in range(trials):
-                det = detect(f['depth'], rng, sigma / 1000.0, args.frames)
+                det = detect(f['depth'], rng, sigma / 1000.0, args.frames, args.rect,
+                             args.open_px)
                 bp, binp = f['box_pose'], f['bin_xyz_yaw']
                 row = dict(layout=name, trial=t, box_found=det['box'] is not None,
                            bin_found=det['bin'] is not None,

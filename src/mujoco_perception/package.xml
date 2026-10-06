@@ -11,6 +11,7 @@
 
   <depend>eigen</depend>
   <depend>image_geometry</depend>
+  <depend>libopencv-dev</depend>
   <depend>geometric_shapes</depend>
   <depend>moveit_ros_perception</depend>
   <depend>pcl_conversions</depend>

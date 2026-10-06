@@ -12,6 +12,8 @@ find_package(Eigen3 REQUIRED)
 find_package(GLUT REQUIRED)
 find_package(PCL REQUIRED COMPONENTS common features filters io registration search segmentation)
 find_package(image_geometry REQUIRED)
+# cv::connectedComponentsWithStats and cv::minAreaRect (initial_box_detector.cpp) are in imgproc.
+find_package(OpenCV REQUIRED COMPONENTS core imgproc)
 find_package(geometric_shapes REQUIRED)
 find_package(moveit_ros_perception REQUIRED)
 find_package(rclcpp REQUIRED)
@@ -25,15 +27,17 @@ find_package(tf2_ros REQUIRED)
 find_package(tf2_msgs REQUIRED)
 
 add_library(mujoco_perception_geometry
-  src/geometry_pipeline.cpp src/robot_mask.cpp src/object_tracker.cpp)
+  src/geometry_pipeline.cpp src/robot_mask.cpp src/object_tracker.cpp
+  src/depth_window.cpp src/initial_box_detector.cpp)
 target_include_directories(mujoco_perception_geometry PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
   ${PCL_INCLUDE_DIRS}
+  ${OpenCV_INCLUDE_DIRS}
 )
 target_compile_definitions(mujoco_perception_geometry PUBLIC ${PCL_DEFINITIONS})
 target_compile_options(mujoco_perception_geometry PRIVATE -O2)
-target_link_libraries(mujoco_perception_geometry Eigen3::Eigen ${PCL_LIBRARIES}
+target_link_libraries(mujoco_perception_geometry Eigen3::Eigen ${PCL_LIBRARIES} ${OpenCV_LIBS}
   geometric_shapes::geometric_shapes moveit_ros_perception::moveit_mesh_filter)
 ament_target_dependencies(mujoco_perception_geometry image_geometry sensor_msgs)
 
@@ -70,7 +74,18 @@ if(BUILD_TESTING)
   # test/baseline_compare.py; built here only because it needs the same PCL/ROS flags.
   add_executable(baseline_replay test/baseline_replay.cpp)
   target_link_libraries(baseline_replay mujoco_perception_geometry)
+  # The same for the new initial box detector, with the DepthWindow in front of it, so that the
+  # C++ implementation can be compared with the Python prototype on identical frames.
+  add_executable(initial_box_replay test/initial_box_replay.cpp)
+  target_link_libraries(initial_box_replay mujoco_perception_geometry)
   find_package(ament_cmake_gtest REQUIRED)
+  # Pure data structure and pure detector; the camera and the exactly ray-cast scene they
+  # use are in test/workcell_camera.hpp.
+  ament_add_gtest(test_depth_window test/test_depth_window.cpp)
+  target_link_libraries(test_depth_window mujoco_perception_geometry)
+  ament_add_gtest(test_initial_box_detector test/test_initial_box_detector.cpp)
+  target_link_libraries(test_initial_box_detector mujoco_perception_geometry Eigen3::Eigen)
+
   ament_add_gtest(test_object_tracker test/test_object_tracker.cpp)
   target_link_libraries(test_object_tracker mujoco_perception_geometry)
 

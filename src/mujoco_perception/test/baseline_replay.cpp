@@ -39,11 +39,7 @@
 // obb_mm are the three sorted extents of the 3D oriented bounding box that estimateBoxPose()
 // compares against the 40 mm box (reject when any exceeds 40 + 15 mm).
 //
-// Camera model: copied from robot_description/mujoco/franka_emika_panda/pick_place_scene.xml
-// (body camera_link pos="0.5 -0.45 1.0" xyaxes="1 0 0 0 0.857 0.514", fovy=50, 320x240
-// offscreen) and from the bridge's intrinsics (focal = height / (2 tan(fovy/2)),
-// principal point (w-1)/2, (h-1)/2). If the MJCF camera changes, change the constants below
-// and the same ones in initial_pose_eval.py together.
+// Camera model: workcell_camera.hpp (copied from the MJCF; one place for every tool).
 
 #include <pcl/features/moment_of_inertia_estimation.h>
 
@@ -54,46 +50,11 @@
 #include <fstream>
 #include <vector>
 
-#include "sensor_msgs/msg/camera_info.hpp"
 #include "mujoco_perception/geometry_pipeline.hpp"
+#include "workcell_camera.hpp"
 
 namespace
 {
-
-constexpr int kWidth = 320;
-constexpr int kHeight = 240;
-constexpr double kFovyDeg = 50.0;
-
-sensor_msgs::msg::CameraInfo cameraInfo()
-{
-  const double focal = kHeight / (2.0 * std::tan(kFovyDeg * M_PI / 180.0 / 2.0));
-  const double cx = (kWidth - 1) / 2.0;
-  const double cy = (kHeight - 1) / 2.0;
-  sensor_msgs::msg::CameraInfo info;
-  info.width = kWidth;
-  info.height = kHeight;
-  info.distortion_model = "plumb_bob";
-  info.d = {0.0, 0.0, 0.0, 0.0, 0.0};
-  info.k = {focal, 0.0, cx, 0.0, focal, cy, 0.0, 0.0, 1.0};
-  info.r = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
-  info.p = {focal, 0.0, cx, 0.0, 0.0, focal, cy, 0.0, 0.0, 0.0, 1.0, 0.0};
-  return info;
-}
-
-// Optical frame (x right, y down, z forward) expressed in the world frame. MuJoCo's camera
-// looks along its own -z with +y up, so the optical axes are (x, -y, -z) of the MuJoCo camera.
-Eigen::Isometry3d worldFromOptical()
-{
-  const Eigen::Vector3d x_axis(1.0, 0.0, 0.0);
-  const Eigen::Vector3d y_axis = Eigen::Vector3d(0.0, 0.857, 0.514).normalized();
-  const Eigen::Vector3d z_axis = x_axis.cross(y_axis);
-  Eigen::Isometry3d result = Eigen::Isometry3d::Identity();
-  result.linear().col(0) = x_axis;
-  result.linear().col(1) = -y_axis;
-  result.linear().col(2) = -z_axis;
-  result.translation() = Eigen::Vector3d(0.5, -0.45, 1.0);
-  return result;
-}
 
 // Same quantity estimateBoxPose() uses for its size test: the three sorted side lengths of
 // the minimum-inertia oriented bounding box of the cluster, in metres.
@@ -131,13 +92,15 @@ int main(int argc, char ** argv)
     return 2;
   }
 
-  const auto info = cameraInfo();
-  const auto world_from_optical = worldFromOptical();
+  const auto info = mujoco_perception_test::workcellCameraInfo();
+  const auto world_from_optical = mujoco_perception_test::workcellWorldFromOptical();
+  const int width = mujoco_perception_test::kImageWidth;
+  const int height = mujoco_perception_test::kImageHeight;
   const mujoco_perception::SegmentationConfig segmentation_config;
   const mujoco_perception::BoxModel box_model;
 
   for (int frame = 0; frame < frame_count; ++frame) {
-    std::vector<float> depth(static_cast<std::size_t>(kWidth) * kHeight);
+    std::vector<float> depth(static_cast<std::size_t>(width) * height);
     if (!input.read(reinterpret_cast<char *>(depth.data()), depth.size() * sizeof(float))) {
       std::fprintf(stderr, "file ended inside frame %d\n", frame);
       return 2;
