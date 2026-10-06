@@ -40,9 +40,10 @@ namespace mujoco_perception
 // between the two surfaces and belongs to neither; back-projected it becomes a point floating
 // beside the box, which enlarged a 40 mm face to 42.5 mm in the Stage 5 online check. The
 // default, 20 mm, is ten standard deviations of the 2 mm noise at which the Stage 3 averaging
-// met its acceptance rule, so that noise alone does not reach it (ten samples of 4 mm noise
-// span about 12 mm on average and almost never 20), and far below the 51 mm jump at that box
-// edge.
+// met its acceptance rule, so that noise of that size does not reach it. At 4 mm noise the span of
+// ten samples is 12 mm on average and exceeds 20 mm for roughly 1 % of the pixels (normal-theory
+// estimate, not counted), which are then dropped. The limit is far below the 51 mm jump at that
+// box edge.
 //
 // Pure data structure: no ROS and no OpenCV, so it is tested on its own.
 class DepthWindow

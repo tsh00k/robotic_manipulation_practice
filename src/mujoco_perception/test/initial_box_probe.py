@@ -49,7 +49,8 @@ episode  Bridge + estimator + executor with observation_source=vision, three epi
               and every later message in that generation has frames_averaged counting from it.
          Reported, not accepted or rejected: the fraction of the depth frames that are not
          ATTACHED which produced a message (on the new topic and on the older object_pose
-         topic; the same count with `--baseline` on the pre-change workspace), and what the detector reports for the box lying in the bin after the release.
+         topic; the same count with `--baseline` on the pre-change workspace), and what the
+         detector reports for the box lying in the bin after the release.
 The bridge's box pose is used to judge the result and is never given to a node under test.
 """
 
