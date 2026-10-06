@@ -14,6 +14,7 @@
 
 #include <gtest/gtest.h>
 
+#include <cmath>
 #include <limits>
 
 #include "mujoco_bridge/grasp_criteria.hpp"
@@ -153,3 +154,71 @@ TEST(AttachmentConfirmation, RequiresWidthBothContactsAndProximity)
   s.box_to_tcp_horizontal_m = std::numeric_limits<double>::quiet_NaN();
   EXPECT_FALSE(mujoco_bridge::confirmsAttachment(s, kCriteria));
 }
+
+namespace
+{
+
+mujoco_bridge::AttachmentSignals Holding()
+{
+  return {0.0385, 0.005, true};
+}
+
+// Feed the same signals at the bridge's 100 Hz from t0 for `duration`; return the last answer.
+bool feed(
+  mujoco_bridge::AttachmentConfirmer & confirmer, const mujoco_bridge::AttachmentSignals & s,
+  double t0, double duration)
+{
+  bool confirmed = false;
+  const int steps = static_cast<int>(std::lround(duration / 0.01));
+  for (int i = 0; i <= steps; ++i) {
+    confirmed = confirmer.update(s, t0 + 0.01 * i);
+  }
+  return confirmed;
+}
+
+TEST(AttachmentConfirmer, ConfirmsAfterTheHoldTimeWithoutAnyBoxQuantity)
+{
+  mujoco_bridge::AttachmentConfirmer confirmer;
+  EXPECT_FALSE(feed(confirmer, Holding(), 0.0, 0.09));
+  EXPECT_TRUE(confirmer.update(Holding(), 0.10));
+}
+
+TEST(AttachmentConfirmer, EachConditionIsNeeded)
+{
+  const mujoco_bridge::AttachmentParams params;
+  auto empty = Holding();
+  empty.gripper_width_m = 0.0;        // closed on nothing
+  auto still_closing = Holding();  // passing through the window on the way to 0
+  still_closing.gripper_width_m = 0.045;
+  still_closing.finger_speed_m_s = 0.2;
+  auto no_command = Holding();
+  no_command.closing_commanded = false;
+  auto too_wide = Holding();
+  too_wide.gripper_width_m = 0.052;
+  for (const auto & s : {empty, still_closing, no_command, too_wide}) {
+    mujoco_bridge::AttachmentConfirmer confirmer;
+    EXPECT_FALSE(feed(confirmer, s, 0.0, 1.0)) << mujoco_bridge::AttachmentConfirmer::missing(
+      s,
+      params);
+  }
+  EXPECT_STREQ(mujoco_bridge::AttachmentConfirmer::missing(empty, params), "WIDTH_OUTSIDE_BOX");
+  EXPECT_STREQ(
+    mujoco_bridge::AttachmentConfirmer::missing(still_closing, params), "FINGERS_STILL_MOVING");
+  EXPECT_STREQ(mujoco_bridge::AttachmentConfirmer::missing(no_command, params), "NO_CLOSE_COMMAND");
+  EXPECT_STREQ(mujoco_bridge::AttachmentConfirmer::missing(Holding(), params), "");
+}
+
+TEST(AttachmentConfirmer, ABrokenSampleRestartsTheHoldAndResetForgets)
+{
+  mujoco_bridge::AttachmentConfirmer confirmer;
+  feed(confirmer, Holding(), 0.0, 0.08);
+  auto flicker = Holding();
+  flicker.finger_speed_m_s = 0.03;
+  EXPECT_FALSE(confirmer.update(flicker, 0.09));
+  EXPECT_FALSE(feed(confirmer, Holding(), 0.10, 0.09));
+  EXPECT_TRUE(confirmer.update(Holding(), 0.20));
+  confirmer.reset();
+  EXPECT_FALSE(confirmer.update(Holding(), 0.30));
+}
+
+}  // namespace

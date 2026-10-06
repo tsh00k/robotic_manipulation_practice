@@ -34,4 +34,10 @@ double gripperWidth(const mjData * d, int finger1_qpos_adr, int finger2_qpos_adr
 // model -- Layer 2 in week2.md Stage F's four-layer scheme, not Layer 1.
 bool bodiesInContact(const mjModel * m, const mjData * d, int body_a, int body_b);
 
+// True if `body` has an active contact with any body outside the kinematic tree whose root
+// is `robot_root` (MuJoCo's body_rootid): the table, the box and the bin all count, without
+// saying which (Week 4.1 Stage 13). A simulator-only signal: the Franka Hand has no fingertip
+// sensors, so no decision uses it; it only feeds diagnostic labels.
+bool bodyTouchesExternal(const mjModel * m, const mjData * d, int body, int robot_root);
+
 }  // namespace mujoco_bridge

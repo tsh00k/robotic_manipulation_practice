@@ -101,6 +101,12 @@ carry    Week 4.1 Stage 12, the carry width window. `--mode normal`: oracle and 
          layout 0, bridge fault.drop_box_after_attach_s:=3.0; W2: an alert, raised within 0.5 s
          of simulated time after the bridge moved the box (both read from the node logs), and
          carry_width_min_m < 34 mm; W3 (reported): how the episode ended.
+         `--mode attach` (Week 4.1 Stage 13, H2/H3): the same runs as `normal`, and for each
+         episode: success with zero retries, one attached run, and the bridge's attach log
+         line saying that both fingers' contacts are with the box (evaluation only; the
+         decision sees no contact at all, only the width, the finger speed and the
+         command). The time from the CLOSE command to the
+         attach is printed.
 episode  Bridge + estimator + executor with observation_source=vision, three episodes in a
          row, on the legacy scene (no bin; --scene bin adds the bin). Acceptance:
            E1 every episode ends in success with zero retries (the older detector path still
@@ -961,8 +967,70 @@ def describe(outcome):
             f' mm; alert "{outcome.carry_width_alert}"')
 
 
+ATTACH_LOG = re.compile(
+    r'attachment 0 -> 1 \(width=([\d.]+)m .*contact with the box L=(\d) R=(\d)\)')
+CLOSE_LOG = re.compile(r'phase GRASP -> CLOSE')
+
+
+def run_attach(args):
+    failures = []
+    runs = [(f'{source} bin layout {i}', layout_params(layout), source, 1)
+            for source in ('oracle', 'vision')
+            for i, layout in enumerate(make_layouts(args.count))]
+    runs.append(('vision legacy', ['enable_rgbd_camera=true'], 'vision', args.episodes))
+    for label, params, source, episodes in runs:
+        rig = Rig(args.workspace, params, True, executor_params=(
+            ['place.into_bin=true'] if any(p.startswith('scene.enabled') for p in params)
+            else []), source=source)
+        try:
+            if not rig.spin_until(lambda: rig.start.get_subscription_count() > 0, 30):
+                raise RuntimeError('executor did not come up')
+            for k in range(episodes):
+                rig.outcomes.clear()
+                seen = len(ATTACH_LOG.findall(BRIDGE_LOG.read_text(errors='replace')))
+                rig.start.publish(Empty())
+                if not rig.spin_until(lambda: bool(rig.outcomes), 300):
+                    failures.append(f'{label} episode {k}: no outcome')
+                    break
+                outcome = rig.outcomes[-1]
+                generation = max(o.generation for o in rig.observations)
+                mine = [o for o in rig.observations if o.generation == generation]
+                attached_runs, width = attach_runs_and_width(mine)
+                attaches = ATTACH_LOG.findall(BRIDGE_LOG.read_text(errors='replace'))[seen:]
+                first_attached = next((o for o in mine if o.attachment_state ==
+                                       BridgeObservation.ATTACHMENT_ATTACHED), None)
+                # The CLOSE command is the first sample whose finger joints start closing
+                # after GRASP; approximated by the first sample with width below 79 mm.
+                closing = next((o for o in mine if sum(
+                    o.joint_state.position[list(o.joint_state.name).index(n)]
+                    for n in ('finger_joint1', 'finger_joint2')) < 0.079), None)
+                delay = ((stamp_ns(first_attached.joint_state.header.stamp) -
+                          stamp_ns(closing.joint_state.header.stamp)) / 1e9
+                         if first_attached and closing else math.nan)
+                box_contact = bool(attaches) and attaches[0][1] == '1' and attaches[0][2] == '1'
+                print(f'{label} episode {k}: success={outcome.success} retries='
+                      f'{outcome.retries}; attached runs {attached_runs}, width at attach '
+                      f'{(width or math.nan) * 1000:.1f} mm, closing-to-attach {delay:.2f} s; '
+                      f'bridge attach log: '
+                      f'{attaches[0] if attaches else None}', flush=True)
+                if not outcome.success or outcome.retries != 0:
+                    failures.append(f'H2 {label} episode {k}: {outcome.failure_code}')
+                if not box_contact:
+                    failures.append(f'H2 {label} episode {k}: attach contacts not the box')
+                if attached_runs != 1:
+                    failures.append(f'H3 {label} episode {k}: {attached_runs} attached runs')
+        finally:
+            rig.close()
+    print('\nATTACH ACCEPTANCE:', 'PASS' if not failures else 'FAIL')
+    for failure in failures:
+        print('  ', failure)
+    return 0 if not failures else 1
+
+
 def run_carry(args):
     failures = []
+    if args.mode == 'attach':
+        return run_attach(args)
     if args.mode == 'normal':
         runs = [(f'{source} bin layout {i}', layout_params(layout), source, 1)
                 for source in ('oracle', 'vision')
@@ -1096,7 +1164,7 @@ def main():
                                  'episode'])
     parser.add_argument('--workspace', default=str(Path(__file__).resolve().parents[3]))
     parser.add_argument('--count', type=int, default=6)
-    parser.add_argument('--mode', choices=['normal', 'inject'], default='normal',
+    parser.add_argument('--mode', choices=['normal', 'inject', 'attach'], default='normal',
                         help='carry: normal runs (W1) or the fault injection (W2, W3)')
     parser.add_argument('--require-success', action='store_true',
                         help='place: every layout must succeed (Stage 11 G1/G2)')

@@ -218,9 +218,9 @@ candidate_count/eligible_candidate_count 表示全部/合格候选数；support_
 
 ### 5.4 bridge 附着生命周期与视觉暂停
 
-BridgeObservation.attachment_state 为唯一权威：ATTACHMENT_NOT_ATTACHED=0、ATTACHMENT_ATTACHED=1、ATTACHMENT_RELEASED=2。启动/reset 为 NOT_ATTACHED；bridge 用实际两指位置之和、物体真值高度、物体到 TCP 的 XY 距离及双指接触构造 GraspSignals，confirmsAttachment 在宽度差 <10 mm、双指接触、有限且非负的 XY 距离 <50 mm 时进入 ATTACHED，不要求先抬高。物体高度仅用于 classifyGrasp 的抓取诊断（成功要求 z >0.26 m），不能作为抬升前附着门。确认后锁存，接触短暂抖动或闭爪物体滑落不会直接解除；实际宽度超过 box_width_m+width_epsilon_m 才转 RELEASED。后续满足抬升前确认可再附着，reset 清锁存。
+BridgeObservation.attachment_state 为唯一权威：ATTACHMENT_NOT_ATTACHED=0、ATTACHMENT_ATTACHED=1、ATTACHMENT_RELEASED=2。启动/reset 为 NOT_ATTACHED。**Week 4.1 Stage 13 起（[ADR 019](adr/019-attachment-from-robot-side-signals.md)，变更 ADR 012）** bridge 只用真实 Franka Hand 也报告的量确认（对应 libfranka 的 `is_grasped`）：夹爪被命令合拢（最后一条命令 < 盒宽 − 容差 = 30 mm）、实际两指位置之和与盒宽相差 < `grasp.width_epsilon_m`（10 mm）、两指已停下（关节速度绝对值之和 < `grasp.attach_max_finger_speed_m_s`=20 mm/s），连续 `grasp.attach_hold_s`=0.1 s 仿真时间（`AttachmentConfirmer`，输入结构里没有盒子的量，也没有接触）。确认后锁存，接触抖动不解除；实际宽度超过盒宽 + 容差 + 5 mm（55 mm，留 5 mm 滞回）才转 RELEASED。reset 清锁存与计时。`BridgeObservation.left/right_finger_contact` 的含义随之改为“外部接触”（`bodyTouchesExternal`，与 `body_rootid` 不同于机器人的物体接触，不带身份）——**仿真专有，真实 Panda 没有指尖传感器**，不进入任何决策，只给 executor 的 CLOSE 超时贴诊断标签；按身份判的“碰到盒子”只在 `~/ground_truth/*_finger_contact`，以及附着日志行里标明“仅供评测”的部分。`classifyGrasp()`（含物体高度）与 `confirmsAttachment()`（ADR 012）保留作诊断，不驱动附着。
 
-这套确认依赖仿真物体真值/接触；vision 替换的是任务物体位姿来源，不代表完全没有 oracle 信息。闭爪滑落仍为 ATTACHED（锁存只在张开超过 50 mm 时解除）；Week 4.1 Stage 12 起 executor 用搬运期开度窗口发现它，见 [5.5](#55-任务观测来源与质量门)，但只告警、不改变 episode。
+Stage 13 起这套确认不再读物体真值（位置与接触身份），但接触本身仍由仿真产生，附着权威仍在仿真 bridge；手指被盒子以外的东西挡住、停在 30~50 mm 时会误确认（与真实 `is_grasped` 同样的局限，未在线测过）；20 mm/s 的阈值只来自一个 episode 的实测。闭爪滑落仍为 ATTACHED（锁存只在张开超过 50 mm 时解除）；Week 4.1 Stage 12 起 executor 用搬运期开度窗口发现它，见 [5.5](#55-任务观测来源与质量门)，但只告警、不改变 episode。
 
 **仿真故障注入（Stage 12，默认关闭）。** bridge 参数 `fault.drop_box_after_attach_s`（默认 −1，关闭；launch 不暴露）：附着持续到该仿真时长时，把盒子的自由关节移回 reset keyframe 里的位置、速度清零，整个 bridge 运行期间只做一次，以便重试能成功。它改的是“世界”，不是机器人；用来复现“盒子滑出、手指合拢到约 0、附着锁存不变”。
 
@@ -296,6 +296,7 @@ FSM 默认位置/GRASP-CLOSE 位置/速度容差为 0.05 rad/0.3 rad/0.05 rad/s�
 | [视觉验证](../Job_guides/my_study/week4.md#10-stage-4同帧机器人几何掩膜) | 掩膜/诊断基线、缺 TF、质量拒绝；完整视觉抓放未通过 |
 | [DepthWindow](../src/mujoco_perception/test/test_depth_window.cpp) / [初始 box 检测器](../src/mujoco_perception/test/test_initial_box_detector.cpp) / [初始 bin 检测器](../src/mujoco_perception/test/test_initial_bin_detector.cpp) / [InitialPoseEstimator](../src/mujoco_perception/test/test_initial_pose_estimator.cpp) | 单测在精确光线投射的合成场景上，答案由构造给出（相机与场景在 [workcell_camera.hpp](../src/mujoco_perception/test/workcell_camera.hpp)），共 24 项；场景固定，所以不测非法配置、不会出现的场景和相机分辨率变化。容差是像素量化界，不是调出来的（bin 的边长用检测器自己的 ±8 mm 规则） |
 | `initial_box_probe.py place` | Stage 8：随机 box + bin 布局，oracle 与 vision 各自的 PREPLACE / PLACE 目标对 bin（真值或锁存值）、释放时指尖与壁顶的余量、盒子最终是否在 bin 内（按真值判）；`--scene legacy` 核对旧场景的固定目标。仿真 |
+| [附着确认单测](../src/mujoco_bridge/test/test_grasp_criteria.cpp) / `initial_box_probe.py carry --mode attach` | Stage 13：持续 0.1 s 才确认、空夹/手指仍在动/无合拢命令/宽度不符不确认、断一个样本重新计时；在线核对附着时手指确实碰到盒子（评测端）、合拢到附着的时间。仿真 |
 | [开度窗口单测](../src/task_executor/test/test_carry_width_monitor.cpp) / `initial_box_probe.py carry` | Stage 12：窗口内不报、短暂低于下限不报、持续 0.2 s 报一次、只看搬运期；正常运行不误报，注入 `fault.drop_box_after_attach_s` 后 0.5 s 内报出。仿真 |
 | [入 bin 判据单测](../src/task_executor/test/test_bin_containment.cpp) / `initial_box_probe.py verify`、`place --require-success` | Stage 11：判据的居中、越界、离壁不足余量、压壁、bin 旋转；VERIFY 时新检测器对真值的误差（6 个布局）；oracle 与 vision 在随机布局上完整成功并按真值入 bin。仿真 |
 | [PoseLatch 单测](../src/task_executor/test/test_pose_latch.cpp) / `initial_box_probe.py latch` | 前者覆盖连续一致才锁存、不一致或非 MEASURED 重新累积、其它 generation 与旧序号被忽略、yaw 按物体周期比较、锁存后不变；后者起真实 bridge + 估计器 + executor 核对：锁存前无关节命令、锁存值对真值、GRASP 目标取自锁存值、重新锁存、缺 bin 时的 `VISION_LATCH_TIMEOUT`。仿真 |

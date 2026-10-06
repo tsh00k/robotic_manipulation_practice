@@ -189,6 +189,13 @@ public:
     grasp_criteria_.lift_height_threshold_m =
       declare_parameter("grasp.lift_height_threshold_m", 0.26);
     grasp_criteria_.region_radius_m = declare_parameter("grasp.region_radius_m", 0.05);
+    AttachmentParams attachment;
+    attachment.box_width_m = grasp_criteria_.box_width_m;
+    attachment.width_epsilon_m = grasp_criteria_.width_epsilon_m;
+    attachment.hold_s = declare_parameter("grasp.attach_hold_s", attachment.hold_s);
+    attachment.max_finger_speed_m_s = declare_parameter(
+      "grasp.attach_max_finger_speed_m_s", attachment.max_finger_speed_m_s);
+    attachment_confirmer_ = AttachmentConfirmer(attachment);
 
     // Physics runs at 1/timestep; the state publishers run slower. Decimating by an
     // integer number of steps keeps every published sample aligned with an exact
@@ -649,6 +656,8 @@ private:
   {
     left_finger_body_id_ = api_.name2id(model_, mjOBJ_BODY, kLeftFingerBodyName);
     right_finger_body_id_ = api_.name2id(model_, mjOBJ_BODY, kRightFingerBodyName);
+    // The robot's kinematic tree, so that "external" contact means anything not the robot.
+    robot_root_id_ = left_finger_body_id_ >= 0 ? model_->body_rootid[left_finger_body_id_] : -1;
     if (left_finger_body_id_ < 0 || right_finger_body_id_ < 0) {
       RCLCPP_INFO(
         get_logger(), "no `%s`/`%s` body pair in model; grasp contact signals disabled",
@@ -662,6 +671,8 @@ private:
     // even though the body names themselves are still hardcoded above.
     left_finger_qpos_adr_ = model_->jnt_qposadr[model_->body_jntadr[left_finger_body_id_]];
     right_finger_qpos_adr_ = model_->jnt_qposadr[model_->body_jntadr[right_finger_body_id_]];
+    left_finger_dof_adr_ = model_->jnt_dofadr[model_->body_jntadr[left_finger_body_id_]];
+    right_finger_dof_adr_ = model_->jnt_dofadr[model_->body_jntadr[right_finger_body_id_]];
 
     left_finger_contact_pub_ = create_publisher<std_msgs::msg::Bool>(
       "~/ground_truth/left_finger_contact", rclcpp::QoS(10));
@@ -746,6 +757,7 @@ private:
     }
 
     attachment_state_ = manipulation_interfaces::msg::BridgeObservation::ATTACHMENT_NOT_ATTACHED;
+    attachment_confirmer_.reset();
     ++generation_;
     message = "reset to keyframe `" + reset_keyframe_name_ + "`";
     RCLCPP_INFO(
@@ -871,6 +883,7 @@ private:
         "position servo with no exposed force limit, commanding one here does nothing");
     }
     data_->ctrl[gripper_actuator_id_] = (msg->position / 2.0) * gripper_ctrl_scale_;
+    commanded_gripper_width_m_ = msg->position;
   }
 
   // Logs realtime factor (sim seconds advanced / wall seconds elapsed) once a second.
@@ -1165,10 +1178,14 @@ private:
     msg.object_pose.pose.orientation.x = data_->xquat[4 * object_body_id_ + 1];
     msg.object_pose.pose.orientation.y = data_->xquat[4 * object_body_id_ + 2];
     msg.object_pose.pose.orientation.z = data_->xquat[4 * object_body_id_ + 3];
-    msg.left_finger_contact = bodiesInContact(
-      model_, data_, left_finger_body_id_, object_body_id_);
-    msg.right_finger_contact = bodiesInContact(
-      model_, data_, right_finger_body_id_, object_body_id_);
+    // External contact, not "contact with the box" (Week 4.1 Stage 13, docs/adr/019). A
+    // simulator-only signal: a real Franka Hand has no fingertip sensors. No decision uses it;
+    // the executor only labels a CLOSE timeout with it. Contact identified as the box is only
+    // on ~/ground_truth/*_finger_contact, for evaluation.
+    msg.left_finger_contact = bodyTouchesExternal(
+      model_, data_, left_finger_body_id_, robot_root_id_);
+    msg.right_finger_contact = bodyTouchesExternal(
+      model_, data_, right_finger_body_id_, robot_root_id_);
 
     mjtNum tcp_offset_world[3];
     const mjtNum tcp_local[3] = {0.0, 0.0, kHandToTcpZ};
@@ -1185,34 +1202,40 @@ private:
     tcp.transform.rotation.y = data_->xquat[4 * hand_body_id_ + 2];
     tcp.transform.rotation.z = data_->xquat[4 * hand_body_id_ + 3];
 
-    const GraspSignals signals{
+    // Attachment from what a real Franka Hand reports (Week 4.1 Stage 13, docs/adr/019): the
+    // commanded closing, the actual width and whether the fingers have stopped, held for
+    // 0.1 s, as libfranka's is_grasped. No box position, no contact.
+    const AttachmentSignals signals{
       gripperWidth(data_, left_finger_qpos_adr_, right_finger_qpos_adr_),
-      msg.object_pose.pose.position.z,
-      std::hypot(
-        msg.object_pose.pose.position.x - tcp.transform.translation.x,
-        msg.object_pose.pose.position.y - tcp.transform.translation.y),
-      msg.left_finger_contact,
-      msg.right_finger_contact,
+      std::abs(data_->qvel[left_finger_dof_adr_]) + std::abs(data_->qvel[right_finger_dof_adr_]),
+      commanded_gripper_width_m_ < grasp_criteria_.box_width_m - grasp_criteria_.width_epsilon_m,
     };
     const auto previous_attachment_state = attachment_state_;
-    const double open_threshold = grasp_criteria_.box_width_m + grasp_criteria_.width_epsilon_m;
+    // Released only past box + epsilon + 5 mm: confirmation needs |width - box| < epsilon, so
+    // the 5 mm between the two keeps a width near 50 mm from flipping the state (Stage 8 saw
+    // 49.7..50.3 mm while a misaligned grasp settled).
+    const double open_threshold =
+      grasp_criteria_.box_width_m + grasp_criteria_.width_epsilon_m + kReleaseHysteresisM;
+    const bool confirmed = attachment_confirmer_.update(signals, data_->time);
     if (attachment_state_ == manipulation_interfaces::msg::BridgeObservation::ATTACHMENT_ATTACHED) {
       // Contact is noisy during transport. Only an intentional opening can end
       // the bridge-owned attachment lifecycle.
       if (signals.gripper_width_m > open_threshold) {
         attachment_state_ = manipulation_interfaces::msg::BridgeObservation::ATTACHMENT_RELEASED;
       }
-    } else if (confirmsAttachment(signals, grasp_criteria_)) {
+    } else if (confirmed) {
       attachment_state_ = manipulation_interfaces::msg::BridgeObservation::ATTACHMENT_ATTACHED;
       attached_since_s_ = data_->time;
     }
     if (attachment_state_ != previous_attachment_state) {
       RCLCPP_INFO(
         get_logger(),
-        "attachment %u -> %u (width=%.4fm box_z=%.4fm box_to_tcp=%.4fm L=%d R=%d)",
+        "attachment %u -> %u (width=%.4fm finger speed=%.4fm/s commanded=%.4fm; for "
+        "evaluation only, not used by the decision: contact with the box L=%d R=%d)",
         static_cast<unsigned>(previous_attachment_state), static_cast<unsigned>(attachment_state_),
-        signals.gripper_width_m, signals.box_height_m, signals.box_to_tcp_horizontal_m,
-        signals.left_finger_contact, signals.right_finger_contact);
+        signals.gripper_width_m, signals.finger_speed_m_s, commanded_gripper_width_m_,
+        bodiesInContact(model_, data_, left_finger_body_id_, object_body_id_),
+        bodiesInContact(model_, data_, right_finger_body_id_, object_body_id_));
     }
     msg.attachment_state = attachment_state_;
     observation_pub_->publish(msg);
@@ -1265,6 +1288,13 @@ private:
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr left_finger_contact_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr right_finger_contact_pub_;
   GraspCriteria grasp_criteria_{};
+  static constexpr double kReleaseHysteresisM = 0.005;
+  int robot_root_id_ = -1;
+  int left_finger_dof_adr_ = 0;
+  int right_finger_dof_adr_ = 0;
+  // The keyframe opens the gripper (ctrl 255), so "not commanded closed" until told otherwise.
+  double commanded_gripper_width_m_ = 0.08;
+  AttachmentConfirmer attachment_confirmer_;
   double fault_drop_box_after_attach_s_ = -1.0;
   double attached_since_s_ = 0.0;
   bool fault_done_ = false;

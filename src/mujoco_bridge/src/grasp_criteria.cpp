@@ -27,6 +27,35 @@ bool confirmsAttachment(const GraspSignals & s, const GraspCriteria & c)
          s.box_to_tcp_horizontal_m >= 0.0 && s.box_to_tcp_horizontal_m < c.region_radius_m;
 }
 
+const char * AttachmentConfirmer::missing(
+  const AttachmentSignals & s, const AttachmentParams & p)
+{
+  if (!s.closing_commanded) {return "NO_CLOSE_COMMAND";}
+  if (!std::isfinite(s.gripper_width_m) ||
+    std::abs(s.gripper_width_m - p.box_width_m) >= p.width_epsilon_m)
+  {
+    return "WIDTH_OUTSIDE_BOX";
+  }
+  if (!std::isfinite(s.finger_speed_m_s) || s.finger_speed_m_s >= p.max_finger_speed_m_s) {
+    return "FINGERS_STILL_MOVING";
+  }
+  return "";
+}
+
+bool AttachmentConfirmer::update(const AttachmentSignals & signals, double sim_time_s)
+{
+  if (missing(signals, params_)[0] != '\0') {
+    holding_since_valid_ = false;
+    return false;
+  }
+  if (!holding_since_valid_) {
+    holding_since_valid_ = true;
+    holding_since_s_ = sim_time_s;
+  }
+  // 1 ns of slack: stamps are whole nanoseconds turned into seconds.
+  return sim_time_s - holding_since_s_ >= params_.hold_s - 1e-9;
+}
+
 GraspOutcome classifyGrasp(const GraspSignals & s, const GraspCriteria & c)
 {
   const bool width_brackets_box = std::abs(s.gripper_width_m - c.box_width_m) < c.width_epsilon_m;

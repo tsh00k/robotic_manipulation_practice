@@ -35,4 +35,18 @@ bool bodiesInContact(const mjModel * m, const mjData * d, int body_a, int body_b
   return false;
 }
 
+bool bodyTouchesExternal(const mjModel * m, const mjData * d, int body, int robot_root)
+{
+  for (int i = 0; i < d->ncon; ++i) {
+    const mjContact & c = d->contact[i];
+    const int b0 = m->geom_bodyid[c.geom[0]];
+    const int b1 = m->geom_bodyid[c.geom[1]];
+    const int other = b0 == body ? b1 : (b1 == body ? b0 : -1);
+    if (other >= 0 && m->body_rootid[other] != robot_root) {
+      return true;
+    }
+  }
+  return false;
+}
+
 }  // namespace mujoco_bridge
