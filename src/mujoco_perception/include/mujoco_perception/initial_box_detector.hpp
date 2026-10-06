@@ -22,6 +22,8 @@
 
 #include <sensor_msgs/msg/camera_info.hpp>
 
+#include "mujoco_perception/block_detection.hpp"
+
 namespace mujoco_perception
 {
 
@@ -71,34 +73,12 @@ struct InitialBoxConfig
   double top_face_depth_m = 0.005;
 };
 
-enum class InitialBoxRejection
-{
-  kNone,                       // a box was measured
-  kInvalidInput,               // the depth image does not match the camera info size
-  kNoValidDepth,               // the image has no usable depth at all
-  kNoBandPixels,               // nothing in the height band forms a block
-  kNoMatchingRectangle,        // blocks exist but none has the box's two sides
-  kSeveralMatchingRectangles,  // more than one block looks like the box
-};
-
-const char * initialBoxRejectionName(InitialBoxRejection reason);
-
-// One block of the height band, whether or not it was taken for the box. Reported so that a
-// miss can be explained from the message alone (which blocks, how big, how far off).
-struct InitialBoxCandidate
-{
-  std::size_t pixels = 0;
-  // Rectangle sides, in metres: along the yaw direction and across it.
-  double side_along_m = 0.0;
-  double side_across_m = 0.0;
-  Eigen::Vector2d center_xy = Eigen::Vector2d::Zero();
-  double yaw_rad = 0.0;       // folded to [-45, 45) degrees
-  bool matches_box = false;
-};
+// The names the InitialBoxPose message carries ("NO_BOX_BAND_PIXELS", ...).
+const char * initialBoxRejectionName(DetectionRejection reason);
 
 struct InitialBoxResult
 {
-  InitialBoxRejection rejection = InitialBoxRejection::kNone;
+  DetectionRejection rejection = DetectionRejection::kNone;
   // Set only when a box was measured. position is the box centre: x, y from the rectangle,
   // z from the height of the top face minus the half height.
   Eigen::Vector3d position = Eigen::Vector3d::Zero();
@@ -106,9 +86,9 @@ struct InitialBoxResult
   // the orientation modulo 90 degrees exists to be measured.
   double yaw_rad = 0.0;
   std::size_t valid_depth_pixels = 0;
-  std::vector<InitialBoxCandidate> candidates;
+  std::vector<BlockCandidate> candidates;
 
-  bool measured() const {return rejection == InitialBoxRejection::kNone;}
+  bool measured() const {return rejection == DetectionRejection::kNone;}
 };
 
 // `depth` is row-major, camera_info.height rows of camera_info.width metres, NaN or <= 0 for no

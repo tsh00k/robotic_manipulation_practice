@@ -30,6 +30,8 @@
 #include "ament_index_cpp/get_package_share_directory.hpp"
 #include "geometry_msgs/msg/transform_stamped.hpp"
 #include "manipulation_interfaces/msg/bridge_observation.hpp"
+#include "manipulation_interfaces/msg/block_candidate.hpp"
+#include "manipulation_interfaces/msg/initial_bin_pose.hpp"
 #include "manipulation_interfaces/msg/initial_box_pose.hpp"
 #include "manipulation_interfaces/msg/robot_mask_diagnostics.hpp"
 #include "manipulation_interfaces/msg/vision_object_pose.hpp"
@@ -44,7 +46,7 @@
 #include "tf2_ros/buffer.h"
 #include "tf2_ros/transform_listener.h"
 #include "mujoco_perception/geometry_pipeline.hpp"
-#include "mujoco_perception/initial_box_estimator.hpp"
+#include "mujoco_perception/initial_pose_estimator.hpp"
 #include "mujoco_perception/robot_mask.hpp"
 #include "mujoco_perception/object_tracker.hpp"
 
@@ -130,19 +132,24 @@ public:
       "tracking.min_confidence", tracker_config_.min_confidence);
     tracker_ = std::make_unique<ObjectTracker>(tracker_config_);
 
-    // Initial box detector (Week 4.1 Stage 5): the table height, the box and the depth range
-    // are the ones the older pipeline already uses, so there is one source of truth for them.
+    // Initial box and bin detectors (Week 4.1 Stages 5, 6): the table height, the box and the
+    // depth range are the ones the older pipeline already uses, so there is one source of truth
+    // for them. The bin's own numbers are the scene's (InitialBinConfig).
     InitialBoxConfig initial_box_config;
     initial_box_config.plane_z_m = config_.plane_z_m;
     initial_box_config.half_extents = box_model_.half_extents;
     initial_box_config.depth_min_m = config_.depth_min_m;
     initial_box_config.depth_max_m = config_.depth_max_m;
+    InitialBinConfig initial_bin_config;
+    initial_bin_config.plane_z_m = config_.plane_z_m;
+    initial_bin_config.depth_min_m = config_.depth_min_m;
+    initial_bin_config.depth_max_m = config_.depth_max_m;
     const int initial_box_frames = declare_parameter("initial_box.frames", 10);
     if (initial_box_frames < 1) {
       throw std::invalid_argument("initial_box.frames must be at least 1");
     }
-    initial_box_estimator_ = std::make_unique<InitialBoxEstimator>(
-      static_cast<std::size_t>(initial_box_frames), initial_box_config);
+    initial_pose_estimator_ = std::make_unique<InitialPoseEstimator>(
+      static_cast<std::size_t>(initial_box_frames), initial_box_config, initial_bin_config);
 
     const auto sensor_qos = rclcpp::SensorDataQoS();
     depth_sub_ = create_subscription<sensor_msgs::msg::Image>(
@@ -161,6 +168,8 @@ public:
       "~/object_pose", rclcpp::QoS(10));
     initial_box_pub_ = create_publisher<manipulation_interfaces::msg::InitialBoxPose>(
       "~/initial_box_pose", rclcpp::QoS(10));
+    initial_bin_pub_ = create_publisher<manipulation_interfaces::msg::InitialBinPose>(
+      "~/initial_bin_pose", rclcpp::QoS(10));
     predicted_pub_ = create_publisher<sensor_msgs::msg::Image>(
       "~/debug/robot_predicted_depth", sensor_qos);
     mask_pub_ = create_publisher<sensor_msgs::msg::Image>(
@@ -179,7 +188,7 @@ public:
     RCLCPP_INFO(
       get_logger(),
       "Depth geometry estimator ready: exact timestamp matching, plane z=%.3fm, "
-      "box %.3fx%.3fx%.3fm, initial box from the mean of %d frames",
+      "box %.3fx%.3fx%.3fm, initial box and bin from the mean of %d frames",
       config_.plane_z_m, 2.0 * box_model_.half_extents.x(),
       2.0 * box_model_.half_extents.y(), 2.0 * box_model_.half_extents.z(), initial_box_frames);
     RCLCPP_INFO(get_logger(), "Robot mask loaded %zu visual meshes", robot_meshes_.size());
@@ -222,7 +231,7 @@ private:
       observations_.clear();
       pending_since_.clear();
       processed_.clear();
-      initial_box_estimator_->reset();  // another episode: the box is somewhere else
+      initial_pose_estimator_->reset();  // another episode: the box is somewhere else
     }
     lifecycle_known_ = true;
     const auto previous_attachment = attachment_state_;
@@ -248,7 +257,7 @@ private:
       pending_since_.clear();
       processed_.clear();
       // The box has been carried: whatever the window holds is a picture of the old scene.
-      initial_box_estimator_->reset();
+      initial_pose_estimator_->reset();
     }
     const Stamp key = stampKey(message->joint_state.header.stamp);
     observations_[key] = message;
@@ -304,7 +313,7 @@ private:
           publishMaskDiagnostics(
             depth->second->header, *observation->second, {}, {}, 0.0,
             rejectionReasonName(RejectionReason::kMissingRobotTransform));
-          publishInitialBoxUnusable(
+          publishInitialPosesUnusable(
             depth->second->header, *observation->second,
             RejectionReason::kMissingRobotTransform);
         } else {
@@ -366,7 +375,7 @@ private:
       !depth->header.frame_id.empty() && depth->header.frame_id == depth_info->header.frame_id;
     if (!valid_frames || !matching_dimensions || !valid_camera_info || !matching_frames) {
       publishRejected(depth->header, *observation, RejectionReason::kInvalidInput);
-      publishInitialBoxUnusable(depth->header, *observation, RejectionReason::kInvalidInput);
+      publishInitialPosesUnusable(depth->header, *observation, RejectionReason::kInvalidInput);
       return;
     }
 
@@ -401,14 +410,14 @@ private:
       publishMaskImages(depth->header, depth->width, depth->height, mask);
       if (!mask.valid) {
         publishRejected(depth->header, *observation, RejectionReason::kInvalidInput);
-        publishInitialBoxUnusable(depth->header, *observation, RejectionReason::kInvalidInput);
+        publishInitialPosesUnusable(depth->header, *observation, RejectionReason::kInvalidInput);
         publishMaskDiagnostics(
           depth->header, *observation, mask, {}, elapsed_ms,
           rejectionReasonName(RejectionReason::kInvalidInput));
         return;
       }
       // The new detector looks at the same masked depth, before the older pipeline touches it.
-      updateInitialBox(
+      updateInitialPoses(
         depth->header, *observation, mask.filtered_depth, *depth_info, world_from_optical);
       initial_box_published = true;
       SegmentationResult segmentation = segmentDepth(
@@ -455,14 +464,14 @@ private:
         get_logger(), *get_clock(), 2000, "Cannot transform %s to world: %s",
         depth->header.frame_id.c_str(), error.what());
       publishRejected(depth->header, *observation, RejectionReason::kMissingRobotTransform);
-      publishInitialBoxUnusable(
+      publishInitialPosesUnusable(
         depth->header, *observation, RejectionReason::kMissingRobotTransform);
     } catch (const std::exception & error) {
       RCLCPP_WARN_THROTTLE(
         get_logger(), *get_clock(), 2000, "Depth processing failed: %s", error.what());
       publishRejected(depth->header, *observation, RejectionReason::kInvalidInput);
       if (!initial_box_published) {
-        publishInitialBoxUnusable(depth->header, *observation, RejectionReason::kInvalidInput);
+        publishInitialPosesUnusable(depth->header, *observation, RejectionReason::kInvalidInput);
       }
     }
   }
@@ -543,30 +552,52 @@ private:
     output.pose.orientation.w = 1.0;
   }
 
-  // Adds a usable frame to the initial-box window and publishes where the estimate stands.
-  void updateInitialBox(
+  // Adds a usable frame to the initial-pose window and publishes where the box and the bin
+  // stand, one message each.
+  void updateInitialPoses(
     const std_msgs::msg::Header & header,
     const manipulation_interfaces::msg::BridgeObservation & observation,
     const std::vector<float> & masked_depth, const sensor_msgs::msg::CameraInfo & camera_info,
     const Eigen::Isometry3d & world_from_optical)
   {
     const auto start = std::chrono::steady_clock::now();
-    const InitialBoxEstimate estimate =
-      initial_box_estimator_->update(masked_depth, camera_info, world_from_optical);
-    manipulation_interfaces::msg::InitialBoxPose output;
-    fillInitialBoxCommon(output, header, observation);
-    output.state = static_cast<uint8_t>(estimate.state);
+    const InitialPoseEstimate estimate =
+      initial_pose_estimator_->update(masked_depth, camera_info, world_from_optical);
+    manipulation_interfaces::msg::InitialBoxPose box;
+    fillInitialPose(
+      box, header, observation, estimate, estimate.boxState(), estimate.box,
+      initialBoxRejectionName(estimate.box.rejection));
+    manipulation_interfaces::msg::InitialBinPose bin;
+    fillInitialPose(
+      bin, header, observation, estimate, estimate.binState(), estimate.bin,
+      initialBinRejectionName(estimate.bin.rejection));
+    // The time for averaging and both detections, the same on both messages.
+    box.processing_ms = bin.processing_ms = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - start).count();
+    initial_box_pub_->publish(box);
+    initial_bin_pub_->publish(bin);
+  }
+
+  // The fields InitialBoxPose and InitialBinPose share.
+  template<typename Message, typename Detection>
+  void fillInitialPose(
+    Message & output, const std_msgs::msg::Header & header,
+    const manipulation_interfaces::msg::BridgeObservation & observation,
+    const InitialPoseEstimate & estimate, InitialPoseState state, const Detection & detection,
+    const char * rejection_name) const
+  {
+    fillInitialPoseCommon(output, header, observation);
+    output.state = static_cast<uint8_t>(state);
     output.frames_averaged = static_cast<uint32_t>(estimate.frames_averaged);
     output.frames_required = static_cast<uint32_t>(estimate.frames_required);
-    const InitialBoxResult & detection = estimate.detection;
-    switch (estimate.state) {
-      case InitialBoxState::kWarmingUp:
+    switch (state) {
+      case InitialPoseState::kWarmingUp:
         output.reason = "WINDOW_FILLING";
         break;
-      case InitialBoxState::kNotMeasured:
-        output.reason = initialBoxRejectionName(detection.rejection);
+      case InitialPoseState::kNotMeasured:
+        output.reason = rejection_name;
         break;
-      case InitialBoxState::kMeasured:
+      case InitialPoseState::kMeasured:
         output.position.x = detection.position.x();
         output.position.y = detection.position.y();
         output.position.z = detection.position.z();
@@ -575,39 +606,46 @@ private:
     }
     output.valid_depth_pixels = static_cast<uint32_t>(detection.valid_depth_pixels);
     for (const auto & candidate : detection.candidates) {
-      manipulation_interfaces::msg::InitialBoxCandidate item;
+      manipulation_interfaces::msg::BlockCandidate item;
       item.pixels = static_cast<uint32_t>(candidate.pixels);
       item.side_along_m = candidate.side_along_m;
       item.side_across_m = candidate.side_across_m;
       item.center_x = candidate.center_xy.x();
       item.center_y = candidate.center_xy.y();
-      item.matches_box = candidate.matches_box;
+      item.matches = candidate.matches;
       output.candidates.push_back(item);
     }
-    output.processing_ms = std::chrono::duration<double, std::milli>(
-      std::chrono::steady_clock::now() - start).count();
-    initial_box_pub_->publish(output);
   }
 
-  // A frame that could not be used (bad input, no robot TF): say so. It is not added to the
-  // window, so the window holds the last usable frames, and a consumer sees a gap, not a box.
-  void publishInitialBoxUnusable(
+  // A frame that could not be used (bad input, no robot TF): say so, for the box and for the
+  // bin. It is not added to the window, so the window holds the last usable frames, and a
+  // consumer sees a gap, not a pose.
+  void publishInitialPosesUnusable(
     const std_msgs::msg::Header & header,
     const manipulation_interfaces::msg::BridgeObservation & observation,
     RejectionReason reason)
   {
-    manipulation_interfaces::msg::InitialBoxPose output;
-    fillInitialBoxCommon(output, header, observation);
-    output.state = static_cast<uint8_t>(InitialBoxState::kNotMeasured);
-    output.reason = rejectionReasonName(reason);
-    output.frames_averaged = static_cast<uint32_t>(initial_box_estimator_->framesInWindow());
-    output.frames_required = static_cast<uint32_t>(initial_box_estimator_->frames());
-    initial_box_pub_->publish(output);
+    const auto frames_averaged = static_cast<uint32_t>(initial_pose_estimator_->framesInWindow());
+    const auto frames_required = static_cast<uint32_t>(initial_pose_estimator_->frames());
+    manipulation_interfaces::msg::InitialBoxPose box;
+    fillInitialPoseCommon(box, header, observation);
+    box.state = static_cast<uint8_t>(InitialPoseState::kNotMeasured);
+    box.reason = rejectionReasonName(reason);
+    box.frames_averaged = frames_averaged;
+    box.frames_required = frames_required;
+    initial_box_pub_->publish(box);
+    manipulation_interfaces::msg::InitialBinPose bin;
+    fillInitialPoseCommon(bin, header, observation);
+    bin.state = static_cast<uint8_t>(InitialPoseState::kNotMeasured);
+    bin.reason = rejectionReasonName(reason);
+    bin.frames_averaged = frames_averaged;
+    bin.frames_required = frames_required;
+    initial_bin_pub_->publish(bin);
   }
 
-  void fillInitialBoxCommon(
-    manipulation_interfaces::msg::InitialBoxPose & output,
-    const std_msgs::msg::Header & header,
+  template<typename Message>
+  void fillInitialPoseCommon(
+    Message & output, const std_msgs::msg::Header & header,
     const manipulation_interfaces::msg::BridgeObservation & observation) const
   {
     const double nan = std::numeric_limits<double>::quiet_NaN();
@@ -688,7 +726,7 @@ private:
   BoxModel box_model_;
   TrackerConfig tracker_config_;
   std::unique_ptr<ObjectTracker> tracker_;
-  std::unique_ptr<InitialBoxEstimator> initial_box_estimator_;
+  std::unique_ptr<InitialPoseEstimator> initial_pose_estimator_;
   bool tracker_lifecycle_known_ = false;
   uint64_t tracker_session_ = 0;
   uint64_t tracker_generation_ = 0;
@@ -711,6 +749,7 @@ private:
   rclcpp::Subscription<tf2_msgs::msg::TFMessage>::SharedPtr tf_sub_;
   rclcpp::Publisher<manipulation_interfaces::msg::VisionObjectPose>::SharedPtr pose_pub_;
   rclcpp::Publisher<manipulation_interfaces::msg::InitialBoxPose>::SharedPtr initial_box_pub_;
+  rclcpp::Publisher<manipulation_interfaces::msg::InitialBinPose>::SharedPtr initial_bin_pub_;
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr predicted_pub_;
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr mask_pub_;
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr filtered_pub_;

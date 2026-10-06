@@ -37,7 +37,7 @@ namespace
 {
 
 using mujoco_perception::InitialBoxConfig;
-using mujoco_perception::InitialBoxRejection;
+using mujoco_perception::DetectionRejection;
 using mujoco_perception::InitialBoxResult;
 using mujoco_perception::detectInitialBox;
 using mujoco_perception_test::SceneBox;
@@ -88,7 +88,7 @@ TEST(InitialBox, AFlatBoxIsMeasuredWhereItIs)
   EXPECT_NEAR(result.position.z(), 0.24, 0.001);
   EXPECT_LT(std::abs(yawErrorDeg(result, 0.0)), kYawToleranceDeg);
   ASSERT_EQ(result.candidates.size(), 1U);
-  EXPECT_TRUE(result.candidates.front().matches_box);
+  EXPECT_TRUE(result.candidates.front().matches);
 }
 
 TEST(InitialBox, TheYawOfARotatedBoxIsRecoveredAcrossTheWholeFoldedRange)
@@ -120,7 +120,7 @@ TEST(InitialBox, YawIsReportedModuloNinetyDegreesAsASquareRepeats)
 TEST(InitialBox, ATableWithoutAnythingOnItHasNoBandPixels)
 {
   const auto result = detectScene({});
-  EXPECT_EQ(result.rejection, InitialBoxRejection::kNoBandPixels);
+  EXPECT_EQ(result.rejection, DetectionRejection::kNoBandPixels);
   EXPECT_TRUE(result.candidates.empty());
   EXPECT_GT(result.valid_depth_pixels, 0U);
 }
@@ -131,9 +131,9 @@ TEST(InitialBox, ABlockOfTheWrongSizeIsReportedWithItsSidesAndNotAccepted)
   const SceneBox big{Eigen::Vector3d(0.50, 0.0, kTableZ + kBoxHalf), 0.0,
     Eigen::Vector3d(0.03, 0.03, kBoxHalf)};
   const auto result = detectScene({big});
-  EXPECT_EQ(result.rejection, InitialBoxRejection::kNoMatchingRectangle);
+  EXPECT_EQ(result.rejection, DetectionRejection::kNoMatchingRectangle);
   ASSERT_EQ(result.candidates.size(), 1U);
-  EXPECT_FALSE(result.candidates.front().matches_box);
+  EXPECT_FALSE(result.candidates.front().matches);
   EXPECT_NEAR(result.candidates.front().side_along_m, 0.06, kPositionTolerance);
   EXPECT_NEAR(result.candidates.front().side_across_m, 0.06, kPositionTolerance);
 }

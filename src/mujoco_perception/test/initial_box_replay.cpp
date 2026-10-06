@@ -25,8 +25,11 @@
 // Output, per detection on stdout:
 //   detection <i> measured=<0|1> reason=<name> x=<m> y=<m> z=<m> yaw_deg=<deg> valid_px=<n>
 //     candidate <k> pixels=<n> along_mm=<mm> across_mm=<mm> yaw_deg=<deg> match=<0|1>
+//   bin measured=<0|1> reason=<name> x=<m> y=<m> z=<m> yaw_deg=<deg> valid_px=<n>
+//     bincandidate <k> pixels=<n> along_mm=<mm> across_mm=<mm> yaw_deg=<deg> match=<0|1>
 //
-// Camera model: workcell_camera.hpp. Default InitialBoxConfig, as the node uses it.
+// Camera model: workcell_camera.hpp. Default InitialBoxConfig and InitialBinConfig, as the node
+// uses them.
 
 #include <cmath>
 #include <cstdint>
@@ -35,6 +38,7 @@
 #include <vector>
 
 #include "mujoco_perception/depth_window.hpp"
+#include "mujoco_perception/initial_bin_detector.hpp"
 #include "mujoco_perception/initial_box_detector.hpp"
 #include "workcell_camera.hpp"
 
@@ -58,6 +62,7 @@ int main(int argc, char ** argv)
   const auto info = mujoco_perception_test::workcellCameraInfo();
   const auto world_from_optical = mujoco_perception_test::workcellWorldFromOptical();
   const mujoco_perception::InitialBoxConfig config;
+  const mujoco_perception::InitialBinConfig bin_config;
   const std::size_t pixels = static_cast<std::size_t>(mujoco_perception_test::kImageWidth) *
     mujoco_perception_test::kImageHeight;
 
@@ -84,7 +89,21 @@ int main(int argc, char ** argv)
       std::printf(
         "  candidate %zu pixels=%zu along_mm=%.3f across_mm=%.3f yaw_deg=%.4f match=%d\n", k,
         c.pixels, c.side_along_m * 1000.0, c.side_across_m * 1000.0,
-        c.yaw_rad * 180.0 / M_PI, c.matches_box ? 1 : 0);
+        c.yaw_rad * 180.0 / M_PI, c.matches ? 1 : 0);
+    }
+    const auto bin = mujoco_perception::detectInitialBin(
+      window.mean(), info, world_from_optical, bin_config);
+    std::printf(
+      "  bin measured=%d reason=%s x=%.6f y=%.6f z=%.6f yaw_deg=%.4f valid_px=%zu\n",
+      bin.measured() ? 1 : 0, mujoco_perception::initialBinRejectionName(bin.rejection),
+      bin.position.x(), bin.position.y(), bin.position.z(), bin.yaw_rad * 180.0 / M_PI,
+      bin.valid_depth_pixels);
+    for (std::size_t k = 0; k < bin.candidates.size(); ++k) {
+      const auto & c = bin.candidates[k];
+      std::printf(
+        "    bincandidate %zu pixels=%zu along_mm=%.3f across_mm=%.3f yaw_deg=%.4f match=%d\n", k,
+        c.pixels, c.side_along_m * 1000.0, c.side_across_m * 1000.0,
+        c.yaw_rad * 180.0 / M_PI, c.matches ? 1 : 0);
     }
   }
   return 0;

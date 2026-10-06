@@ -12,48 +12,49 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "mujoco_perception/initial_box_estimator.hpp"
+#include "mujoco_perception/initial_pose_estimator.hpp"
 
 namespace mujoco_perception
 {
 
-const char * initialBoxStateName(InitialBoxState state)
+const char * initialPoseStateName(InitialPoseState state)
 {
   switch (state) {
-    case InitialBoxState::kWarmingUp:
+    case InitialPoseState::kWarmingUp:
       return "WARMING_UP";
-    case InitialBoxState::kNotMeasured:
+    case InitialPoseState::kNotMeasured:
       return "NOT_MEASURED";
-    case InitialBoxState::kMeasured:
+    case InitialPoseState::kMeasured:
       return "MEASURED";
   }
   return "UNKNOWN";
 }
 
-InitialBoxEstimator::InitialBoxEstimator(std::size_t frames, const InitialBoxConfig & config)
-: window_(frames), config_(config)
+InitialPoseEstimator::InitialPoseEstimator(
+  std::size_t frames, const InitialBoxConfig & box_config, const InitialBinConfig & bin_config)
+: window_(frames), box_config_(box_config), bin_config_(bin_config)
 {
 }
 
-InitialBoxEstimate InitialBoxEstimator::update(
+InitialPoseEstimate InitialPoseEstimator::update(
   const std::vector<float> & depth,
   const sensor_msgs::msg::CameraInfo & camera_info,
   const Eigen::Isometry3d & world_from_optical)
 {
   window_.push(depth);
-  InitialBoxEstimate estimate;
+  InitialPoseEstimate estimate;
   estimate.frames_averaged = window_.size();
   estimate.frames_required = window_.capacity();
   if (!window_.full()) {
     return estimate;
   }
-  estimate.detection = detectInitialBox(window_.mean(), camera_info, world_from_optical, config_);
-  estimate.state = estimate.detection.measured() ? InitialBoxState::kMeasured :
-    InitialBoxState::kNotMeasured;
+  const std::vector<float> mean = window_.mean();
+  estimate.box = detectInitialBox(mean, camera_info, world_from_optical, box_config_);
+  estimate.bin = detectInitialBin(mean, camera_info, world_from_optical, bin_config_);
   return estimate;
 }
 
-void InitialBoxEstimator::reset()
+void InitialPoseEstimator::reset()
 {
   window_.clear();
 }

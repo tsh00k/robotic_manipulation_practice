@@ -885,8 +885,8 @@ DEV-A 的 40 个布局，σ 是人为叠加的各帧独立的高斯深度噪声�
 | --- | --- | --- |
 | [depth_window.hpp](../../src/mujoco_perception/include/mujoco_perception/depth_window.hpp) / [.cpp](../../src/mujoco_perception/src/depth_window.cpp) | `DepthWindow(capacity, min_valid_fraction = 0.5, max_spread_m = 0.02)`：最近 N 帧的逐像素均值 | 标准库 |
 | [initial_box_detector.hpp](../../src/mujoco_perception/include/mujoco_perception/initial_box_detector.hpp) / [.cpp](../../src/mujoco_perception/src/initial_box_detector.cpp) | `detectInitialBox(depth, camera_info, world_from_optical, config)`，返回结果与每个候选块 | OpenCV（`connectedComponentsWithStats`、`minAreaRect`）、image_geometry、Eigen |
-| [initial_box_estimator.hpp](../../src/mujoco_perception/include/mujoco_perception/initial_box_estimator.hpp) / [.cpp](../../src/mujoco_perception/src/initial_box_estimator.cpp) | `InitialBoxEstimator(frames, config)`：`update()` 推进窗口并给出 WARMING_UP / NOT_MEASURED / MEASURED，`reset()` 清空 | 上面两个 |
-| [InitialBoxPose.msg](../../src/manipulation_interfaces/msg/InitialBoxPose.msg)、[InitialBoxCandidate.msg](../../src/manipulation_interfaces/msg/InitialBoxCandidate.msg) | 对外消息 | — |
+| [initial_pose_estimator.hpp](../../src/mujoco_perception/include/mujoco_perception/initial_pose_estimator.hpp) / [.cpp](../../src/mujoco_perception/src/initial_pose_estimator.cpp) | Stage 5 时叫 `InitialBoxEstimator(frames, config)`，Stage 6 改名为 `InitialPoseEstimator` 并加入 bin（6.1）；这里描述的是 Stage 5 的行为：`update()` 推进窗口并给出 WARMING_UP / NOT_MEASURED / MEASURED，`reset()` 清空 | 上面两个 |
+| [InitialBoxPose.msg](../../src/manipulation_interfaces/msg/InitialBoxPose.msg)、[BlockCandidate.msg](../../src/manipulation_interfaces/msg/BlockCandidate.msg)（Stage 5 时叫 `InitialBoxCandidate.msg`，Stage 6 改名） | 对外消息 | — |
 | [object_pose_estimator_node.cpp](../../src/mujoco_perception/src/object_pose_estimator_node.cpp) | 接线 | 上面全部 |
 
 **极差规则（代码里叫 `max_spread_m`）是在线检查之后加的**，原因和过程见 5.6.4。“极差”就是同一个像素在窗口 10 帧里的最大深度减最小深度。正常像素 10 帧里看到几乎同一个值，平均没有问题（σ = 2 mm 的独立噪声下 10 个样本的极差约 6 mm，这是正态分布的理论值，没有在数据上数过）。但盒子边缘有时有一个像素，某几帧看到盒子（0.947 m），另几帧看到盒子后面的桌面（0.998 m），极差 51 mm，平均出来的 0.952 m 这个深度上什么都没有。所以极差超过 20 mm 的像素视为无效，不参与平均。20 mm 取 Stage 3 平均达标的最大噪声 2 mm 的 10 倍。
@@ -924,7 +924,7 @@ DEV-A 的 40 个布局，σ 是人为叠加的各帧独立的高斯深度噪声�
 | --- | --- | --- |
 | `test_depth_window` | 9 | 均值、滑动窗口、无效像素不当作 0、有效比例不足为 NaN、清空、极差规则（切换表面的像素、限值边界、噪声量级不触发、无效帧不计入极差） |
 | `test_initial_box_detector` | 8 | 平放盒子、旋转扫描、90° 折叠、空桌面（无候选）、尺寸错的块（报出边长）、bin 不是候选、盒子在 bin 地板上的高度、10 帧噪声 |
-| `test_initial_box_estimator` | 3 | WARMING_UP 到 MEASURED 的过渡与计数、满窗口找不到是 NOT_MEASURED 而不是 WARMING_UP、`reset()` 后新旧场景不混合 |
+| `test_initial_box_estimator`（Stage 6 起是 `test_initial_pose_estimator`） | 3 | WARMING_UP 到 MEASURED 的过渡与计数、满窗口找不到是 NOT_MEASURED 而不是 WARMING_UP、`reset()` 后新旧场景不混合 |
 
 perception 包整体 177 项（含 lint）、0 失败、23 跳过（colcon 汇总数字，没有逐项核对跳过的是什么）。
 
@@ -1102,11 +1102,148 @@ ROS_DOMAIN_ID=84 /usr/bin/python3 src/mujoco_perception/test/initial_box_probe.p
 
 ## Stage 6：bin 位姿检测落地
 
-**出口：** 估计器在线发布 bin 的 x、y、yaw，结果随图像里真实的 bin 移动，与任何配置无关。
+**状态（2026-10-06）：已完成，尚未提交。** 6.3 是实现之前写定的，没有改动；实际做法与它的偏差在 6.4 和 6.7 记录。验证是仿真的：离线 DEV-A、在线 6 个随机布局、4 个遮挡间距、3 个 vision episode；没有真机、没有 HELD-A。
 
-- **范围：** 消息形态（复用 `VisionObjectPose` 加对象标识，还是独立消息）在阶段开始前决定，不为未来多物体预先泛化；是否值得新增 ADR 按 CLAUDE.md 的判据判断，不默认新增；其余同 Stage 5。
-- **验收要点：** 在线结果与离线表一致；bridge 的 bin 在两次启动间移动，结果随之移动；bin 被遮挡、不在视野、点不足时无有效结果，原因可读，不回退配置位姿；`ros2 param list` 无 `scene.*`。
-- **前置：** Stage 5。
+### 6.0 一句话总结
+
+估计器新增 `~/initial_bin_pose`（独立消息 `InitialBinPose`），发布 bin 的 x、y、yaw 和内底面高度；检测方法就是 Stage 5 的那一套（高度带 → 连通域 → 最小面积矩形），换成 bin 的参数，box 和 bin 共用同一个 10 帧深度窗口。**分量：重。**
+
+**结论（仿真）：** 预期的六条（E1、E1b、E2~E6）全部满足。DEV-A 上平均 10 帧、σ = 1~2 mm：120/120 检出、零 90° 翻转，位置 p95 1.18~1.23 mm、最大 1.29~1.38 mm，与 Stage 3 原型的 p95 1.18~1.24 mm、最大 1.34~1.49 mm 相差不到 0.15 mm；在线 6 个随机布局 bin 与 box 都在窗口装满后立刻 MEASURED，位置最大偏差 1.23 mm、内底面高度 0.75 mm、yaw 0.03°。box 在 bin 前方 21~80 mm 时 bin 没有被遮住。
+
+### 6.1 机制与权衡
+
+**bin 和 box 的差别只有参数和一个后处理。** 共用的部分抽成一个私有的 `scanBlocks()`（[rectangle_blocks.cpp](../../src/mujoco_perception/src/rectangle_blocks.cpp)）：反投影、带内像素、8 邻域连通域、每块的最小面积矩形。两个检测器各自决定“哪一块是我的”：
+
+| | box（Stage 5） | bin（本阶段） |
+| --- | --- | --- |
+| 高度带 | [顶面 − 15 mm, 顶面 + 40 mm] = [0.245, 0.30] m | [内底面 − 3.5 mm, 壁顶 + 4 mm] = [0.2235, 0.243] m |
+| 块的接受 | 两边都在 40 ± 5 mm | 长边 152 ± 8 mm、短边 142 ± 8 mm |
+| yaw | 最近的边方向，折到 [−45°, 45°)（正方形每 90° 重复） | **长边**方向，折到 [−90°, 90°)（矩形每 180° 重复） |
+| 高度 | 顶面像素的中位数 − 半高 | 矩形中央区域（沿长边 ±56 mm、沿短边 ±51 mm）像素的中位数 = 内底面高度 |
+| 找不到高度像素 | 退回桌面先验 | **拒绝**（`NO_BIN_FLOOR_PIXELS`），因为 Stage 8 的释放高度要靠它，不能静默用先验 |
+
+bin 的高度带包含地板、壁和地板板的外侧面，所以整个外轮廓是一块；box 站在桌面上时，侧面下半部分（约 20 mm 高）也会落进这个带，成为另一块，但尺寸不对，不会被当成 bin（单测覆盖）。bin 的壁顶（0.239 m）整个在 box 的带（≥ 0.245 m）之下，所以 Stage 5 里 bin 不是 box 的候选，这一点不变。
+
+**长短边只差 10 mm（152 对 142），噪声大时可能判反，使 yaw 差 90°。** 评测同时报模 180° 和模 90° 的误差来数翻转；结果见 6.4，没有出现。
+
+**共用窗口。** box 和 bin 看同一批遮罩后的深度，平均一次、检测两次（`InitialPoseEstimator`，替换了 Stage 5 的 `InitialBoxEstimator`）；两个话题各发一条，状态分别是 WARMING_UP / NOT_MEASURED / MEASURED，所以锁存（Stage 7）可以分别锁 box 和 bin。
+
+**消息形态（我定的，按 CLAUDE.md 的规则只记在这里，不写 ADR）：** 独立的 `InitialBinPose`，字段与 `InitialBoxPose` 相同，`position.z` 是内底面高度，`yaw_rad` 是长边方向；没有做成带对象标识的通用消息，因为只有这两个对象。两者共用的 `BlockCandidate`（原 `InitialBoxCandidate`，字段 `matches_box` 改为 `matches`）。理由：独立消息让消费者的订阅和状态各自清楚，重复的只是二十行定义。
+
+### 6.2 改动清单
+
+| 文件 | 内容 |
+| --- | --- |
+| [block_detection.hpp](../../src/mujoco_perception/include/mujoco_perception/block_detection.hpp) | 两个检测器共用的 `DetectionRejection`（原 `InitialBoxRejection`，新增 `kNoFloorPixels`）和 `BlockCandidate` |
+| [rectangle_blocks.hpp](../../src/mujoco_perception/src/rectangle_blocks.hpp) / [.cpp](../../src/mujoco_perception/src/rectangle_blocks.cpp) | 私有：`scanBlocks()` 和 `median()`（原来在 box 检测器里） |
+| [initial_box_detector.cpp](../../src/mujoco_perception/src/initial_box_detector.cpp) | 改成在 `scanBlocks()` 之上；**行为不变**（E1b 逐项相同） |
+| [initial_bin_detector.hpp](../../src/mujoco_perception/include/mujoco_perception/initial_bin_detector.hpp) / [.cpp](../../src/mujoco_perception/src/initial_bin_detector.cpp) | `detectInitialBin()` 与 `InitialBinConfig` |
+| [initial_pose_estimator.hpp](../../src/mujoco_perception/include/mujoco_perception/initial_pose_estimator.hpp) / [.cpp](../../src/mujoco_perception/src/initial_pose_estimator.cpp) | `InitialPoseEstimator`：窗口 + 两个检测器 |
+| [InitialBinPose.msg](../../src/manipulation_interfaces/msg/InitialBinPose.msg)、[BlockCandidate.msg](../../src/manipulation_interfaces/msg/BlockCandidate.msg) | 新消息；候选消息改名 |
+| [object_pose_estimator_node.cpp](../../src/mujoco_perception/src/object_pose_estimator_node.cpp) | 发布 `~/initial_bin_pose`；两个话题共用填充函数；不可用的帧两个话题都发 |
+| 测试与工具 | [test_initial_bin_detector.cpp](../../src/mujoco_perception/test/test_initial_bin_detector.cpp)（4 项）、[test_initial_pose_estimator.cpp](../../src/mujoco_perception/test/test_initial_pose_estimator.cpp)（3 项，原估计器测试扩到 box 与 bin）；重放工具和对照脚本加入 bin；[initial_box_probe.py](../../src/mujoco_perception/test/initial_box_probe.py) 加 `gaps` 命令，随机布局改为 box 与 bin 都随机，去掉只用过一次的 `--dump` |
+
+executor、`VisionObjectPose`、旧检测路径没有动；executor 还不读 `~/initial_bin_pose`（Stage 7、8）。
+
+### 6.3 预期轨迹与验收（实现前写定，不因结果改动）
+
+**方法（用于下面所有预期）：** bin 的高度带取 [0.2235, 0.243] m（地板上表面 0.227 m 下 3.5 mm 到壁顶 0.239 m 上 4 mm）；连通域的最小面积矩形两边都在 152 mm 和 142 mm 的 ±8 mm 内才算 bin，恰好一个；yaw 取长边方向，折到 [−90°, 90°)；内底面高度取矩形中央区域（沿长边 ±56 mm、沿短边 ±51 mm）像素 z 的中位数。这些数与 Stage 3 的原型一致，所以 Stage 3 的 bin 误差表是预期的参照。
+
+| 编号 | 条件 | 预期 | 否定条件（任一出现即不通过） |
+| --- | --- | --- | --- |
+| E1 | 离线：DEV-A 的 40 个布局、C++ 检测器、N = 10 平均、σ = 1、2 mm；规则沿用 Stage 3 登记的 bin 规则（不另登记） | 零漏检；位置 p95 ≤ 10 mm、最大 ≤ 20 mm（T_place/4、/2）。**预期数字**与 Stage 3 的 v1 相近：σ = 2 mm 时 p95 约 1.2 mm、最大约 1.5 mm | 任何一次漏检，或位置超出规则。yaw、内底面高度**只报告**：yaw 同时报对 180° 和对 90° 取模的误差，两者不等就是长短边判反了，要计数 |
+| E1b | 重构后 box 的结果 | Stage 5 的 5.6.3 表**逐项相同**（共用代码被重构，box 不应有任何变化） | 任何数字变化 |
+| E2 | 在线：6 个随机布局（box 与 bin 都随机，bin yaw 在 [0°, 180°)），bridge + 估计器，机械臂在 HOME | 每个布局的 bin 在窗口装满（10 帧、约 0.9 s 仿真时间）后变为 MEASURED，之后 2 s 内一直是 MEASURED；与启动命令行里的 bin 位姿比，x、y ≤ 3 mm、内底面 z ≤ 2 mm、yaw（模 180°）≤ 3° | 任一布局未测出、不稳定或超出这些限。限取像素量化：一个像素 3.3 mm，142 mm 边的朝向分辨约 1.3° |
+| E3 | 在线：E2 的 6 个布局 bin 位置和朝向各不相同 | 结果随之变化，没有一个值等于配置默认值 (0.5, 0.3, 0°) | 任何布局报告默认值 |
+| E4 | 在线，**探索，不判定**：bin 在 (0.5, 0.2)、yaw 0；box 放在 bin 的近侧（相机一侧），box 与 bin 外轮廓间距 20、40、60、80 mm | 按几何估算，box 的阴影在壁顶高度上约 16 mm、桌面高度上约 30 mm，而 bridge 不允许间距小于 20 mm，所以**预期四个间距都 MEASURED** | 不判定：若有失败，记录从多大间距开始、候选块的边长，并写入 Stage 14 的布局生成条件，不在本阶段修 |
+| E5 | 在线：节点参数列表 | 没有 `scene.*` | 出现 |
+| E6 | 在线：旧场景 vision episode 3 个 | 3/3 成功、零重试（只有感知的发布变了，executor 不读新话题） | 任一失败 |
+
+单测只覆盖随位姿变化的情形：不同位置与 yaw（含 ≥ 90° 的折叠）、内底面高度、box 在 bin 旁边时两者互不是对方的候选、bin 被搜索区域截断时报出原因而不是给一个位姿。
+
+### 6.4 结果
+
+#### 6.4.1 E1、E1b：离线，DEV-A（C++ 检测器对布局真值）
+
+规则（Stage 3 登记，不另登记）：N = 10、σ = 1、2 mm 时零漏检、位置 p95 ≤ 10 mm、最大 ≤ 20 mm。bin 位置是 x–y 距离；高度是内底面；yaw 是模 180° 的误差，括号里是模 90° 的最大值。**翻转** = 模 180° 的误差大于 45°（长短边判反）。
+
+| σ（mm） | 帧数 | 检出 | 位置 中位数 / p95 / 最大（mm） | 内底面高度 最大 \|误差\|（mm） | yaw 最大 \|误差\|（°） | 翻转 | 判定 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 0 | 1 | 40/40 | 1.11 / 1.28 / 1.36 | 0.74 | 0.09 | 0 | 只报告 |
+| 1 | 1 | 117/120 | 0.92 / 1.51 / 3.98 | 0.81 | 0.71 | 0 | 只报告 |
+| 2 | 1 | 3/120 | 2.26 / 2.52 / 2.55 | 0.87 | 1.45 | 0 | 只报告 |
+| 4 | 1 | 0/120 | — | — | — | — | 只报告 |
+| 1 | 10 | **120/120** | 1.02 / 1.18 / 1.29 | 0.76 | 0.31 | 0 | **通过** |
+| 2 | 10 | **120/120** | 0.96 / 1.23 / 1.38 | 0.80 | 0.34 | 0 | **通过** |
+| 4 | 10 | 79/120 | 0.94 / 2.58 / 4.28 | 0.83 | 1.96 | 0 | 只报告 |
+
+与预期对照：E1 的预期数字（σ = 2 mm 时 p95 约 1.2 mm、最大约 1.5 mm）与实测 1.23 / 1.38 相符；与 Stage 3 的 v1 原型（σ = 1：1.18 / 1.34；σ = 2：1.24 / 1.49；σ = 4：82/120 检出）相差 ≤ 0.15 mm，σ = 4 mm 时 79/120 与 82/120 的差来自噪声抽样不同。匹配的 bin 块的边长：σ = 0 时长边 150.6~152.1 mm、短边 141.1~142.1 mm（名义 152、142，接受范围 ±8 mm）；σ = 2 mm 单帧时长边已涨到 155.8~159.6 mm，贴着 160 mm 的上限，这就是单帧在 σ ≥ 2 mm 时漏检的原因，与 Stage 3 的机理相同（边缘散点撑大矩形）。
+
+**E1b：** 重构后重跑 Stage 5 的 5.6.3，box 的 8 行（σ = 0、1、2、4 mm × N = 1、10）的位置与 yaw 的中位数、p95、最大值与原表**逐项相同**。
+
+#### 6.4.2 E2、E3、E5：在线静态，6 个随机布局
+
+box 与 bin 的位置都随机、bin yaw 在 [0°, 180°) 随机、box 与 bin 保持 bridge 要求的 20 mm 间距（种子 20261008）；限：x、y ≤ 3 mm，z ≤ 2 mm，yaw box ≤ 5°（模 90°）、bin ≤ 3°（模 180°）。
+
+| 布局 | box 最大 \|dx\| / \|dy\| / \|dz\|（mm），\|dyaw\|（°） | bin 最大 \|dx\| / \|dy\| / \|dz\|（mm），\|dyaw\|（°） |
+| --- | --- | --- |
+| box (0.461, −0.141, 84.3°)，bin (0.569, 0.198, 94.1°) | 0.48 / 0.94 / 0.60，0.01 | 0.46 / 1.23 / 0.74，0.00 |
+| box (0.471, −0.179, 27.9°)，bin (0.439, −0.001, 11.0°) | 0.41 / 0.84 / 0.58，0.02 | 0.45 / 1.05 / 0.67，0.01 |
+| box (0.540, 0.042, 41.0°)，bin (0.584, −0.175, 34.2°) | 0.35 / 0.96 / 0.66，0.01 | 0.41 / 0.95 / 0.60，0.03 |
+| box (0.511, −0.195, 19.7°)，bin (0.566, 0.217, 126.8°) | 0.45 / 0.70 / 0.57，0.01 | 0.53 / 1.14 / 0.75，0.03 |
+| box (0.538, −0.143, 54.3°)，bin (0.417, 0.120, 169.2°) | 0.54 / 0.81 / 0.59，0.01 | 0.50 / 1.13 / 0.72，0.01 |
+| box (0.427, 0.032, 52.7°)，bin (0.560, −0.121, 112.6°) | 0.73 / 0.81 / 0.66，0.08 | 0.40 / 1.01 / 0.62，0.02 |
+
+每个布局 S1~S4 全部满足：从第一条消息起窗口 10 帧装满（约 0.9 s 仿真时间）后，box 与 bin 立刻 MEASURED，之后 2 s 内 21/21 条一直是 MEASURED。bin 的位置在 6 个布局里各不相同（E3），没有一个等于配置默认值。**E5：** 估计器节点列出 34 个参数，没有 `scene.*`；这只检查了节点声明的参数，源码里不引用场景配置由 `test_scene_launch.py` 的守卫测试负责（Stage 1）。
+
+#### 6.4.3 E4：box 在 bin 近侧的遮挡探索（不判定）
+
+bin 在 (0.5, 0.2)、yaw 0；box yaw 0 在 bin 的相机一侧。**间距用的是 21、40、60、80 mm，不是登记的 20：** 20 mm 恰好是 bridge 拒绝的边界，浮点误差可能把它拒掉，所以取 21。
+
+| 间距（mm） | box | bin |
+| --- | --- | --- |
+| 21 | 21/21 MEASURED，最大 \|dy\| 0.72 mm | 21/21 MEASURED，最大 \|dx\| 0.54、\|dy\| 1.24、\|dz\| 0.74 mm，yaw 0.00° |
+| 40、60、80 | 21/21，最大 \|dy\| 0.81 / 0.58 / 0.04 mm | 21/21，**与 21 mm 时的数完全相同** |
+
+与预期（四个间距都测得出）相符：估算 box 的阴影在壁顶高度约 16 mm、桌面高度约 30 mm，而 bridge 保证至少 20 mm，所以壁顶的外沿始终看得见。bin 的结果不随间距变化，说明 box 没有进入 bin 的检测。**只测了一种几何**：box 在 bin 的相机一侧、对齐；box 在 bin 后面或旁边、bin 旋转时的遮挡没有测（按几何推断更不会遮）。
+
+#### 6.4.4 E6：旧场景 vision episode
+
+3 个 episode 都成功、零重试；新话题与旧话题各为 61/61、59/60、61/61 个非 ATTACHED 深度帧都有消息；释放后 box 的新检测 MEASURED 在 (0.498, 0.294, 0.241)，与 Stage 5 相同。
+
+### 6.5 失败模式与验证手段
+
+| 失败模式 | 现象 | 验证手段 |
+| --- | --- | --- |
+| 长短边判反（只差 10 mm） | bin yaw 差 90°，Stage 11 的“盒子在 bin 内”会判错方向 | E1 计数翻转（0 次，含 σ = 4 mm）；在线 yaw 误差 ≤ 0.03° |
+| box 遮住 bin 的近侧 | 矩形变小，`NO_RECTANGLE_MATCHES_BIN` | E4（间距 ≥ 21 mm 不触发）；`candidates[]` 给出看到的块 |
+| 单帧噪声撑大矩形 | σ ≥ 2 mm 单帧漏检 | 平均 10 帧；E1 |
+| bin 中央没有深度（被遮挡） | 无法读内底面高度 | 拒绝 `NO_BIN_FLOOR_PIXELS`，不退回先验；**没有端到端测试**，只有代码路径 |
+| bin 里已经放了盒子 | 盒子侧面进带，中央高度偏高 | **不支持**：锁存在抓取前完成（Stage 7），释放时窗口清空 |
+| 倾斜的 bin | 高度带与矩形不再对应 | **不支持**：先验是平放（bridge 允许最多约 20° 倾斜，本阶段没测） |
+
+### 6.6 排查记录与更正
+
+1. **单测里我自己的断言错了。** 我断言矩形边长在名义值的 3 mm 内（拿位置的容差当边长的容差），合成的轴对齐 bin 的短边量出 138.2 mm（−3.8 mm）而失败。检测器的接受规则是 ±8 mm（Stage 3 登记），测试应当断言这条规则，已改。**但出入没有查清：** 同一个检测器在 Stage 3 的录制帧上短边最多只小 0.9 mm；合成场景的 −3.8 mm 在一个像素（3.3~4.7 mm）之内，原因没有隔离。
+2. **在线探针的布局变了：** Stage 5 的 5.6.4 表用旧探针（种子 20261007，只随机 box，bin 在默认位置）生成；现在 `static` 用种子 20261008，box 与 bin 都随机。Stage 5 的表仍然有效，但用现在的命令不能复现它。
+3. **E4 的间距 20 改成了 21**（见 6.4.3），在运行之前就改了，不是看到结果后改的。
+
+### 6.7 你没问但值得注意的
+
+- **（E 可测试性）在线的 bin 真值是启动命令行，不是独立的观测。** bin 没有话题和 TF（设计如此），所以“bin 在哪”只能用传给 bridge 的参数。10 个布局里检测结果与它在 1.3 mm 内一致，这同时是 bridge 把 bin 放在它说的位置的证据；但如果两者以同样的方式错了（比如都漏了某个偏移），这里发现不了。
+- **（C 可观测性）接受规则只看“恰好一块、两边在 ±8 mm 内”。** 一个 147 × 147 mm 的别的东西也会被当成 bin（两边都在 ±8 mm 内），而且没有任何置信度能看出来。这个场景里只有一个 bin，所以不触发；换了场景要先想这条。
+- **（E 可测试性）±8 mm 的容差是单帧失败的边界。** σ = 2 mm 单帧时边长涨到 156~160 mm，贴着上限；相机、分辨率或 bin 尺寸一变，先检查这个容差，不要先怀疑算法。
+- **窗口装满的第一条消息就已经是最终值。** E2 里 bin 与 box 的第一条满窗口消息就在限内，没有 Stage 5 里 box 出现过的头一两条偏大的情形；这对 Stage 7 的锁存有利，但这是 6 个布局的观察，不是保证。
+
+### 6.8 本阶段边界与后续
+
+做完了：bin 检测器、共用的块扫描、共用窗口的估计器、新消息、节点接线、单测、离线对真值、在线静态、遮挡探索、旧场景 episode 回归。
+
+**没有做，有意推迟：** executor 不读 `~/initial_bin_pose`（锁存是 Stage 7，目标是 Stage 8）；旧路径与 `VisionObjectPose` 的清理仍推迟（见 Stage 5 的 5.11）。
+
+**没有验证：** 真实噪声与飞点；真机；倾斜的 bin；bin 里已有盒子；box 在 bin 后面或旁边时的遮挡；`NO_BIN_FLOOR_PIXELS` 的端到端路径；检测耗时（本阶段没有重新测，Stage 5 只有 box 时是 1.9 ms）；HELD-A。DEV-A 已被 Stage 3、5、6 反复使用，它上面的数字不再是独立检验。
+
+**验证精简的落实：** 单测 7 项（4 + 3）；没有变异检查，没有基线构建，没有 C++ 对原型的逐项对照（直接对真值）；探针只扩展了现有脚本。**没做到的一条：** 包测试我跑了五轮，其中四轮是在修 lint（行长、uncrustify、docstring 风格），不是“跑一次加收尾”；lint 问题应当写完就在本地检查，不该靠整包测试发现。前置满足，进入 Stage 7（锁存）。
 
 ## Stage 7：初始位姿锁存
 

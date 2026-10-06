@@ -23,6 +23,6 @@ geometry_msgs/Point position
 float64 yaw_rad
 uint32 valid_depth_pixels
 # Every block in the height band; empty while warming up or when the frame was unusable.
-InitialBoxCandidate[] candidates
+BlockCandidate[] candidates
 # Time spent adding the frame and detecting, excluding the camera and the robot mask.
 float64 processing_ms

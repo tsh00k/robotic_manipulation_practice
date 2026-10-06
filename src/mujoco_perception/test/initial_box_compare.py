@@ -60,6 +60,10 @@ SPREAD_LIMIT_M = 0.02  # DepthWindow max_spread_m
 DETECTION = re.compile(
     r'detection (\d+) measured=(\d) reason=(\S+) x=(\S+) y=(\S+) z=(\S+) yaw_deg=(\S+) '
     r'valid_px=(\d+)')
+BIN = re.compile(
+    r'\s+bin measured=(\d) reason=(\S+) x=(\S+) y=(\S+) z=(\S+) yaw_deg=(\S+) valid_px=(\d+)')
+BIN_CANDIDATE = re.compile(
+    r'\s+bincandidate \d+ pixels=(\d+) along_mm=(\S+) across_mm=(\S+) yaw_deg=(\S+) match=(\d)')
 CANDIDATE = re.compile(
     r'\s+candidate \d+ pixels=(\d+) along_mm=(\S+) across_mm=(\S+) yaw_deg=(\S+) match=(\d)')
 
@@ -112,6 +116,17 @@ def run_cpp(harness, detections, frames_per_detection):
                 measured=m.group(2) == '1', reason=m.group(3), x=float(m.group(4)),
                 y=float(m.group(5)), z=float(m.group(6)), yaw=float(m.group(7)),
                 candidates=[]))
+            continue
+        m = BIN.match(line)
+        if m:
+            rows[-1]['bin'] = dict(
+                measured=m.group(1) == '1', reason=m.group(2), x=float(m.group(3)),
+                y=float(m.group(4)), z=float(m.group(5)), yaw=float(m.group(6)), candidates=[])
+            continue
+        m = BIN_CANDIDATE.match(line)
+        if m:
+            rows[-1]['bin']['candidates'].append(dict(
+                along=float(m.group(2)), across=float(m.group(3)), match=m.group(5) == '1'))
             continue
         m = CANDIDATE.match(line)
         if m:
@@ -174,6 +189,47 @@ def compare(label, layouts, owner, cpp_rows, proto_rows):
     return ok_agree and ok_pairs
 
 
+# The bin rule registered in Week 4.1 Stage 3 (T_place = 40 mm) and reused unchanged by Stage 6:
+# with 10 averaged frames and noise of 1 and 2 mm there is no miss, position p95 <= T/4 and
+# maximum <= T/2. Yaw, floor height and the 90-degree flips are reported, not judged.
+BIN_P95_LIMIT_MM = 10.0
+BIN_MAX_LIMIT_MM = 20.0
+
+
+def report_bin(label, layouts, owner, cpp_rows, judged):
+    """Print the C++ bin detector's errors against the layout truth; return True if accepted."""
+    n = len(cpp_rows)
+    found = [(r['bin'], layouts[i]['bin_xyz_yaw']) for r, i in zip(cpp_rows, owner)
+             if r['bin']['measured']]
+    misses = n - len(found)
+    pos = np.array([math.hypot(b['x'] - t[0], b['y'] - t[1]) * 1000.0 for b, t in found])
+    floor = np.array([(b['z'] - t[2]) * 1000.0 for b, t in found])
+    yaw180 = np.array([fold_difference(b['yaw'], math.degrees(t[3]), 180.0) for b, t in found])
+    yaw90 = np.array([fold_difference(b['yaw'], math.degrees(t[3]), 90.0) for b, t in found])
+    flips = int(np.sum(np.abs(yaw180) > 45.0))
+    ok = True
+    if judged:
+        ok = misses == 0 and len(pos) > 0 and np.percentile(pos, 95) <= BIN_P95_LIMIT_MM and \
+            pos.max() <= BIN_MAX_LIMIT_MM
+    print(f'    BIN {label}: found {len(found)}/{n}; '
+          + (f'position median {np.median(pos):.2f} p95 {np.percentile(pos, 95):.2f} '
+             f'max {pos.max():.2f} mm; floor height max |err| {np.abs(floor).max():.2f} mm; '
+             f'yaw mod 180 max |err| {np.abs(yaw180).max():.2f} deg (p95 '
+             f'{np.percentile(np.abs(yaw180), 95):.2f}), mod 90 max {np.abs(yaw90).max():.2f}; '
+             f'90-degree flips {flips}' if len(pos) else 'nothing measured')
+          + (f'  rule {"OK" if ok else "FAIL"}' if judged else '  (reported, not judged)'))
+    reasons = collections.Counter(r['bin']['reason'] for r in cpp_rows if not r['bin']['measured'])
+    if reasons:
+        print(f'        bin reasons when not measured: {dict(reasons)}')
+    sides = np.array([[c['along'], c['across']] for r in cpp_rows for c in r['bin']['candidates']
+                      if c['match']])
+    if len(sides):
+        print(f'        matched bin sides: long {sides[:, 0].min():.1f}..'
+              f'{sides[:, 0].max():.1f} mm (nominal 152), short {sides[:, 1].min():.1f}..'
+              f'{sides[:, 1].max():.1f} mm (nominal 142); the rule is +-8 mm')
+    return ok
+
+
 def main():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -189,6 +245,7 @@ def main():
     layouts = common.load_layouts(args.dataset)
     rng = np.random.default_rng(20261006)
     all_ok = True
+    bin_all_ok = True
     print(f'{len(layouts)} layouts; harness {args.harness}')
     for frames in args.frames:
         for sigma in args.sigmas:
@@ -201,9 +258,15 @@ def main():
             proto_rows = [run_prototype(window_mean(g)) for g in groups]
             all_ok &= compare(f'sigma {sigma:g} mm, N={frames}', layouts, owner, cpp_rows,
                               proto_rows)
+            bin_ok = report_bin(
+                f'sigma {sigma:g} mm, N={frames}', layouts, owner, cpp_rows,
+                judged=frames == 10 and 0.0 < sigma <= 2.0)
+            bin_all_ok &= bin_ok
     print('\nACCEPTANCE (C++ agrees with the prototype within the limits written above): '
           + ('PASS' if all_ok else 'FAIL'))
-    return 0 if all_ok else 1
+    print('BIN RULE (Stage 3 rule, N=10, sigma 1 and 2 mm; Week 4.1 6.3 E1): '
+          + ('PASS' if bin_all_ok else 'FAIL'))
+    return 0 if all_ok and bin_all_ok else 1
 
 
 if __name__ == '__main__':
