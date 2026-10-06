@@ -31,6 +31,7 @@ add_executable(task_executor_node
   src/observation_snapshot.cpp
   src/pose_latch.cpp
   src/bin_containment.cpp
+  src/carry_width_monitor.cpp
 )
 target_include_directories(task_executor_node PRIVATE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -122,6 +123,13 @@ if(BUILD_TESTING)
   target_link_libraries(test_observation_snapshot
     Eigen3::Eigen mujoco_bridge::grasp_criteria)
   ament_target_dependencies(test_observation_snapshot sensor_msgs geometry_msgs)
+
+  ament_add_gtest(test_carry_width_monitor
+    test/test_carry_width_monitor.cpp
+    src/carry_width_monitor.cpp
+    src/phase.cpp
+  )
+  target_include_directories(test_carry_width_monitor PRIVATE include)
 
   ament_add_gtest(test_bin_containment
     test/test_bin_containment.cpp

@@ -181,6 +181,11 @@ public:
     // (box_width_m in particular), not physical constants.
     grasp_criteria_.box_width_m = declare_parameter("grasp.box_width_m", 0.04);
     grasp_criteria_.width_epsilon_m = declare_parameter("grasp.width_epsilon_m", 0.01);
+    // Simulation fault, for Week 4.1 Stage 12 only, off by default: once the box has been
+    // attached for this long (simulated time), move it back to where the reset keyframe puts
+    // it, so that the fingers close on nothing while the attachment stays latched. Changes the
+    // world, not the robot; done once per bridge run, so that a retry can succeed.
+    fault_drop_box_after_attach_s_ = declare_parameter("fault.drop_box_after_attach_s", -1.0);
     grasp_criteria_.lift_height_threshold_m =
       declare_parameter("grasp.lift_height_threshold_m", 0.26);
     grasp_criteria_.region_radius_m = declare_parameter("grasp.region_radius_m", 0.05);
@@ -886,8 +891,39 @@ private:
     rtf_window_sim_start_ = data_->time;
   }
 
+  void injectFaultIfDue()
+  {
+    if (fault_drop_box_after_attach_s_ < 0.0 || fault_done_ || object_body_id_ < 0 ||
+      attachment_state_ != manipulation_interfaces::msg::BridgeObservation::ATTACHMENT_ATTACHED ||
+      data_->time - attached_since_s_ < fault_drop_box_after_attach_s_)
+    {
+      return;
+    }
+    const int joint = model_->body_jntadr[object_body_id_];
+    if (model_->body_jntnum[object_body_id_] != 1 || model_->jnt_type[joint] != mjJNT_FREE ||
+      reset_keyframe_id_ < 0)
+    {
+      return;
+    }
+    const int qpos = model_->jnt_qposadr[joint];
+    const int dof = model_->jnt_dofadr[joint];
+    for (int i = 0; i < 7; ++i) {
+      data_->qpos[qpos + i] = model_->key_qpos[reset_keyframe_id_ * model_->nq + qpos + i];
+    }
+    for (int i = 0; i < 6; ++i) {
+      data_->qvel[dof + i] = 0.0;
+    }
+    fault_done_ = true;
+    RCLCPP_WARN(
+      get_logger(), "fault.drop_box_after_attach_s: box moved back to (%.3f %.3f %.3f) at sim "
+      "t=%.3fs, %.2fs after the attach; the attachment stays latched",
+      data_->qpos[qpos], data_->qpos[qpos + 1], data_->qpos[qpos + 2], data_->time,
+      data_->time - attached_since_s_);
+  }
+
   void onTimer()
   {
+    injectFaultIfDue();
     api_.step(model_, data_);
     ++step_count_;
     logRtfIfDue();
@@ -1168,6 +1204,7 @@ private:
       }
     } else if (confirmsAttachment(signals, grasp_criteria_)) {
       attachment_state_ = manipulation_interfaces::msg::BridgeObservation::ATTACHMENT_ATTACHED;
+      attached_since_s_ = data_->time;
     }
     if (attachment_state_ != previous_attachment_state) {
       RCLCPP_INFO(
@@ -1228,6 +1265,9 @@ private:
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr left_finger_contact_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr right_finger_contact_pub_;
   GraspCriteria grasp_criteria_{};
+  double fault_drop_box_after_attach_s_ = -1.0;
+  double attached_since_s_ = 0.0;
+  bool fault_done_ = false;
   manipulation_interfaces::msg::BridgeObservation::_attachment_state_type attachment_state_ =
     manipulation_interfaces::msg::BridgeObservation::ATTACHMENT_NOT_ATTACHED;
   std::optional<GraspOutcome> last_logged_grasp_outcome_;

@@ -39,6 +39,7 @@
 #include <trajectory_msgs/msg/joint_trajectory.hpp>
 
 #include "task_executor/bin_containment.hpp"
+#include "task_executor/carry_width_monitor.hpp"
 #include "task_executor/cartesian_waypoint_source.hpp"
 #include "task_executor/diff_ik_waypoint_source.hpp"
 #include "task_executor/episode_controller.hpp"
@@ -183,9 +184,49 @@ private:
     }
     bridge_attachment_known_ = true;
     last_bridge_attachment_state_ = msg->attachment_state;
+    watchCarryWidth(*msg);
     latest_observation_ = msg;
     observation_cache_[msg->sample_sequence] = msg;
     while (observation_cache_.size() > 30) {observation_cache_.erase(observation_cache_.begin());}
+  }
+
+  // Week 4.1 Stage 12: the gripper opening while the box is carried, from every bridge sample
+  // of the current attempt. Alerts are logged and go into the outcome; they do not change the
+  // episode.
+  void watchCarryWidth(const manipulation_interfaces::msg::BridgeObservation & msg)
+  {
+    const auto state = controller_->state();
+    if ((state != EpisodeState::kReady && state != EpisodeState::kAwaitingObservation) ||
+      msg.bridge_session != controller_->bridgeSession() ||
+      msg.generation != controller_->generation())
+    {
+      return;
+    }
+    double width = 0.0;
+    int fingers = 0;
+    for (std::size_t i = 0; i < msg.joint_state.name.size() && i < msg.joint_state.position.size();
+      ++i)
+    {
+      if (msg.joint_state.name[i] == "finger_joint1" ||
+        msg.joint_state.name[i] == "finger_joint2")
+      {
+        width += msg.joint_state.position[i];
+        ++fingers;
+      }
+    }
+    if (fingers != 2) {
+      return;
+    }
+    const bool had_alert = carry_width_.alert().has_value();
+    carry_width_.update(
+      controller_->phase(),
+      msg.attachment_state == manipulation_interfaces::msg::BridgeObservation::ATTACHMENT_ATTACHED,
+      width, rclcpp::Time(msg.joint_state.header.stamp).seconds());
+    if (!had_alert && carry_width_.alert()) {
+      RCLCPP_WARN(
+        get_logger(), "%s (sim t=%.2fs; the bridge still reports the box attached)",
+        carry_width_.alert()->c_str(), carry_width_.alertTime());
+    }
   }
 
   // The lifecycle the latches belong to: bind them to the controller's current session and
@@ -545,6 +586,7 @@ private:
     last_observation_rejected_ = false;
     observation_generation_logged_ = false;
     forgetLatch();
+    carry_width_ = CarryWidthMonitor();
     const auto actions = controller_->startEpisode(
       std::chrono::steady_clock::now(), get_clock()->now().seconds());
     executeActions(actions);
@@ -568,6 +610,9 @@ private:
       (finished.failure_code.rfind("VISION_", 0) == 0 ? "perception" : "execution");
     outcome.observation_failure_reason = last_observation_failure_reason_;
     outcome.retries = finished.retry_count;
+    outcome.carry_width_alert = carry_width_.alert().value_or("");
+    outcome.carry_width_min_m = carry_width_.minWidth();
+    outcome.carry_width_max_m = carry_width_.maxWidth();
     finished.telemetry.appendTo(outcome);
     episode_outcome_pub_->publish(outcome);
     RCLCPP_INFO(
@@ -647,6 +692,7 @@ private:
       observation_generation_logged_ = false;
       last_observation_rejected_ = false;
       forgetLatch();  // a retry is a new generation: detect and latch again
+      carry_width_ = CarryWidthMonitor();
       requestReset(*actions.reset_request);
     }
     // The controller emits this only once; publish after any same-tick target.
@@ -710,6 +756,7 @@ private:
   rclcpp::Subscription<manipulation_interfaces::msg::InitialBinPose>::SharedPtr initial_bin_sub_;
   rclcpp::Publisher<manipulation_interfaces::msg::InitialPoseLatch>::SharedPtr latch_pub_;
   rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr start_episode_sub_;
+  CarryWidthMonitor carry_width_;
   std::unique_ptr<PoseLatch> box_latch_;
   std::unique_ptr<PoseLatch> bin_latch_;
   bool latch_bound_ = false;

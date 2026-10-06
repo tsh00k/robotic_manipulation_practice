@@ -129,7 +129,7 @@
 | | 9 | 已完成 | `grasp_yaw` 取自锁存 box yaw | 成功判据、防滑 |
 | | 10 | — | **并入 Stage 11，不单独做**（编号保留） | — |
 | | 11 | 已完成 | 释放后 box 在 bin 内的检测（先测可行性）与入 bin 成功判据：释放后新视觉 box 完整在锁存 bin 内 | 多帧稳定 |
-| E 完整性 | 12 | 轻 | 搬运期夹爪开度窗口 | 视觉 |
+| E 完整性 | 12 | 已完成 | 搬运期夹爪开度窗口 | 视觉 |
 | | 13 | 轻 | 附着确认不再读 box 真值 | 开度窗口 |
 | F 验收 | 14 | **重** | 随机场景的过程验收，用留出集 | 新功能 |
 
@@ -1585,6 +1585,69 @@ C1、C2：工具转角与盒子 yaw（oracle 用真值，vision 用锁存值）�
 - **前置：** Stage 8、第一步。
 
 ## Stage 12：搬运期夹爪开度窗口
+
+**状态（2026-10-06）：已完成，尚未提交。** 12.0、12.1 是实现之前写定的；运行前改过两处（注入只做一次、W2 的开度从告警里读），都在 12.1 里标明。W1、W2 满足，W3 已报告。验证是仿真的。**分量：轻。**
+
+### 12.0 一句话总结（目标）
+
+搬运期间（bridge 为 ATTACHED、FSM 在 LIFT / PREPLACE / PLACE），executor 盯着 `joint_state` 里两指之和：开度低于窗口下限且持续一小段时间，就判定“盒子已经不在手里”，**只告警并记进 outcome**，不改变 episode 的走向。这补的是现在的缺口：bridge 锁存附着后只看“张开超过 50 mm”，盒子滑出、手指继续合拢到 0 时，bridge 仍然报 ATTACHED，没有人发现。是否在告警时立刻重试，由注入实验的结果决定，不在本阶段改。
+
+### 12.1 设计与出口断言（实现前写定，不因结果改动）
+
+**窗口。** 证据：Stage 9 的 6 次 bin 场景附着时宽度 38.2~38.8 mm；早先的记录是搬运中 37.69~40.12 mm；盒宽 40 mm；空夹合拢 0 mm。下限取 **34 mm**（比见过的最小值低约 3.7 mm）；上限不另设，超过 50 mm 本来就由 bridge 转为 RELEASED。**持续时间 0.2 s 仿真时间**：单个样本的抖动不报；按 bridge 观测的时间戳算，不按 executor 的 tick 数算。
+
+**规则类 `CarryWidthMonitor`（纯规则，不依赖 ROS）。** 输入：阶段、bridge 的附着状态、两指之和、仿真时间。只在“附着且阶段是 LIFT / PREPLACE / PLACE”时计时；每个 episode（含每次重试）一个新的监视器。第一次满足条件时产生一条告警，之后同一个 episode 不再重复；同时记下搬运期间见到的最小、最大开度。
+
+**出口（outcome）。** `EpisodeOutcome` 新增 `carry_width_alert`（空，或如 `CARRY_WIDTH_LOW: 2.1 mm < 34.0 mm for 0.20 s in PREPLACE`）、`carry_width_min_m`、`carry_width_max_m`（没有搬运时为 NaN）。重试时保留最后一次尝试的值。
+
+**注入方式（仿真故障，默认关闭）。** bridge 新增参数 `fault.drop_box_after_attach_s`（默认负数，即关闭）：附着持续到这个仿真时长时，把盒子的自由关节直接移回它在本 generation 开始时的位置（桌面上）、速度清零，**整个 bridge 运行期间只做一次**（写设计时我先写成“reset 后重新计时”，运行前改了：那样每次重试也会被移走，W3 就看不出重试能不能救回来）。手指于是合拢到约 0，而 bridge 的附着锁存不变——正是要检出的情形。这是改“世界”，不是改机器人；参数名带 `fault.`，只在 bridge 上声明，launch 不暴露。
+
+| 编号 | 条件 | 预期 | 否定条件 |
+| --- | --- | --- | --- |
+| W1 | 正常运行：oracle bin 场景 3 个布局（Stage 8 的）、vision bin 场景同 3 个、旧场景 vision 3 个 | 没有任何告警；记下搬运期最小、最大开度（预期都在 37~41 mm） | 任一正常运行出现告警 |
+| W2 | 注入：oracle，bin 场景布局 0，`fault.drop_box_after_attach_s` = 3.0（附着在 CLOSE 开始约 0.2 s 后，CLOSE 至少 2 s，所以落在 LIFT 或 PREPLACE） | 有告警；告警的仿真时间在“盒子被移走”之后 0.5 s 内；`carry_width_min_m` < 34 mm（**运行前改：** outcome 只保留最后一次尝试，注入后若发生重试，这个字段是重试那次的；所以改为检查注入那次尝试的告警里记下的最低开度 < 34 mm） | 没有告警，或晚于 0.5 s |
+| W3 | 同上，**只报告**：episode 后来怎样结束、用了多少时间（预期：照常 PLACE、OPEN，VERIFY 时盒子不在 bin 内，超时 `PLACE_MISSED`，然后重试；重试时盒子回到初始位置） | — |
+
+单测：窗口内不报；低于下限但不足 0.2 s 不报；持续 0.2 s 报一次且只报一次；不在搬运阶段或不附着时不计时；最小、最大开度只统计搬运期间。
+
+### 12.2 改动清单
+
+| 文件 | 内容 |
+| --- | --- |
+| [carry_width_monitor.hpp](../../src/task_executor/include/task_executor/carry_width_monitor.hpp) / [.cpp](../../src/task_executor/src/carry_width_monitor.cpp) | `CarryWidthMonitor`：窗口 34 mm、持续 0.2 s、只看搬运期、一次尝试一条告警、记录最小与最大开度 |
+| [task_executor_node.cpp](../../src/task_executor/src/task_executor_node.cpp) | 每个 bridge 样本更新监视器；每次 reset（含重试）新建；告警打 WARN；写进 outcome |
+| [EpisodeOutcome.msg](../../src/manipulation_interfaces/msg/EpisodeOutcome.msg) | `carry_width_alert`、`carry_width_min_m`、`carry_width_max_m` |
+| [mujoco_bridge_node.cpp](../../src/mujoco_bridge/src/mujoco_bridge_node.cpp) | 仿真故障 `fault.drop_box_after_attach_s`（默认关闭，整个运行只做一次） |
+| 测试与工具 | [test_carry_width_monitor.cpp](../../src/task_executor/test/test_carry_width_monitor.cpp)（4 项）；[initial_box_probe.py](../../src/mujoco_perception/test/initial_box_probe.py) 加 `carry` 命令 |
+
+### 12.3 验证结果
+
+**单测：** executor 包 276 项、bridge 包 217 项，0 失败。
+
+| 编号 | 结果 | 判定 |
+| --- | --- | --- |
+| W1 | oracle bin 3 个、vision bin 3 个、vision 旧场景 3 个，都成功、零重试，**都没有告警**；搬运期开度 37.59~40.47 mm（离 34 mm 下限至少 3.6 mm） | 满足 |
+| W2 | 注入（oracle，布局 0，附着 3.0 s 后）：bridge 在仿真 4.822 s 移走盒子，executor 在 5.06 s 告警 `CARRY_WIDTH_LOW: 4.4 mm < 34.0 mm for 0.20 s in PLACE`，晚 0.24 s（≤ 0.5 s）；最低开度 4.4 mm | 满足 |
+| W3（报告） | 告警之后照常 PLACE → OPEN → RETRACT → VERIFY；VERIFY 看到盒子不在 bin 里，超时 → RECOVER → 重试；重试时盒子回到初始位置，第二次成功。outcome：`success=True`，`retries=1`，`carry_width_alert` 为空、开度 37.61~40.19 mm（都是最后一次尝试的） | — |
+
+**我的一处预期错了：** 12.1 写“附着 3.0 s 后落在 LIFT 或 PREPLACE”，实际落在 **PLACE**。CLOSE 至少 2 s，加上 LIFT、PREPLACE 不到 1 s，所以 3.0 s 已经到了 PLACE。不影响判定（PLACE 也在监视范围里）。
+
+### 12.4 你没问但值得注意的
+
+- **（C 可观测性）告警丢在了最终 outcome 里。** W3 那次 episode 最后 `success=True`，而 outcome 的 `carry_width_alert` 是空的：设计上它只保留最后一次尝试，丢盒子发生在第一次。从 outcome 看不出“曾经丢过一次盒子”，只有 `retries=1` 和日志里的 WARN。要统计丢盒子的次数（Stage 14），要么把每次尝试的告警都存下来，要么在 outcome 里加“历次告警”。我没有改，因为 12.1 写定的是最后一次。
+- **（E 可测试性）告警之后多花的时间。** 告警后还要走完 PLACE 剩下的一小段，再走 OPEN 0.50 s、RETRACT 0.50 s、VERIFY 6.06 s（等满超时）才重试，合计约 7.1 s 仿真时间（从日志的阶段时长量的；我先估成 8~10 s，量过后改正）。注入重跑一次，故障与告警时刻完全相同（4.822 s、5.06 s），仿真是确定性的。“告警时立刻重试”能省掉这些，代价是多一条判定路径。原计划说由注入实验决定；这一次的数据只够说“现在的做法能自己救回来，但慢”，要不要改，你定。
+- **注入只模拟了“盒子瞬间消失”。** 真实的滑出是逐渐的，宽度会在几十毫秒到几百毫秒里从 38 mm 往下走；0.2 s 的持续时间在那种情形下会更晚报。没有测。
+- **仿真里看不到“盒子在手里转了或偏了但开度不变”**，原计划的这条局限仍然成立。
+
+### 12.5 本阶段边界与后续
+
+做完了：搬运期开度窗口、告警写进 outcome、仿真故障注入。
+
+**没有做：** 告警时立刻重试（12.4，你定）；历次尝试的告警记录；逐渐滑出的注入；真实夹爪的开度噪声与偏置。
+
+**验证精简的落实：** 单测 4 项；没有变异检查、没有基线构建；探针扩展了现有脚本。executor 整包测试多跑了两轮：一个测试辅助函数累加时间有浮点漂移，修完又发现规则本身也需要 1 ns 的比较容差（时间戳是纳秒整数转成的秒）。下一阶段是 Stage 13（附着确认不再读 box 真值）。
+
+### 12.9 原计划（2026-10-06 之前写的，保留作对照）
 
 **出口：** 搬运阶段（LIFT 到 PLACE，bridge 为 ATTACHED）开度脱离窗口时被检出，并记录。
 

@@ -95,6 +95,12 @@ verify   Week 4.1 Stage 11, step 1: can the initial box detector measure the box
          the last sample; F3 layouts whose box did not end in the bin are recorded, not
          counted, and at least 4 must count. Reported: the error of the first MEASURED after
          the release, and whether the bin estimate stays MEASURED with the box inside it.
+carry    Week 4.1 Stage 12, the carry width window. `--mode normal`: oracle and vision on the
+         first --count random layouts (bin scene) and vision on the legacy scene; W1: no outcome
+         has a carry_width_alert, and the carry widths are printed. `--mode inject`: oracle,
+         layout 0, bridge fault.drop_box_after_attach_s:=3.0; W2: an alert, raised within 0.5 s
+         of simulated time after the bridge moved the box (both read from the node logs), and
+         carry_width_min_m < 34 mm; W3 (reported): how the episode ended.
 episode  Bridge + estimator + executor with observation_source=vision, three episodes in a
          row, on the legacy scene (no bin; --scene bin adds the bin). Acceptance:
            E1 every episode ends in success with zero retries (the older detector path still
@@ -916,6 +922,91 @@ def run_verify(args):
     return 0 if not failures else 1
 
 
+BRIDGE_LOG = Path('/tmp/initial_box_probe_mujoco_bridge.log')
+FAULT_LINE = re.compile(r'fault\.drop_box_after_attach_s: .* at sim t=([\d.]+)s')
+ALERT_LINE = re.compile(r'(CARRY_WIDTH_LOW: [^(]*)\(sim t=([\d.]+)s')
+
+
+def carry_episode(args, bridge_params, source, episodes=1):
+    """Run episodes on one rig; return the outcomes."""
+    rig = Rig(args.workspace, bridge_params, True, executor_params=(
+        ['place.into_bin=true'] if any(p.startswith('scene.enabled') for p in bridge_params)
+        else []), source=source)
+    outcomes = []
+    try:
+        if not rig.spin_until(lambda: rig.start.get_subscription_count() > 0, 30):
+            raise RuntimeError('executor did not come up')
+        for _ in range(episodes):
+            rig.outcomes.clear()
+            rig.start.publish(Empty())
+            if not rig.spin_until(lambda: bool(rig.outcomes), 300):
+                outcomes.append(None)
+                break
+            outcomes.append(rig.outcomes[-1])
+    finally:
+        rig.close()
+    return outcomes
+
+
+def layout_params(layout):
+    box, bin_pose = layout['box'], layout['bin']
+    return ['scene.enabled=true', 'enable_rgbd_camera=true', f'scene.box.x={box[0]}',
+            f'scene.box.y={box[1]}', f'scene.box.yaw={box[2]}', f'scene.bin.x={bin_pose[0]}',
+            f'scene.bin.y={bin_pose[1]}', f'scene.bin.yaw={bin_pose[2]}']
+
+
+def describe(outcome):
+    return (f'success={outcome.success} {outcome.failure_code} retries={outcome.retries}; carry '
+            f'width {outcome.carry_width_min_m * 1000:.2f}..{outcome.carry_width_max_m * 1000:.2f}'
+            f' mm; alert "{outcome.carry_width_alert}"')
+
+
+def run_carry(args):
+    failures = []
+    if args.mode == 'normal':
+        runs = [(f'{source} bin layout {i}', layout_params(layout), source, 1)
+                for source in ('oracle', 'vision')
+                for i, layout in enumerate(make_layouts(args.count))]
+        runs.append(('vision legacy', ['enable_rgbd_camera=true'], 'vision', args.episodes))
+        for label, params, source, episodes in runs:
+            for k, outcome in enumerate(carry_episode(args, params, source, episodes)):
+                if outcome is None:
+                    failures.append(f'{label} episode {k}: no outcome')
+                    continue
+                print(f'{label} episode {k}: {describe(outcome)}', flush=True)
+                if outcome.carry_width_alert:
+                    failures.append(f'W1 {label} episode {k}: {outcome.carry_width_alert}')
+    else:
+        params = layout_params(make_layouts(1)[0]) + ['fault.drop_box_after_attach_s=3.0']
+        outcome = carry_episode(args, params, 'oracle')[0]
+        fault = FAULT_LINE.search(BRIDGE_LOG.read_text(errors='replace'))
+        executor_log = EXECUTOR_LOG.read_text(errors='replace')
+        alert = ALERT_LINE.search(executor_log)
+        print(f'fault at sim t={fault.group(1) if fault else None}; alert '
+              f'{alert.group(1).strip() if alert else None} at sim t='
+              f'{alert.group(2) if alert else None}', flush=True)
+        print(f'outcome: {describe(outcome) if outcome else None}', flush=True)
+        phases = re.findall(r'phase (\w+) -> (\w+)', executor_log)
+        print('phase sequence: ' + ' '.join(f'{a}>{b}' for a, b in phases), flush=True)
+        if not fault:
+            failures.append('W2 the bridge did not report the fault')
+        elif not alert:
+            failures.append('W2 no alert')
+        elif not (0.0 <= float(alert.group(2)) - float(fault.group(1)) <= 0.5):
+            failures.append(f'W2 alert {float(alert.group(2)) - float(fault.group(1)):.2f} s '
+                            'after the fault')
+        # The outcome keeps the LAST attempt, so after a retry its carry_width_min_m is the
+        # retry's; the injected attempt's lowest width is the one in its alert line.
+        lowest = re.search(r'CARRY_WIDTH_LOW: ([\d.]+) mm', executor_log)
+        if not lowest or float(lowest.group(1)) >= 34.0:
+            failures.append(f'W2 lowest width of the injected attempt '
+                            f'{lowest.group(1) if lowest else None} mm')
+    print('\nCARRY ACCEPTANCE:', 'PASS' if not failures else 'FAIL')
+    for failure in failures:
+        print('  ', failure)
+    return 0 if not failures else 1
+
+
 def run_episode(args):
     bridge_params = ['enable_rgbd_camera=true']
     if args.scene == 'bin':
@@ -1001,9 +1092,12 @@ def main():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('command',
-                        choices=['static', 'gaps', 'latch', 'place', 'verify', 'episode'])
+                        choices=['static', 'gaps', 'latch', 'place', 'verify', 'carry',
+                                 'episode'])
     parser.add_argument('--workspace', default=str(Path(__file__).resolve().parents[3]))
     parser.add_argument('--count', type=int, default=6)
+    parser.add_argument('--mode', choices=['normal', 'inject'], default='normal',
+                        help='carry: normal runs (W1) or the fault injection (W2, W3)')
     parser.add_argument('--require-success', action='store_true',
                         help='place: every layout must succeed (Stage 11 G1/G2)')
     parser.add_argument('--align-check', action='store_true',
@@ -1021,7 +1115,7 @@ def main():
                         help='gaps: box-to-bin gaps in mm')
     args = parser.parse_args()
     return {'static': run_static, 'gaps': run_gaps, 'latch': run_latch, 'place': run_place,
-            'verify': run_verify, 'episode': run_episode}[args.command](args)
+            'verify': run_verify, 'carry': run_carry, 'episode': run_episode}[args.command](args)
 
 
 if __name__ == '__main__':

@@ -39,3 +39,12 @@ float64[] target_tcp_z_m
 float64[] ik_position_error_m
 float64[] joint_tracking_error_rad
 float64[] actual_tcp_position_error_m
+
+# Gripper opening while the box was carried (attached, LIFT/PREPLACE/PLACE) in the LAST
+# attempt (Week 4.1 Stage 12). carry_width_alert is empty, or e.g. "CARRY_WIDTH_LOW: 2.1 mm <
+# 34.0 mm for 0.20 s in PREPLACE": the fingers closed past the box, which the bridge's
+# attachment latch does not notice. An alert does not change the outcome. Widths are NaN when
+# nothing was carried.
+string carry_width_alert
+float64 carry_width_min_m
+float64 carry_width_max_m
