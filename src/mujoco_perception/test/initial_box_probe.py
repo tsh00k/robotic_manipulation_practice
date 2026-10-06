@@ -312,10 +312,13 @@ def run_static(args):
                                 f'first {np.round(bad[0], 2).tolist()}')
             sim_to_measured = (t0 - stamp_ns(messages[0].header.stamp)) / 1e9
             worst = np.abs(errors).max(axis=0) if len(errors) else [float('nan')] * 4
+            times = np.array([m.processing_ms for m in messages
+                              if m.state == InitialBoxPose.MEASURED])
             print(f'{label}: MEASURED after {first_measured.frames_averaged} frames, '
                   f'{sim_to_measured:.2f} s sim / {wall_to_measured:.1f} s wall; {len(stable)} '
                   f'stable messages, worst |dx| {worst[0]:.2f} |dy| {worst[1]:.2f} '
-                  f'|dz| {worst[2]:.2f} mm, |dyaw| {worst[3]:.2f} deg; '
+                  f'|dz| {worst[2]:.2f} mm, |dyaw| {worst[3]:.2f} deg; averaging + detection '
+                  f'median {np.median(times):.1f} max {times.max():.1f} ms; '
                   f'{"OK" if not problems else "FAIL"}', flush=True)
             failures += [f'{label}: {p}' for p in problems]
         finally:
