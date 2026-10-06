@@ -160,7 +160,7 @@ URDF hand:=true 强制加 fer_ 前缀，跨库代码须显式映射。下表采�
 | 时间/frame | RGB、depth、两份 CameraInfo 共用物理步后仿真 stamp 与 camera_optical_frame |
 | 频率 | 相机 10 Hz、TF/observation 100 Hz、物理步长 0.002 s |
 
-反投影 `[(u-cx)z/fx,(v-cy)z/fy,z]` 后经静态 TF 转 world。相机消息与 BridgeObservation 按**完全相等 stamp（0 ns 容差）**配对，获取生命周期键并拒绝旧 generation，不能取各话题最新值拼接；estimator 配对的是深度图、深度相机信息、BridgeObservation 和机器人 TF，不再等待 RGB 及彩色相机信息（去掉后，旧路径 `object_pose` 在非附着深度帧上的发布比例由 62%、76% 变为 100%，丢帧原因未查，见 [Week 4.1 5.5.5](../Job_guides/my_study/week4.1.md#555-在线-episode-检查)）。相机 decimation 必须为 TF/observation decimation 整数倍。安装位置减轻 home 遮挡，但中心像素始终属于 box 不是不变量。
+反投影 `[(u-cx)z/fx,(v-cy)z/fy,z]` 后经静态 TF 转 world。相机消息与 BridgeObservation 按**完全相等 stamp（0 ns 容差）**配对，获取生命周期键并拒绝旧 generation，不能取各话题最新值拼接；estimator 配对的是深度图、深度相机信息、BridgeObservation 和机器人 TF，不再等待 RGB 及彩色相机信息（去掉后，旧路径 `object_pose` 在非附着深度帧上的发布比例由 62%、76% 变为 100%，丢帧原因未查，见 [Week 4.1 5.6.5](../Job_guides/my_study/week4.1.md#565-在线-episode-检查)）。相机 decimation 必须为 TF/observation decimation 整数倍。安装位置减轻 home 遮挡，但中心像素始终属于 box 不是不变量。
 
 ### 5.2 机器人掩膜与几何估计
 
