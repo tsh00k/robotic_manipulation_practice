@@ -30,6 +30,9 @@
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <manipulation_interfaces/msg/bridge_observation.hpp>
 #include <manipulation_interfaces/msg/episode_outcome.hpp>
+#include <manipulation_interfaces/msg/initial_bin_pose.hpp>
+#include <manipulation_interfaces/msg/initial_box_pose.hpp>
+#include <manipulation_interfaces/msg/initial_pose_latch.hpp>
 #include <manipulation_interfaces/msg/vision_object_pose.hpp>
 #include <manipulation_interfaces/srv/reset_scene.hpp>
 #include <rclcpp/rclcpp.hpp>
@@ -42,6 +45,7 @@
 #include "task_executor/keyframe_waypoint_source.hpp"
 #include "task_executor/observation_snapshot.hpp"
 #include "task_executor/phase.hpp"
+#include "task_executor/pose_latch.hpp"
 #include "task_executor/task_executor_config.hpp"
 #include "task_executor/waypoint_source.hpp"
 
@@ -74,8 +78,17 @@ public:
     } else {
       throw std::invalid_argument("waypoint_source must be diff_ik or keyframe");
     }
+    // Between the reset and the first admitted observation a vision executor waits for the
+    // initial pose to be latched, which takes longer than the 5 s that is right for a stalled
+    // stream; the oracle source keeps the plain watchdog.
+    std::optional<std::chrono::steady_clock::duration> awaiting_timeout;
+    if (config_.observation_source == ObservationSource::kVision) {
+      awaiting_timeout = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+        std::chrono::duration<double>(config_.latch.timeout_s));
+    }
     controller_ = std::make_unique<EpisodeController>(
-      *waypoint_source_, config_.fsm, diff_ik_source_.get());
+      *waypoint_source_, config_.fsm, diff_ik_source_.get(), std::chrono::seconds(5),
+      awaiting_timeout);
     RCLCPP_INFO(get_logger(), "waypoint source: %s", waypointModeName(config_.waypoint_mode));
     RCLCPP_INFO(
       get_logger(), "observation source: %s (vision confidence>=%.3f residual<=%.4fm inlier>=%.3f)",
@@ -89,6 +102,16 @@ public:
       config_.verification.box_target_x_m, config_.verification.box_target_y_m,
       config_.verification.radius_m, config_.allow_target_mismatch);
 
+    LatchParams box_latch_params;
+    box_latch_params.frames = config_.latch.frames;
+    box_latch_params.max_position_spread_m = config_.latch.max_position_spread_m;
+    box_latch_params.max_yaw_spread_rad = config_.latch.max_yaw_spread_rad;
+    box_latch_params.yaw_period_rad = M_PI / 2.0;  // a square box repeats every 90 degrees
+    LatchParams bin_latch_params = box_latch_params;
+    bin_latch_params.yaw_period_rad = M_PI;  // a rectangle repeats every 180 degrees
+    box_latch_ = std::make_unique<PoseLatch>(box_latch_params);
+    bin_latch_ = std::make_unique<PoseLatch>(bin_latch_params);
+
     joint_command_pub_ = create_publisher<trajectory_msgs::msg::JointTrajectory>(
       "/mujoco_bridge/joint_command", rclcpp::QoS(10));
     gripper_command_pub_ = create_publisher<control_msgs::msg::GripperCommand>(
@@ -101,6 +124,21 @@ public:
     vision_sub_ = create_subscription<manipulation_interfaces::msg::VisionObjectPose>(
       "/object_pose_estimator/object_pose", rclcpp::QoS(10),
       std::bind(&TaskExecutorNode::onVisionObservation, this, std::placeholders::_1));
+
+    initial_box_sub_ = create_subscription<manipulation_interfaces::msg::InitialBoxPose>(
+      "/object_pose_estimator/initial_box_pose", rclcpp::QoS(10),
+      [this](const manipulation_interfaces::msg::InitialBoxPose::SharedPtr msg) {
+        bindLatchToEpisode();
+        box_latch_->offer(latchSample(*msg));
+      });
+    initial_bin_sub_ = create_subscription<manipulation_interfaces::msg::InitialBinPose>(
+      "/object_pose_estimator/initial_bin_pose", rclcpp::QoS(10),
+      [this](const manipulation_interfaces::msg::InitialBinPose::SharedPtr msg) {
+        bindLatchToEpisode();
+        bin_latch_->offer(latchSample(*msg));
+      });
+    latch_pub_ = create_publisher<manipulation_interfaces::msg::InitialPoseLatch>(
+      "~/initial_pose_latch", rclcpp::QoS(10));
 
     // Private names, same reasoning as mujoco_bridge's ~/reset (architecture.md
     // 2.2): a capability of *this* node instance, not a system-wide singleton.
@@ -149,6 +187,119 @@ private:
     latest_vision_observation_ = msg;
   }
 
+  // The lifecycle the latches belong to: bind them to the controller's current session and
+  // generation, and drop everything from the one before. A retry has a new generation.
+  void bindLatchToEpisode()
+  {
+    const auto state = controller_->state();
+    if (state != EpisodeState::kAwaitingObservation && state != EpisodeState::kReady) {
+      return;
+    }
+    if (latch_bound_ && latch_session_ == controller_->bridgeSession() &&
+      latch_generation_ == controller_->generation())
+    {
+      return;
+    }
+    latch_bound_ = true;
+    latch_session_ = controller_->bridgeSession();
+    latch_generation_ = controller_->generation();
+    latch_failed_ = false;
+    attached_seen_ = false;
+    box_latch_->reset(latch_session_, latch_generation_);
+    bin_latch_->reset(latch_session_, latch_generation_);
+  }
+
+  void forgetLatch()
+  {
+    latch_bound_ = false;
+    latch_failed_ = false;
+    attached_seen_ = false;
+  }
+
+  template<typename Message>
+  static LatchSample latchSample(const Message & message)
+  {
+    LatchSample sample;
+    sample.bridge_session = message.bridge_session;
+    sample.generation = message.generation;
+    sample.sequence = message.sample_sequence;
+    sample.stamp_s = rclcpp::Time(message.header.stamp).seconds();
+    sample.measured = message.state == Message::MEASURED;
+    sample.reason = message.reason;
+    sample.x = message.position.x;
+    sample.y = message.position.y;
+    sample.z = message.position.z;
+    sample.yaw_rad = message.yaw_rad;
+    return sample;
+  }
+
+  bool latchComplete() const
+  {
+    return latch_bound_ && box_latch_->latched() &&
+           (!config_.latch.require_bin || bin_latch_->latched());
+  }
+
+  // After the box has been carried and released, the task needs where the box is NOW (to
+  // verify the drop), not where it started: that goes through the stream of fresh estimates.
+  bool verifyingAfterRelease(bool bridge_attached)
+  {
+    attached_seen_ = attached_seen_ || bridge_attached;
+    return attached_seen_ && !bridge_attached;
+  }
+
+  // Which of the objects the wait is still missing, and why, for the outcome.
+  std::string latchWaitReason() const
+  {
+    std::string reason;
+    if (!box_latch_->latched()) {reason += "BOX:" + box_latch_->status();}
+    if (config_.latch.require_bin && !bin_latch_->latched()) {
+      reason += (reason.empty() ? "" : " ") + std::string("BIN:") + bin_latch_->status();
+    }
+    return reason;
+  }
+
+  manipulation_interfaces::msg::LatchedPose latchedPoseMessage(
+    const PoseLatch & latch, bool required) const
+  {
+    manipulation_interfaces::msg::LatchedPose message;
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    message.required = required;
+    message.latched = latch.latched();
+    message.status = latch.status();
+    message.position.x = message.position.y = message.position.z = nan;
+    message.yaw_rad = message.position_spread_m = message.yaw_spread_rad = nan;
+    if (latch.pose()) {
+      const auto & pose = *latch.pose();
+      message.position.x = pose.x;
+      message.position.y = pose.y;
+      message.position.z = pose.z;
+      message.yaw_rad = pose.yaw_rad;
+      message.source_sequence = pose.sequence;
+      message.source_stamp = rclcpp::Time(static_cast<int64_t>(pose.stamp_s * 1e9));
+      message.position_spread_m = pose.position_spread_m;
+      message.yaw_spread_rad = pose.yaw_spread_rad;
+    }
+    return message;
+  }
+
+  void publishLatchStatus()
+  {
+    if (config_.observation_source != ObservationSource::kVision || !latch_bound_) {
+      return;
+    }
+    manipulation_interfaces::msg::InitialPoseLatch message;
+    message.header.stamp = get_clock()->now();
+    message.header.frame_id = "world";
+    message.bridge_session = latch_session_;
+    message.generation = latch_generation_;
+    message.state = latch_failed_ ? manipulation_interfaces::msg::InitialPoseLatch::FAILED :
+      (latchComplete() ? manipulation_interfaces::msg::InitialPoseLatch::LATCHED :
+      manipulation_interfaces::msg::InitialPoseLatch::WAITING);
+    message.box = latchedPoseMessage(*box_latch_, true);
+    message.bin = latchedPoseMessage(*bin_latch_, config_.latch.require_bin);
+    latch_pub_->publish(message);
+  }
+
   // Convert one bridge message and pass it through the controller's freshness gate.
   void collectObservation()
   {
@@ -163,24 +314,33 @@ private:
     if (!bridge) {return;}
     const bool bridge_attached = bridge->attachment_state ==
       manipulation_interfaces::msg::BridgeObservation::ATTACHMENT_ATTACHED;
+    if (config_.observation_source == ObservationSource::kVision) {
+      bindLatchToEpisode();
+    }
     if (config_.observation_source == ObservationSource::kOracle) {
       object_pose = bridge->object_pose;
-    } else if (bridge_attached) {
-      // Vision intentionally publishes nothing while the bridge owns the
-      // attachment. Reuse the last accepted visual pose with current robot state.
-      if (!last_accepted_vision_observation_ ||
-        last_accepted_vision_observation_->bridge_session != bridge->bridge_session ||
-        last_accepted_vision_observation_->generation != bridge->generation)
-      {
+    } else if (!verifyingAfterRelease(bridge_attached)) {
+      // Before the release the task works on the pose latched at the start of the episode,
+      // not on a stream that keeps changing. Until it is latched nothing is admitted, so the
+      // controller stays in its wait and sends no command.
+      if (!latchComplete()) {
         return;
       }
-      const auto vision = last_accepted_vision_observation_;
+      const auto & box = *box_latch_->pose();
       object_pose.header = bridge->joint_state.header;
       object_pose.header.frame_id = "world";
-      object_pose.pose = vision->pose;
-      confidence = vision->confidence;
-      residual_m = vision->residual_m;
-      state_reason = "BRIDGE_ATTACHMENT_ATTACHED";
+      object_pose.pose.position.x = box.x;
+      object_pose.pose.position.y = box.y;
+      object_pose.pose.position.z = box.z;
+      object_pose.pose.orientation.w = std::cos(box.yaw_rad / 2.0);
+      object_pose.pose.orientation.z = std::sin(box.yaw_rad / 2.0);
+      // The latch has no confidence or residual: the status message carries its quality.
+      confidence = std::numeric_limits<double>::quiet_NaN();
+      residual_m = std::numeric_limits<double>::quiet_NaN();
+      state_reason = "LATCHED";
+      last_observation_source_ = object_source;
+      last_observation_confidence_ = confidence;
+      last_observation_residual_m_ = residual_m;
     } else {
       if (!latest_vision_observation_) {return;}
       const auto vision = latest_vision_observation_;
@@ -347,6 +507,7 @@ private:
     last_observation_residual_m_ = 0.0;
     last_observation_rejected_ = false;
     observation_generation_logged_ = false;
+    forgetLatch();
     const auto actions = controller_->startEpisode(
       std::chrono::steady_clock::now(), get_clock()->now().seconds());
     executeActions(actions);
@@ -449,19 +610,36 @@ private:
         manipulation_interfaces::msg::BridgeObservation::ATTACHMENT_NOT_ATTACHED;
       observation_generation_logged_ = false;
       last_observation_rejected_ = false;
+      forgetLatch();  // a retry is a new generation: detect and latch again
       requestReset(*actions.reset_request);
     }
     // The controller emits this only once; publish after any same-tick target.
     if (actions.finished) {
+      EpisodeFinished finished = *actions.finished;
+      // A vision episode that never got past the wait, while the bridge was publishing for
+      // this generation, failed to latch the initial pose: say so (perception layer) instead
+      // of the generic stale observation.
+      if (!finished.success && finished.failure_code == "OBSERVATION_STALE" &&
+        config_.observation_source == ObservationSource::kVision && latch_bound_ &&
+        !latchComplete() && latest_observation_ &&
+        latest_observation_->generation == controller_->generation())
+      {
+        finished.failure_code = "VISION_LATCH_TIMEOUT";
+        last_observation_failure_reason_ = latchWaitReason();
+        latch_failed_ = true;
+        publishLatchStatus();
+      }
       // Keep the failure context in logs without changing the outcome value.
-      if (!actions.finished->success) {
+      if (!finished.success) {
         RCLCPP_ERROR(
           get_logger(), "episode %s: session=%" PRIu64 " expected generation=%" PRIu64
-          ", latest=%" PRIu64, actions.finished->failure_code.c_str(),
+          ", latest=%" PRIu64 "%s%s", finished.failure_code.c_str(),
           controller_->bridgeSession(), controller_->generation(),
-          latest_observation_ ? latest_observation_->generation : uint64_t{0});
+          latest_observation_ ? latest_observation_->generation : uint64_t{0},
+          last_observation_failure_reason_.empty() ? "" : " ",
+          last_observation_failure_reason_.c_str());
       }
-      publishEpisodeOutcome(*actions.finished);
+      publishEpisodeOutcome(finished);
     }
   }
 
@@ -469,6 +647,7 @@ private:
   void onTimer()
   {
     collectObservation();
+    publishLatchStatus();
     const auto actions = controller_->tick(
       get_clock()->now().seconds(), std::chrono::steady_clock::now());
     executeActions(actions);
@@ -491,7 +670,17 @@ private:
     observation_sub_;
   rclcpp::Subscription<manipulation_interfaces::msg::VisionObjectPose>::SharedPtr
     vision_sub_;
+  rclcpp::Subscription<manipulation_interfaces::msg::InitialBoxPose>::SharedPtr initial_box_sub_;
+  rclcpp::Subscription<manipulation_interfaces::msg::InitialBinPose>::SharedPtr initial_bin_sub_;
+  rclcpp::Publisher<manipulation_interfaces::msg::InitialPoseLatch>::SharedPtr latch_pub_;
   rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr start_episode_sub_;
+  std::unique_ptr<PoseLatch> box_latch_;
+  std::unique_ptr<PoseLatch> bin_latch_;
+  bool latch_bound_ = false;
+  uint64_t latch_session_ = 0;
+  uint64_t latch_generation_ = 0;
+  bool latch_failed_ = false;
+  bool attached_seen_ = false;
   manipulation_interfaces::msg::BridgeObservation::SharedPtr latest_observation_;
   manipulation_interfaces::msg::VisionObjectPose::SharedPtr latest_vision_observation_;
   manipulation_interfaces::msg::VisionObjectPose::SharedPtr last_accepted_vision_observation_;

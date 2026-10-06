@@ -53,6 +53,13 @@ TEST(TaskExecutorConfig, RejectsInvalidFsm)
   EXPECT_THROW(validateTaskExecutorConfig(config), std::invalid_argument);
 }
 
+TEST(TaskExecutorConfig, RejectsALatchThatCouldNeverBeBuilt)
+{
+  TaskExecutorConfig config;
+  config.latch.frames = 0;  // the latch would read from an empty run
+  EXPECT_THROW(validateTaskExecutorConfig(config), std::invalid_argument);
+}
+
 TEST(TaskExecutorConfig, RejectsUnmappedVerificationCriterion)
 {
   TaskExecutorConfig config;

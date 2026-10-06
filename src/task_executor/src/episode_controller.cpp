@@ -29,9 +29,11 @@ namespace task_executor
 // Return: a controller; no actions.
 EpisodeController::EpisodeController(
   const WaypointSource & waypoint_source, FsmParams fsm_params,
-  DiffIkWaypointSource * diff_ik_source, std::chrono::steady_clock::duration watchdog_timeout)
+  DiffIkWaypointSource * diff_ik_source, std::chrono::steady_clock::duration watchdog_timeout,
+  std::optional<std::chrono::steady_clock::duration> awaiting_observation_timeout)
 : waypoint_source_(waypoint_source), fsm_params_(std::move(fsm_params)),
-  diff_ik_source_(diff_ik_source), watchdog_timeout_(watchdog_timeout)
+  diff_ik_source_(diff_ik_source), watchdog_timeout_(watchdog_timeout),
+  awaiting_observation_timeout_(awaiting_observation_timeout.value_or(watchdog_timeout))
 {
 }
 
@@ -140,7 +142,7 @@ EpisodeActions EpisodeController::onObservation(
   // Check expiry before a late sample can refresh the watchdog.
   if ((state_ == EpisodeState::kReady && now - last_sample_at_ >= watchdog_timeout_) ||
     (state_ == EpisodeState::kAwaitingObservation &&
-    now - reset_started_at_ >= watchdog_timeout_))
+    now - reset_started_at_ >= awaiting_observation_timeout_))
   {
     return finishFromFailure("OBSERVATION_STALE");
   }
@@ -180,14 +182,14 @@ EpisodeActions EpisodeController::tickLifecycle(TimePoint wall_now)
   }
 
   // Ready watches sample freshness; earlier states time out from reset start.
+  const bool awaiting_observation = state_ == EpisodeState::kAwaitingObservation;
+  const auto wait_limit = awaiting_observation ? awaiting_observation_timeout_ : watchdog_timeout_;
   if (state_ == EpisodeState::kReady) {
     if (wall_now - last_sample_at_ >= watchdog_timeout_) {
       return finishFromFailure("OBSERVATION_STALE");
     }
-  } else if (wall_now - reset_started_at_ >= watchdog_timeout_) {
-    return finishFromFailure(
-      state_ == EpisodeState::kAwaitingObservation ?
-      "OBSERVATION_STALE" : "RESET_UNAVAILABLE");
+  } else if (wall_now - reset_started_at_ >= wait_limit) {
+    return finishFromFailure(awaiting_observation ? "OBSERVATION_STALE" : "RESET_UNAVAILABLE");
   }
 
   // Retry the same send intent until the adapter confirms submission.

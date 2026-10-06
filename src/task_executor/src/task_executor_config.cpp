@@ -77,6 +77,15 @@ TaskExecutorConfig loadTaskExecutorConfig(rclcpp::Node & node)
     "vision.max_residual_m", config.vision_max_residual_m);
   config.vision_min_inlier_ratio = node.declare_parameter(
     "vision.min_inlier_ratio", config.vision_min_inlier_ratio);
+  config.latch.frames = static_cast<std::size_t>(node.declare_parameter(
+      "latch.frames", static_cast<int>(config.latch.frames)));
+  config.latch.max_position_spread_m = node.declare_parameter(
+    "latch.max_position_spread_m", config.latch.max_position_spread_m);
+  config.latch.max_yaw_spread_rad = node.declare_parameter(
+    "latch.max_yaw_spread_deg", config.latch.max_yaw_spread_rad * 180.0 / M_PI) * M_PI / 180.0;
+  config.latch.timeout_s = node.declare_parameter("latch.timeout_s", config.latch.timeout_s);
+  config.latch.require_bin = node.declare_parameter(
+    "latch.require_bin", config.latch.require_bin);
   config.task.tcp_target_x_m = node.declare_parameter("target.place_x_m", 0.5);
   config.task.tcp_target_y_m = node.declare_parameter("target.place_y_m", 0.3);
   config.task.hover_height_m = node.declare_parameter("target.hover_height_m", 0.15);
@@ -130,6 +139,13 @@ void validateTaskExecutorConfig(const TaskExecutorConfig & config)
     config.vision_min_inlier_ratio < 0.0 || config.vision_min_inlier_ratio > 1.0)
   {
     throw std::invalid_argument("Vision observation quality thresholds are invalid");
+  }
+  if (config.latch.frames < 1 || !finite(config.latch.max_position_spread_m) ||
+    !finite(config.latch.max_yaw_spread_rad) || !finite(config.latch.timeout_s) ||
+    config.latch.max_position_spread_m <= 0.0 || config.latch.max_yaw_spread_rad <= 0.0 ||
+    config.latch.timeout_s <= 0.0)
+  {
+    throw std::invalid_argument("Initial pose latch configuration is invalid");
   }
   if (config.fsm.place_x_m != config.verification.box_target_x_m ||
     config.fsm.place_y_m != config.verification.box_target_y_m ||

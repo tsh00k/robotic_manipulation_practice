@@ -14,6 +14,8 @@
 
 #pragma once
 
+#include <cstddef>
+
 #include <rclcpp/node.hpp>
 
 #include "task_executor/cartesian_waypoint_source.hpp"
@@ -52,6 +54,20 @@ struct PlacementTask
   PickPlaceGeometry geometry() const;
 };
 
+// Waiting for the initial box (and bin) pose to be latched before an episode starts
+// (Week 4.1 Stage 7). Vision source only.
+struct InitialPoseLatchConfig
+{
+  std::size_t frames = 5;
+  double max_position_spread_m = 0.003;
+  double max_yaw_spread_rad = 0.0523598775598;  // 3 degrees
+  // Wall time from the reset to the latch; longer than the estimator needs (about 2.3 s).
+  double timeout_s = 10.0;
+  // Also wait for the bin. The default scene has no bin; the demo launch sets this with
+  // scene_enabled. From Stage 8 on the bin is always needed and this goes away.
+  bool require_bin = false;
+};
+
 struct TaskExecutorConfig
 {
   TaskExecutorConfig()
@@ -70,6 +86,7 @@ struct TaskExecutorConfig
   double vision_max_residual_m = 0.005;
   double vision_min_inlier_ratio = 0.7;
   bool allow_target_mismatch = false;
+  InitialPoseLatchConfig latch;
 };
 
 const char * waypointModeName(WaypointMode mode);

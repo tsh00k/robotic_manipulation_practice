@@ -29,6 +29,7 @@ add_executable(task_executor_node
   src/episode_telemetry.cpp
   src/episode_controller.cpp
   src/observation_snapshot.cpp
+  src/pose_latch.cpp
 )
 target_include_directories(task_executor_node PRIVATE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -118,6 +119,12 @@ if(BUILD_TESTING)
   target_link_libraries(test_observation_snapshot
     Eigen3::Eigen mujoco_bridge::grasp_criteria)
   ament_target_dependencies(test_observation_snapshot sensor_msgs geometry_msgs)
+
+  ament_add_gtest(test_pose_latch
+    test/test_pose_latch.cpp
+    src/pose_latch.cpp
+  )
+  target_include_directories(test_pose_latch PRIVATE include)
 
   ament_add_gtest(test_episode_controller
     test/test_episode_controller.cpp

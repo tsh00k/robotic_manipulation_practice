@@ -29,7 +29,7 @@
 
 默认使用 oracle 观测与 diff_ik waypoint，keyframe 保留对照。固定 oracle 场景曾通过回归；完整 vision 抓放尚未验收。
 
-当前 Stage 5 已简化为 bridge 权威附着、视觉暂停/释放重测与 executor 缓存准入，见 [Week 4 Stage 5](../Job_guides/my_study/week4.md#stage-5视觉接口收紧与简化状态机)。四包构建/测试通过；2026-10-03 修复抬升前附着循环依赖并补 LIFT 到位门，见 [ADR 012](adr/012-prelift-attachment-confirmation.md)。oracle 持续注入视觉拒绝的真实回归为 20/20 成功、零重试，两包 build/test 通过（工作区汇总 492 tests、0 errors、0 failures、71 skipped）；详情见 Week 4 Stage 5；当前接口 replay 和完整 vision episode 未执行。旧独立夹持与 TCP 预测实验只作为历史证据；[ADR 009](adr/009-robot-aware-stateful-vision.md)、[ADR 010](adr/010-grasp-conditioned-object-state.md)、[ADR 011](adr/011-vision-object-pose-contract-tightening.md) 保留当时决策快照，不能代替下文当前契约。原 Stage 6（可配置 bin 与运输监控）已废弃并回退，不在代码中，见 [Week 4 6.9](../Job_guides/my_study/week4.md#69-回退决定与存档) 与 [ADR 015](adr/015-rollback-stage6-perception-side-transport-diagnostics.md)；后续改动按 [Week 4.1](../Job_guides/my_study/week4.1.md) 的阶段计划逐个加入，每个阶段通过后再更新本页。Week 4.1 Stage 5、6 已加入初始 box 与 bin 检测（`~/initial_box_pose`、`~/initial_bin_pose`，见 [5.2](#52-机器人掩膜与几何估计) 末尾与 [5.3](#53-视觉消息与原因契约)，决策见 [ADR 018](adr/018-initial-box-detection-in-the-estimator.md)），估计器不再配对 RGB；executor 尚未消费它们（Stage 7 起）。MoveIt 规划与 learned policy 尚未完成。
+当前 Stage 5 已简化为 bridge 权威附着、视觉暂停/释放重测与 executor 缓存准入，见 [Week 4 Stage 5](../Job_guides/my_study/week4.md#stage-5视觉接口收紧与简化状态机)。四包构建/测试通过；2026-10-03 修复抬升前附着循环依赖并补 LIFT 到位门，见 [ADR 012](adr/012-prelift-attachment-confirmation.md)。oracle 持续注入视觉拒绝的真实回归为 20/20 成功、零重试，两包 build/test 通过（工作区汇总 492 tests、0 errors、0 failures、71 skipped）；详情见 Week 4 Stage 5；当前接口 replay 和完整 vision episode 未执行。旧独立夹持与 TCP 预测实验只作为历史证据；[ADR 009](adr/009-robot-aware-stateful-vision.md)、[ADR 010](adr/010-grasp-conditioned-object-state.md)、[ADR 011](adr/011-vision-object-pose-contract-tightening.md) 保留当时决策快照，不能代替下文当前契约。原 Stage 6（可配置 bin 与运输监控）已废弃并回退，不在代码中，见 [Week 4 6.9](../Job_guides/my_study/week4.md#69-回退决定与存档) 与 [ADR 015](adr/015-rollback-stage6-perception-side-transport-diagnostics.md)；后续改动按 [Week 4.1](../Job_guides/my_study/week4.1.md) 的阶段计划逐个加入，每个阶段通过后再更新本页。Week 4.1 Stage 5、6 已加入初始 box 与 bin 检测（`~/initial_box_pose`、`~/initial_bin_pose`，见 [5.2](#52-机器人掩膜与几何估计) 末尾与 [5.3](#53-视觉消息与原因契约)，决策见 [ADR 018](adr/018-initial-box-detection-in-the-estimator.md)），估计器不再配对 RGB；Stage 7 起 vision 来源的 executor 在 reset 后等这两个估计连续一致并锁存，抓取目标取自锁存的 box，见 [5.5](#55-任务观测来源与质量门)；place 目标仍是固定值（Stage 8）。MoveIt 规划与 learned policy 尚未完成。
 
 ## 2. 模型与场景
 
@@ -225,9 +225,11 @@ estimator 的 tryProcess 在当前 ATTACHED 时早退，正常 RGB-D 几何处�
 
 ### 5.5 任务观测来源与质量门
 
-observation_source 每 episode 唯一，默认 oracle。oracle 直接使用 bridge 物体真值，不受视觉 MEASURED/REJECTED 状态准入影响，但与 vision 共用附着和 FSM 阶段门。vision 消费 VisionObjectPose；关节/接触/TCP/宽度/附着仍来自 BridgeObservation。demo 的 vision 入口启动 estimator 与相机，不静默回退 oracle pose。
+observation_source 每 episode 唯一，默认 oracle。oracle 直接使用 bridge 物体真值，不受视觉 MEASURED/REJECTED 状态准入影响，但与 vision 共用附着和 FSM 阶段门。vision 在**释放之前**消费锁存的初始位姿（见下，Week 4.1 Stage 7），**释放之后**的核对消费 VisionObjectPose；关节/接触/TCP/宽度/附着仍来自 BridgeObservation。demo 的 vision 入口启动 estimator 与相机，不静默回退 oracle pose。
 
-非附着时，vision 与 bridge 的 session/generation/sequence 完全相等才配对，缓存有界并跳过已处理序号；只准入新的 MEASURED，且各质量指标必须有限：
+**初始位姿锁存（Week 4.1 Stage 7，vision 来源）。** 每次 reset（含重试，generation 变化）后，executor 订阅 `/object_pose_estimator/initial_box_pose` 与 `initial_bin_pose`，由纯规则类 `PoseLatch` 判定：最近 `latch.frames`=5 条连续 MEASURED 的 x、y 极差 ≤ `latch.max_position_spread_m`=3 mm、yaw 的圆周极差 ≤ `latch.max_yaw_spread_deg`=3°（box 以 90° 为周期、bin 以 180° 为周期）才锁存，锁存值是这几条里最新那条；非 MEASURED 的消息使累积清零；session 或 generation 不符、序号不递增的消息被忽略；锁存后到下一次 reset 前不变。锁存完成之前控制器停在“等待首个观测”，不进入 READY，所以不发任何关节命令；等待上限是 `latch.timeout_s`=10 s（墙钟，控制器的 awaiting-observation 超时，与 5 s 的数据流看门狗分开），超时的 outcome 是 `VISION_LATCH_TIMEOUT`（沿用 `VISION_` 开头归入感知层），失败原因写明还缺哪个对象及其状态（如 `BIN:WAITING:NO_RECTANGLE_MATCHES_BIN`）。`latch.require_bin`（默认 false，demo launch 随 `scene_enabled` 设置）决定是否也等 bin；默认场景没有 bin。锁存后，抓取前和搬运期的 box 位姿都取自锁存值（confidence、residual 为 NaN，质量在状态话题里），BridgeObservation 的 attachment_state 出现过 ATTACHED 又退出后才走下面的旧路径。bin 锁存了但目前没有人用：place 目标仍是固定值（Stage 8）。状态话题 `/task_executor/initial_pose_latch`（InitialPoseLatch，内含两个 LatchedPose）给出 WAITING / LATCHED / FAILED、各对象的锁存位姿、来源序号与时间戳、极差和未锁住的原因。
+
+**释放之后的核对与旧路径。** 非附着时，vision 与 bridge 的 session/generation/sequence 完全相等才配对，缓存有界并跳过已处理序号；只准入新的 MEASURED，且各质量指标必须有限：
 
 | 参数 | 通过条件 |
 | --- | --- |
@@ -237,7 +239,7 @@ observation_source 每 episode 唯一，默认 oracle。oracle 直接使用 brid
 
 质量失败记录 VISION_REJECTED 或 VISION_LOW_CONFIDENCE 诊断并等待，不直接结束 episode、不创建新 snapshot。持续没有可准入观测仍受 controller 的 steady-clock 新鲜度看门狗约束，可终止为 OBSERVATION_STALE；不能把等待写成无限重试或 FSM 恢复。
 
-ATTACHED 时要求同 session/generation 的最近已接受视觉样本存在，复用其位姿数值与当前 bridge 反馈。数值保持不变，不以 TCP 外推，不发布 PREDICTED，也不证明当前物体高度；内部上下文 BRIDGE_ATTACHMENT_ATTACHED 不是视觉 state_reason。退出附着清最近视觉、已接受缓存和已处理序号，等待新的质量合格 MEASURED。释放后 VERIFY 使用新测量落点，不使用运输缓存。
+ATTACHED 时（Stage 7 起）复用的是锁存的初始位姿而不是“最近已接受视觉样本”：数值保持不变，不以 TCP 外推，不发布 PREDICTED，也不证明当前物体高度。退出附着清最近视觉、已接受缓存和已处理序号，等待新的质量合格 MEASURED。释放后 VERIFY 使用新测量落点，不使用运输缓存、也不使用锁存值（它是初始位置，不是落点）。旧检测器对 bin 里的盒子仍拒绝，所以 bin 场景的 vision episode 在 VERIFY 以 OBSERVATION_STALE 结束，由 Stage 11 处理。
 
 EpisodeOutcome 记录来源、confidence、residual、失败层/原因；任务失败码与视觉 state_reason 属于不同接口。视觉质量门、附着门及 controller 准入共同决定是否推进，完整 vision 成功仍待集成验收。
 
@@ -292,6 +294,7 @@ FSM 默认位置/GRASP-CLOSE 位置/速度容差为 0.05 rad/0.3 rad/0.05 rad/s�
 | [Cartesian 回归](../Job_guides/my_study/week3.md#11-stage-ocartesian-任务几何与离线-ik-适配) / [编排回归](../Job_guides/my_study/week3.5.md#15-p5回归架构记录和收尾) | 固定 oracle 场景连续 20/20，不外推随机姿态、视觉或真机 |
 | [视觉验证](../Job_guides/my_study/week4.md#10-stage-4同帧机器人几何掩膜) | 掩膜/诊断基线、缺 TF、质量拒绝；完整视觉抓放未通过 |
 | [DepthWindow](../src/mujoco_perception/test/test_depth_window.cpp) / [初始 box 检测器](../src/mujoco_perception/test/test_initial_box_detector.cpp) / [初始 bin 检测器](../src/mujoco_perception/test/test_initial_bin_detector.cpp) / [InitialPoseEstimator](../src/mujoco_perception/test/test_initial_pose_estimator.cpp) | 单测在精确光线投射的合成场景上，答案由构造给出（相机与场景在 [workcell_camera.hpp](../src/mujoco_perception/test/workcell_camera.hpp)），共 24 项；场景固定，所以不测非法配置、不会出现的场景和相机分辨率变化。容差是像素量化界，不是调出来的（bin 的边长用检测器自己的 ±8 mm 规则） |
+| [PoseLatch 单测](../src/task_executor/test/test_pose_latch.cpp) / `initial_box_probe.py latch` | 前者覆盖连续一致才锁存、不一致或非 MEASURED 重新累积、其它 generation 与旧序号被忽略、yaw 按物体周期比较、锁存后不变；后者起真实 bridge + 估计器 + executor 核对：锁存前无关节命令、锁存值对真值、GRASP 目标取自锁存值、重新锁存、缺 bin 时的 `VISION_LATCH_TIMEOUT`。仿真 |
 | [initial_box_compare.py](../src/mujoco_perception/test/initial_box_compare.py) / [initial_box_probe.py](../src/mujoco_perception/test/initial_box_probe.py) | 前者在同一批录制帧上对照 C++ 与 Python 原型；后者起真实 bridge + estimator（+ executor）核对消息的状态、窗口计数与误差。验收规则写在各自的 docstring，在运行前写定；仿真，不代表真机 |
 | [当前简化接口测试](../Job_guides/my_study/week4.md#51-改动清单与验证结果) | 2026-10-03 四包 build/test 通过，tracker 11 项通过；工作区汇总 487 tests / 0 errors / 0 failures / 71 skipped（含既有其他包结果），非完整 vision 成功证据 |
 

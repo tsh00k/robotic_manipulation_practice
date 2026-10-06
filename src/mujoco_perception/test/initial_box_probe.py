@@ -46,6 +46,20 @@ gaps     Exploration, not judged (Week 4.1 6.3 E4): the bin at (0.5, 0.2) with y
          footprint (the bridge refuses less than 20 mm; 21 because 20 is the boundary itself).
          Prints, for box and bin, how many stable messages were MEASURED, the reason when not,
          the blocks the detector saw, and the errors when measured.
+latch    Week 4.1 Stage 7: bridge + estimator + executor (vision) with the box AND the bin in the
+         scene (the first random layout), two episodes started one after the other, and a third
+         run in a scene without a bin whose executor insists on one. Assertions, written before
+         the first run:
+           A1 for each generation, no joint command is published between the first latch
+              status of that generation and its LATCHED;
+           A2 the latched box and bin are within the S4 limits of the truth, and the TCP x, y
+              of the GRASP target in the executor log are within 1 mm of the latched box;
+           A3 (no bin in the scene, latch.require_bin:=true, latch.timeout_s:=8) the episode
+              ends with VISION_LATCH_TIMEOUT, failure layer "perception", a reason that names
+              the bin and not the box, and no joint command was published at all;
+           A4 the second episode latches under a new generation, from estimates that belong to
+              that generation (their sequence lies in the range of the bridge samples of that
+              generation), again with no command before LATCHED.
 episode  Bridge + estimator + executor with observation_source=vision, three episodes in a
          row, on the legacy scene (no bin; --scene bin adds the bin). Acceptance:
            E1 every episode ends in success with zero retries (the older detector path still
@@ -69,6 +83,7 @@ The bridge's poses are used to judge the result and are never given to a node un
 import argparse
 import math
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -77,7 +92,8 @@ from pathlib import Path
 
 import numpy as np
 import rclpy
-from manipulation_interfaces.msg import BridgeObservation, EpisodeOutcome, VisionObjectPose
+from manipulation_interfaces.msg import (
+    BridgeObservation, EpisodeOutcome, InitialPoseLatch, VisionObjectPose)
 try:
     from manipulation_interfaces.msg import InitialBinPose, InitialBoxPose
 except ImportError:  # a workspace from before Stage 5, used by `episode --baseline`
@@ -87,6 +103,7 @@ from manipulation_interfaces.srv import ResetScene
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Image
 from std_msgs.msg import Empty
+from trajectory_msgs.msg import JointTrajectory
 
 BEST_EFFORT = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, depth=50)
 XY_LIMIT_M = 0.003
@@ -116,12 +133,14 @@ def stamp_ns(stamp):
 class Rig:
     """Bridge + estimator (+ executor), started directly and always reaped."""
 
-    def __init__(self, workspace, bridge_params, with_executor, initial_box=True):
+    def __init__(self, workspace, bridge_params, with_executor, initial_box=True,
+                 executor_params=()):
         self.install = Path(workspace) / 'install'
         self.processes = []
         self.logs = []
         self.observations = []
         self.messages = []
+        self.events = []  # ('cmd',) and ('latch', message) in the order they arrived
         self.bin_messages = []
         self.object_poses = []
         self.depth_stamps = []
@@ -131,6 +150,12 @@ class Rig:
         self.node.create_subscription(
             BridgeObservation, '/mujoco_bridge/episode_observation',
             self.observations.append, 200)
+        self.node.create_subscription(
+            JointTrajectory, '/mujoco_bridge/joint_command',
+            lambda m: self.events.append(('cmd',)), 50)
+        self.node.create_subscription(
+            InitialPoseLatch, '/task_executor/initial_pose_latch',
+            lambda m: self.events.append(('latch', m)), 200)
         self.node.create_subscription(
             VisionObjectPose, '/object_pose_estimator/object_pose',
             self.object_poses.append, 200)
@@ -165,8 +190,10 @@ class Rig:
              {'LIBGL_ALWAYS_SOFTWARE': '1'}),
         ]
         if with_executor:
-            nodes.append(('task_executor', 'task_executor_node',
-                          sim_time + ['-p', 'observation_source:=vision'], {}))
+            executor_arguments = sim_time + ['-p', 'observation_source:=vision']
+            for item in executor_params:
+                executor_arguments += ['-p', item.replace('=', ':=', 1)]
+            nodes.append(('task_executor', 'task_executor_node', executor_arguments, {}))
         for package, name, arguments, env in nodes:
             log = open(f'/tmp/initial_box_probe_{package}.log', 'w')
             self.logs.append(log)
@@ -391,6 +418,137 @@ def run_gaps(args):
     return 0 if not failures else 1
 
 
+GRASP_LINE = re.compile(
+    r'phase GRASP target_frame=world tcp_xyz=\[([-\d.]+) ([-\d.]+) ([-\d.]+)\]')
+EXECUTOR_LOG = Path('/tmp/initial_box_probe_task_executor.log')
+
+
+def grasp_targets():
+    """Return the TCP targets of every GRASP phase the executor has logged so far."""
+    if not EXECUTOR_LOG.exists():
+        return []
+    return [tuple(float(v) for v in m.groups())
+            for m in GRASP_LINE.finditer(EXECUTOR_LOG.read_text(errors='replace'))]
+
+
+def statuses(rig, generation):
+    return [(i, e[1]) for i, e in enumerate(rig.events)
+            if e[0] == 'latch' and e[1].generation == generation]
+
+
+def check_generation(rig, generation, truth_box, truth_bin, label):
+    """A1, A2 (latched poses against truth) and A4's generation bookkeeping for one generation."""
+    problems = []
+    found = statuses(rig, generation)
+    latched = [(i, m) for i, m in found if m.state == InitialPoseLatch.LATCHED]
+    if not latched:
+        last = found[-1][1].box.status if found else 'none'
+        return [f'{label}: never LATCHED (last status: {last})']
+    first_status, first_latched = found[0][0], latched[0][0]
+    commands = [i for i in range(first_status, first_latched) if rig.events[i][0] == 'cmd']
+    if commands:
+        problems.append(f'{label} A1 {len(commands)} joint commands between the first status and '
+                        f'LATCHED')
+    message = latched[0][1]
+    for name, pose, truth in (('box', message.box, truth_box), ('bin', message.bin, truth_bin)):
+        errors = pose_errors(pose, truth)
+        if not within_limits(errors, truth):
+            problems.append(f'{label} A2 latched {name} outside the limits: '
+                            f'{[round(e, 2) for e in errors]}')
+    own = [o.sample_sequence for o in rig.observations if o.generation == generation]
+    for name, pose in (('box', message.box), ('bin', message.bin)):
+        if not (min(own) <= pose.source_sequence <= max(own)):
+            problems.append(f'{label} A4 the latched {name} estimate has sequence '
+                            f'{pose.source_sequence}, outside this generation\'s samples '
+                            f'{min(own)}..{max(own)}')
+    box_msg, bin_msg = message.box, message.bin
+    print(f'    {label}: LATCHED after {len(found)} status messages; box spread '
+          f'{box_msg.position_spread_m * 1000:.2f} mm {math.degrees(box_msg.yaw_spread_rad):.2f} '
+          f'deg, bin spread {bin_msg.position_spread_m * 1000:.2f} mm '
+          f'{math.degrees(bin_msg.yaw_spread_rad):.2f} deg; commands before LATCHED: '
+          f'{len(commands)}', flush=True)
+    return problems
+
+
+def run_latch(args):
+    failures = []
+    layout = make_layouts(1)[0]
+    box, bin_pose = layout['box'], layout['bin']
+    print(f'layout: box ({box[0]:.3f}, {box[1]:.3f}, {math.degrees(box[2]):.1f}), bin '
+          f'({bin_pose[0]:.3f}, {bin_pose[1]:.3f}, {math.degrees(bin_pose[2]):.1f})', flush=True)
+    if EXECUTOR_LOG.exists():
+        EXECUTOR_LOG.unlink()
+    rig = Rig(args.workspace, [
+        'scene.enabled=true', 'enable_rgbd_camera=true', f'scene.box.x={box[0]}',
+        f'scene.box.y={box[1]}', f'scene.box.yaw={box[2]}', f'scene.bin.x={bin_pose[0]}',
+        f'scene.bin.y={bin_pose[1]}', f'scene.bin.yaw={bin_pose[2]}'], True,
+        executor_params=['latch.require_bin=true'])
+    try:
+        if not rig.spin_until(lambda: rig.start.get_subscription_count() > 0, 30):
+            raise RuntimeError('executor did not come up')
+        generations = []
+        for episode in (1, 2):
+            rig.start.publish(Empty())
+            ok = rig.spin_until(lambda: len(grasp_targets()) >= episode, 180)
+            generation = max(o.generation for o in rig.observations)
+            generations.append(generation)
+            label = f'episode {episode} (generation {generation})'
+            if not ok:
+                failures.append(f'{label}: no GRASP phase within 180 s')
+                continue
+            first = next(o for o in rig.observations if o.generation == generation)
+            problems = check_generation(rig, generation, box_truth(first), bin_truth(bin_pose),
+                                        label)
+            latched = [m for _, m in statuses(rig, generation)
+                       if m.state == InitialPoseLatch.LATCHED]
+            target = grasp_targets()[episode - 1]
+            if latched:
+                miss = 1000.0 * max(abs(target[0] - latched[0].box.position.x),
+                                    abs(target[1] - latched[0].box.position.y))
+                print(f'    {label}: GRASP target ({target[0]:.4f}, {target[1]:.4f}) differs '
+                      f'from the latched box by {miss:.3f} mm', flush=True)
+                if miss > 1.0:
+                    problems.append(f'{label} A2 the GRASP target differs from the latched box '
+                                    f'by {miss:.2f} mm')
+            failures += problems
+        if len(set(generations)) != 2:
+            failures.append(f'A4 the two episodes used generations {generations}')
+    finally:
+        rig.close()
+
+    print('no-bin scene, latch.require_bin:=true, latch.timeout_s:=8', flush=True)
+    rig = Rig(args.workspace, ['enable_rgbd_camera=true'], True,
+              executor_params=['latch.require_bin=true', 'latch.timeout_s=8.0'])
+    try:
+        if not rig.spin_until(lambda: rig.start.get_subscription_count() > 0, 30):
+            raise RuntimeError('executor did not come up')
+        rig.start.publish(Empty())
+        if not rig.spin_until(lambda: bool(rig.outcomes), 60):
+            failures.append('A3 no outcome within 60 s')
+        else:
+            outcome = rig.outcomes[-1]
+            commands = sum(1 for e in rig.events if e[0] == 'cmd')
+            print(f'    outcome: success={outcome.success} failure_code={outcome.failure_code} '
+                  f'layer={outcome.observation_failure_layer} '
+                  f'reason="{outcome.observation_failure_reason}"; joint commands: {commands}',
+                  flush=True)
+            if outcome.success or outcome.failure_code != 'VISION_LATCH_TIMEOUT':
+                failures.append(f'A3 failure code {outcome.failure_code}')
+            if outcome.observation_failure_layer != 'perception':
+                failures.append(f'A3 failure layer {outcome.observation_failure_layer}')
+            reason = outcome.observation_failure_reason
+            if not reason.startswith('BIN:WAITING:') or 'BOX:' in reason:
+                failures.append(f'A3 the reason should name the bin only: "{reason}"')
+            if commands:
+                failures.append(f'A3 {commands} joint commands were published')
+    finally:
+        rig.close()
+    print('\nLATCH ACCEPTANCE:', 'PASS' if not failures else 'FAIL')
+    for failure in failures:
+        print('  ', failure)
+    return 0 if not failures else 1
+
+
 def run_episode(args):
     bridge_params = ['enable_rgbd_camera=true']
     if args.scene == 'bin':
@@ -475,7 +633,7 @@ def run_episode(args):
 def main():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('command', choices=['static', 'gaps', 'episode'])
+    parser.add_argument('command', choices=['static', 'gaps', 'latch', 'episode'])
     parser.add_argument('--workspace', default=str(Path(__file__).resolve().parents[3]))
     parser.add_argument('--count', type=int, default=6)
     parser.add_argument('--episodes', type=int, default=3)
@@ -488,7 +646,8 @@ def main():
     parser.add_argument('--gaps', type=float, nargs='*', default=[21, 40, 60, 80],
                         help='gaps: box-to-bin gaps in mm')
     args = parser.parse_args()
-    return {'static': run_static, 'gaps': run_gaps, 'episode': run_episode}[args.command](args)
+    return {'static': run_static, 'gaps': run_gaps, 'latch': run_latch,
+            'episode': run_episode}[args.command](args)
 
 
 if __name__ == '__main__':

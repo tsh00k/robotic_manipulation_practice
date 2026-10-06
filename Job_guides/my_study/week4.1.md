@@ -1247,12 +1247,78 @@ bin 在 (0.5, 0.2)、yaw 0；box yaw 0 在 bin 的相机一侧。**间距用的�
 
 ## Stage 7：初始位姿锁存
 
-**出口：** reset 后 executor 等待多帧一致的 box 与 bin，锁存；任务目标取自锁存值；重试时重新检测并重新锁存。
+**状态（2026-10-06）：已完成，尚未提交。** 7.0、7.1 是实现之前写定的，没有改动；偏差在 7.3 记录。验证是仿真的：单测、在线两个连续 episode 加一个缺 bin 的 episode、旧场景 3 个 vision episode。**分量：轻。**
 
-- **范围：** executor 的锁存逻辑和一个只读状态出口（来源、序号、stamp、质量）。不改 IK 与任务目标本身。
-- **需要在开始前设计的点：** “多帧一致”的判据（用 Stage 3 的误差分布定，例如 x、y 在几毫米内、yaw 在几度内连续若干帧）；等待超时的 outcome；重试时盒子可能被推动，所以失败的抓取之后要重新检测；锁存与基线的“ATTACHED 期间复用最后一次合格位姿”如何统一。
-- **验收要点：** reset → 等待（无默认原点目标）→ 锁存（来源与序号可读）；box 与 bin 不要求同帧，但必须同生命周期；缺 box 或 bin 时等待并给出明确失败层，不回退配置；旧 generation 的帧不锁存；executor 参数中没有 `scene.*`。
-- **前置：** Stage 5、6。
+### 7.0 一句话总结（目标）
+
+视觉模式下，reset 之后 executor 等 box（和需要时的 bin）的估计**连续多帧一致**后锁存，抓取前和搬运期的 box 位姿取自锁存值，不再逐帧跟着旧话题更新；重试换新的 generation 后重新等待、重新锁存；等不到就以明确的感知层失败结束，不退回任何默认位置。释放后的核对（VERIFY）仍走旧路径，因为它要的是“box 现在在哪”，初始位置不能拿来验收落点（Stage 11 替换它）。**不改 IK 和任务目标本身**：bin 锁存了但还没有人用，place 目标仍是固定值（Stage 8）。
+
+### 7.1 设计与出口断言（实现前写定，不因结果改动）
+
+**锁存规则（`PoseLatch`，纯规则类，不依赖 ROS）：** 取最近 5 条连续的 MEASURED 消息；其中 x、y 的极差都 ≤ 3 mm，yaw 的圆周极差 ≤ 3°（box 以 90° 为周期，bin 以 180° 为周期），就锁存**最新**那条的位姿（来源序号和时间戳因此是单条消息的，可追溯）；任何一条非 MEASURED 的消息使累积清零；session 或 generation 与当前 episode 不符的消息、序号不递增的消息被忽略，不计入也不打断；一旦锁存，到下一次 reset 之前不再改变。数字来源：3 mm 约一个像素（Stage 5、6 的在线限），Stage 5、6 在线估计的最大偏差是 1.3 mm、yaw 0.08°，噪声够不到它；yaw 3° 远小于 Stage 2 的 30° 容差。
+
+**等待与超时：** 等待期间控制器不进入 READY，所以不会发出任何关节命令（“无默认原点目标”是控制器已有的行为，不是新代码）。等待上限是新参数 `latch.timeout_s`（默认 10 s 墙钟；估计器从复位到能给出 5 条一致消息约 2.3 s 墙钟）。超时的 outcome 是 `VISION_LATCH_TIMEOUT`，沿用以 `VISION_` 开头归入“感知层”的约定，原因里写明是 box 还是 bin 没锁住以及检测器的拒绝原因。
+
+**bin 是否必需：** 参数 `latch.require_bin`，默认 false；launch 里随 `scene_enabled` 设置。默认场景里没有 bin，无条件要求锁到 bin 会使旧场景的视觉 episode 永远等不到。Stage 8 起 bin 是必需的，这个参数到时失去意义。
+
+**状态出口：** 新话题 `~/initial_pose_latch`（`InitialPoseLatch`），给出 WAITING / LATCHED / FAILED、box 与 bin 各自的锁存位姿、来源序号和时间戳、极差，以及没锁住时的原因。
+
+| 编号 | 条件 | 预期 | 否定条件（任一出现即不通过） |
+| --- | --- | --- | --- |
+| A1 | 在线：bridge + 估计器 + executor（vision，scene 开，box 与 bin 随机），一个 episode | 状态先 WAITING 后 LATCHED，10 s 墙钟内；**LATCHED 之前没有任何关节命令** | LATCHED 之前出现关节命令 |
+| A2 | 同上 | 锁存的 box 与 bin 与真值比：x、y ≤ 3 mm，z ≤ 2 mm，yaw box ≤ 5°、bin ≤ 3°；executor 日志里 GRASP 阶段的 TCP x、y 与锁存的 box x、y 相差 ≤ 1 mm（任务目标取自锁存值，不是别处） | 任何一项超限 |
+| A3 | 在线：bridge 没有 bin（scene 关），executor 的 `latch.require_bin:=true`、`latch.timeout_s:=8` | episode 以 `VISION_LATCH_TIMEOUT` 结束，`observation_failure_layer` 为 perception，原因点名 bin 和检测器的拒绝原因；**整个过程没有任何关节命令** | 成功、`OBSERVATION_STALE`、别的失败码，或出现关节命令 |
+| A4 | 在线：同一次运行里连续第二个 episode | 状态显示新 generation，由新 generation 的消息锁存（来源序号大于上一个 episode 的），同样先等待后锁存，且 LATCHED 之前没有关节命令 | 用了旧 generation 的消息，或沿用上一次的锁存 |
+| A5 | 旧场景（scene 关，`require_bin` 默认 false）vision episode 3 个 | 3/3 成功、零重试 | 任一失败 |
+
+单测（不依赖 ROS）：连续 5 条一致才锁存；中间一条不一致或非 MEASURED 则重新累积；其它 generation、旧序号的样本被忽略；yaw 在折叠边界两侧（−44° 与 +44°，box）算一致；锁存后不再改变，reset 后清空；控制器等待观测的超时可以单独配置。
+
+### 7.2 改动清单
+
+| 文件 | 内容 |
+| --- | --- |
+| [pose_latch.hpp](../../src/task_executor/include/task_executor/pose_latch.hpp) / [.cpp](../../src/task_executor/src/pose_latch.cpp) | `PoseLatch`：纯规则类，规则见 7.1；yaw 的极差按物体的周期取“最小包含弧” |
+| [episode_controller.hpp](../../src/task_executor/include/task_executor/episode_controller.hpp) / [.cpp](../../src/task_executor/src/episode_controller.cpp) | 构造函数新增可选的 `awaiting_observation_timeout`：只替换“reset 响应到首个观测”这一段的超时，数据流看门狗仍是 5 s |
+| [task_executor_config.hpp](../../src/task_executor/include/task_executor/task_executor_config.hpp) / [.cpp](../../src/task_executor/src/task_executor_config.cpp) | `latch.frames`、`latch.max_position_spread_m`、`latch.max_yaw_spread_deg`、`latch.timeout_s`、`latch.require_bin` |
+| [task_executor_node.cpp](../../src/task_executor/src/task_executor_node.cpp) | 订阅两个初始位姿话题并喂给两个锁存；vision 来源在释放之前用锁存的 box 位姿，释放之后走原来的“等新 MEASURED”路径；每个 reset 或重试丢掉旧锁存；超时改写为 `VISION_LATCH_TIMEOUT`；发布 `~/initial_pose_latch` |
+| [InitialPoseLatch.msg](../../src/manipulation_interfaces/msg/InitialPoseLatch.msg)、[LatchedPose.msg](../../src/manipulation_interfaces/msg/LatchedPose.msg) | 状态出口：每个对象的状态、锁存位姿、来源序号和时间戳、极差 |
+| [demo.launch.py](../../src/mujoco_bridge/launch/demo.launch.py) | `latch.require_bin` 随 `scene_enabled` |
+| 测试与工具 | [test_pose_latch.cpp](../../src/task_executor/test/test_pose_latch.cpp)（4 项）；控制器测试加了等待超时一段；配置测试加 1 项；[initial_box_probe.py](../../src/mujoco_perception/test/initial_box_probe.py) 加 `latch` 命令 |
+
+oracle 来源的行为没有变（连看门狗也是原来的 5 s）；`VisionObjectPose` 和旧话题没有动。
+
+### 7.3 验证结果
+
+**单测：** executor 包 233 项、0 失败；`PoseLatch` 4 项（连续一致才锁存且锁存最新一条并保持、不一致或非 MEASURED 则重新累积、其它 generation 与旧序号被忽略且不打断、yaw 在折叠边界两侧按周期比较并区分 box 与 bin 的周期）。bridge 包 217 项也通过（launch 守卫测试覆盖了 launch 的改动）。
+
+**在线（`initial_box_probe.py latch`，第一个随机布局：box (0.461, −0.141, 84.3°)，bin (0.569, 0.198, 94.1°)）：**
+
+| 编号 | 结果 | 与预期对照 |
+| --- | --- | --- |
+| A1 | 两个 episode 在第一条状态消息与 LATCHED 之间的关节命令都是 **0** 条 | 满足 |
+| A2 | 两个 episode 锁存的 box 与 bin 都在限内（x、y 3 mm，z 2 mm，yaw box 5°、bin 3°；探针只报告是否超限，没有打印具体误差）；GRASP 目标的 TCP x、y 与锁存的 box 相差 **0.023 mm**（两个 episode 相同）；锁存时的极差：box 0.01 mm 和 0.14 mm，yaw 0.00°，bin 0.00 mm | 满足 |
+| A3 | 没有 bin 的场景：`success=False`，`failure_code=VISION_LATCH_TIMEOUT`，层 `perception`，原因 `BIN:WAITING:NO_RECTANGLE_MATCHES_BIN`（没有 `BOX:`），整个过程 **0** 条关节命令 | 满足 |
+| A4 | 第二个 episode 是 generation 2；锁存的 box、bin 估计的序号都落在 generation 2 自己的 bridge 样本序号范围内；锁存前同样 0 条命令 | 满足 |
+| A5 | 旧场景（scene 关，`require_bin` 默认 false）3 个 vision episode 都成功、零重试；释放后新检测的 box 仍在 (0.498, 0.294, 0.241) | 满足 |
+
+**与预期的出入：** 7.1 里我写“估计器从复位到能给出 5 条一致消息约 2.3 s 墙钟”，实测从等待开始到 LATCHED 是 67~70 条状态消息（20 Hz），约 **3.4 s 墙钟**，估计偏低；10 s 的上限不受影响，判定不变。
+
+### 7.4 你没问但值得注意的
+
+- **（E 可测试性）锁存之后不再复查，盒子被碰动了也不知道。** Stage 2 已经发现抓取时夹爪会推动盒子（x 方向）；锁存值是抓取前的位置，从 PREGRASP 到 GRASP 之间没有任何重新检测，这正是 ADR 016 选择的取舍。盒子被碰歪的后果会表现为打滑或抓空，由 FSM 重试，重试换新的 generation，节点会丢掉旧锁存重新等。**这条重试路径没有在线验证过：** A4 用的是“重新开始一个 episode”，两条路径都走 `forgetLatch()` 和 generation 绑定，但这几次运行里没有发生过 FSM 触发的重试；而且 reset 恢复的是同一个布局，所以第二个 episode 锁到的位姿与第一个相同，A4 验证的是 generation 的记账，不是“场景变了能重新检测到”。
+- **（E 可测试性）仿真深度没有帧间噪声，所以锁存的一致性判据在线上从未被触发。** 在线锁存时的极差只有 0.00~0.14 mm；3 mm、3° 的阈值只被单测里手造的不一致样本检验过，没有被真实噪声检验过，与 Stage 5 的多帧平均是同一个局限。
+- **（C 可观测性）`VISION_LATCH_TIMEOUT` 是在结束时推断的。** 控制器只知道“等首个观测超时”（`OBSERVATION_STALE`）；节点在这个失败码出现、锁存未完成、且 bridge 在发这个 generation 的样本时把它改写成锁存超时。如果 bridge 在第一条样本之后停了，同样的条件也成立，会被误标成锁存超时；这里没有区分的手段。
+- **（C 可观测性）锁存的 episode 的 `observation_confidence` 和 `observation_residual_m` 是 NaN。** 仓库里除了这个节点自己没有人读它们；仓库之外的消费者如果假设有限值，要先看这条。锁存的质量在 `~/initial_pose_latch` 里。
+
+### 7.5 本阶段边界与后续
+
+做完了：锁存规则、等待与超时、状态出口、vision 来源释放前用锁存的 box 位姿、重试与新 episode 时丢掉旧锁存、旧场景回归。
+
+**没有做，有意推迟：** bin 锁存了但没有人用，place 目标与支撑高度取自锁存的 bin 是 Stage 8；锁存的 box yaw 也还没有人用，`grasp_yaw` 是 Stage 9；释放后的 VERIFY 仍用旧路径，bin 场景下的 vision episode 因此仍在 VERIFY 以 `OBSERVATION_STALE` 结束，是 Stage 11 的事。`latch.require_bin` 是过渡的参数，Stage 8 起 bin 总是必需的，到时删掉。
+
+**没有验证：** 真实噪声下的一致性判据；FSM 触发的重试之后重新锁存；盒子在两次锁存之间真的移动了；锁存超时在 bridge 中途停止时的归因；bin 场景下抓取以外的阶段。
+
+**验证精简的落实：** 单测 4 项加配置 1 项，没有变异检查，没有基线构建；在线检查扩展了现有探针。executor 包的整包测试跑了两轮（第一轮是 4 处 lint 加一个我自己算错的测试期望，修完先用 `ament_uncrustify`、`ament_cpplint` 在本地看过，第二轮干净）；探针的 docstring 风格（pep257）漏了一处，在三个包一起跑时才发现，又单独检查了一次。前置满足，进入 Stage 8（place 目标取自锁存 bin）。
 
 ## Stage 8：place 目标与支撑高度取自锁存 bin
 

@@ -114,10 +114,15 @@ class EpisodeController
 public:
   using TimePoint = std::chrono::steady_clock::time_point;
 
+  // watchdog_timeout bounds every wait. awaiting_observation_timeout, when given, replaces it
+  // for the wait between the reset response and the first admitted observation only: a vision
+  // executor first waits for the initial pose to be latched (Week 4.1 Stage 7), which takes
+  // longer than the 5 s that is right for a stalled stream.
   explicit EpisodeController(
     const WaypointSource & waypoint_source, FsmParams fsm_params = {},
     DiffIkWaypointSource * diff_ik_source = nullptr,
-    std::chrono::steady_clock::duration watchdog_timeout = std::chrono::seconds(5));
+    std::chrono::steady_clock::duration watchdog_timeout = std::chrono::seconds(5),
+    std::optional<std::chrono::steady_clock::duration> awaiting_observation_timeout = {});
 
   // Starts a new episode, including when an earlier episode is still active.
   // The same request id is offered on each pending tick until acknowledged.
@@ -166,6 +171,7 @@ private:
   FsmParams fsm_params_;
   DiffIkWaypointSource * diff_ik_source_;
   const std::chrono::steady_clock::duration watchdog_timeout_;
+  const std::chrono::steady_clock::duration awaiting_observation_timeout_;
   EpisodeState state_ = EpisodeState::kIdle;
   Phase phase_ = Phase::kHome;
   uint64_t request_id_ = 0;

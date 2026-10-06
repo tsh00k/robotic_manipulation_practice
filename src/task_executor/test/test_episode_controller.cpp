@@ -320,6 +320,35 @@ TEST(EpisodeController, TimeoutsBelongToTheCurrentEpisodeState)
   ASSERT_TRUE(stale.finished.has_value());
   EXPECT_EQ(stale.finished->failure_code, "OBSERVATION_STALE");
 
+  // A longer wait before the first observation does not lengthen the stream watchdog.
+  EpisodeController patient(
+    source, {}, nullptr, std::chrono::seconds(5), std::chrono::seconds(12));
+  const auto patient_start = patient.startEpisode(now);
+  ASSERT_TRUE(patient.onResetRequestSent(patient_start.reset_request->request_id));
+  ASSERT_TRUE(
+    patient.onResetResponse(
+      patient_start.reset_request->request_id, ResetReceipt{true, 7, 4}).empty());
+  EXPECT_TRUE(patient.tick(0.0, now + std::chrono::seconds(11)).empty());
+  const auto patient_stale = patient.tick(0.0, now + std::chrono::seconds(12));
+  ASSERT_TRUE(patient_stale.finished.has_value());
+  EXPECT_EQ(patient_stale.finished->failure_code, "OBSERVATION_STALE");
+  EXPECT_TRUE(
+    patient.onObservation(observation(4, 1), now + std::chrono::seconds(20)).diagnostics.empty())
+    << "a finished episode is not revived by a late observation";
+
+  EpisodeController patient_ready(
+    source, {}, nullptr, std::chrono::seconds(5), std::chrono::seconds(12));
+  const auto patient_ready_start = patient_ready.startEpisode(now);
+  ASSERT_TRUE(patient_ready.onResetRequestSent(patient_ready_start.reset_request->request_id));
+  ASSERT_TRUE(
+    patient_ready.onResetResponse(
+      patient_ready_start.reset_request->request_id, ResetReceipt{true, 7, 4}).empty());
+  const auto admitted =
+    patient_ready.onObservation(observation(4, 10), now + std::chrono::seconds(9));
+  ASSERT_EQ(admitted.diagnostics.size(), 1u);
+  const auto patient_stream_stale = patient_ready.tick(0.0, now + std::chrono::seconds(14));
+  ASSERT_TRUE(patient_stream_stale.finished.has_value()) << "the 5 s stream watchdog still applies";
+
   EpisodeController ready(source);
   const auto ready_start = ready.startEpisode(now);
   ASSERT_TRUE(ready.onResetRequestSent(ready_start.reset_request->request_id));
