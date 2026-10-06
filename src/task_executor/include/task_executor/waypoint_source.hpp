@@ -36,6 +36,16 @@ struct ObjectPose
   double qz = 0.0;
 };
 
+// Where the box is to be put down: the centre of the support surface (world x, y) and its
+// height, which is the table top without a bin and the bin's inner floor with one
+// (Week 4.1 Stage 8). The defaults are the legacy scene's fixed place marker on the table.
+struct PlaceTarget
+{
+  double x = 0.5;
+  double y = 0.3;
+  double support_z = 0.22;
+};
+
 // What one phase commands: the 7 arm joints (joint1..joint7, mujoco_bridge's own
 // order) plus the gripper's total finger-to-finger opening in meters -- the same
 // two-part split as mujoco_bridge's ~/joint_command vs ~/gripper_command (Stage H).
@@ -53,7 +63,8 @@ class WaypointSource
 public:
   virtual ~WaypointSource() = default;
 
-  virtual JointTarget jointTargetFor(Phase phase, const ObjectPose & object_pose) const = 0;
+  virtual JointTarget jointTargetFor(
+    Phase phase, const ObjectPose & object_pose, const PlaceTarget & place) const = 0;
 };
 
 }  // namespace task_executor

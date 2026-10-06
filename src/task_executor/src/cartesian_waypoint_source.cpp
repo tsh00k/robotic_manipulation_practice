@@ -43,9 +43,7 @@ Eigen::Isometry3d downwardPose(double x, double y, double z, double tool_yaw_rad
 PickPlaceCartesianWaypointSource::PickPlaceCartesianWaypointSource(PickPlaceGeometry geometry)
 : geometry_(std::move(geometry))
 {
-  if (!std::isfinite(geometry_.place_x_m) || !std::isfinite(geometry_.place_y_m) ||
-    !std::isfinite(geometry_.table_top_z_m) ||
-    !std::isfinite(geometry_.box_half_height_m) ||
+  if (!std::isfinite(geometry_.box_half_height_m) ||
     !std::isfinite(geometry_.hover_height_m) ||
     !std::isfinite(geometry_.place_tcp_above_box_center_m) ||
     !std::isfinite(geometry_.tool_yaw_rad) ||
@@ -57,8 +55,11 @@ PickPlaceCartesianWaypointSource::PickPlaceCartesianWaypointSource(PickPlaceGeom
 }
 
 CartesianWaypoint PickPlaceCartesianWaypointSource::waypointFor(
-  Phase phase, const ObjectPose & object_pose) const
+  Phase phase, const ObjectPose & object_pose, const PlaceTarget & place) const
 {
+  if (!std::isfinite(place.x) || !std::isfinite(place.y) || !std::isfinite(place.support_z)) {
+    throw std::invalid_argument("Place target must be finite");
+  }
   if (!std::isfinite(object_pose.x) || !std::isfinite(object_pose.y) ||
     !std::isfinite(object_pose.z) || !std::isfinite(object_pose.qw) ||
     !std::isfinite(object_pose.qx) || !std::isfinite(object_pose.qy) ||
@@ -72,7 +73,8 @@ CartesianWaypoint PickPlaceCartesianWaypointSource::waypointFor(
 
   CartesianWaypoint waypoint;
   waypoint.phase = phase;
-  const double place_box_z = geometry_.table_top_z_m + geometry_.box_half_height_m;
+  // Box centre resting on the support surface: the table, or the bin floor (Stage 8).
+  const double place_box_z = place.support_z + geometry_.box_half_height_m;
   switch (phase) {
     case Phase::kHome:
       waypoint.world_to_hand_tcp = downwardPose(0.5545, 0.0, 0.5211, geometry_.tool_yaw_rad);
@@ -95,13 +97,13 @@ CartesianWaypoint PickPlaceCartesianWaypointSource::waypointFor(
     case Phase::kRecover:
     case Phase::kFailed:
       waypoint.world_to_hand_tcp = downwardPose(
-        geometry_.place_x_m, geometry_.place_y_m,
+        place.x, place.y,
         place_box_z + geometry_.hover_height_m, geometry_.tool_yaw_rad);
       break;
     case Phase::kPlace:
     case Phase::kOpen:
       waypoint.world_to_hand_tcp = downwardPose(
-        geometry_.place_x_m, geometry_.place_y_m,
+        place.x, place.y,
         place_box_z + geometry_.place_tcp_above_box_center_m, geometry_.tool_yaw_rad);
       break;
   }

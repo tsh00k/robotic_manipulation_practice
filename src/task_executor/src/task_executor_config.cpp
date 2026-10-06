@@ -33,8 +33,6 @@ const char * observationSourceName(ObservationSource source)
 PickPlaceGeometry PlacementTask::geometry() const
 {
   PickPlaceGeometry result;
-  result.place_x_m = tcp_target_x_m;
-  result.place_y_m = tcp_target_y_m;
   result.hover_height_m = hover_height_m;
   result.place_tcp_above_box_center_m = tcp_above_box_center_m;
   result.tool_yaw_rad = tool_yaw_rad;
@@ -84,8 +82,7 @@ TaskExecutorConfig loadTaskExecutorConfig(rclcpp::Node & node)
   config.latch.max_yaw_spread_rad = node.declare_parameter(
     "latch.max_yaw_spread_deg", config.latch.max_yaw_spread_rad * 180.0 / M_PI) * M_PI / 180.0;
   config.latch.timeout_s = node.declare_parameter("latch.timeout_s", config.latch.timeout_s);
-  config.latch.require_bin = node.declare_parameter(
-    "latch.require_bin", config.latch.require_bin);
+  config.place_into_bin = node.declare_parameter("place.into_bin", config.place_into_bin);
   config.task.tcp_target_x_m = node.declare_parameter("target.place_x_m", 0.5);
   config.task.tcp_target_y_m = node.declare_parameter("target.place_y_m", 0.3);
   config.task.hover_height_m = node.declare_parameter("target.hover_height_m", 0.15);

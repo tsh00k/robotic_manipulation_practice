@@ -71,7 +71,9 @@ namespace task_executor
 class KeyframeWaypointSource : public WaypointSource
 {
 public:
-  JointTarget jointTargetFor(Phase phase, const ObjectPose & /*object_pose*/) const override
+  JointTarget jointTargetFor(
+    Phase phase, const ObjectPose & /*object_pose*/,
+    const PlaceTarget & /*place*/) const override
   {
     switch (phase) {
       case Phase::kHome:

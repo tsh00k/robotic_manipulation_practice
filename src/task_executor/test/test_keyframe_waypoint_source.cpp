@@ -21,6 +21,9 @@ namespace task_executor
 namespace
 {
 
+// The legacy scene's place target on the table.
+const PlaceTarget kTable{};
+
 // This is a fixed lookup table, not an algorithm -- there is little to "test" in
 // the usual sense. What is worth pinning down: (1) every phase returns a non-
 // negative gripper target with a real arm pose behind it (no accidental
@@ -40,7 +43,7 @@ TEST(KeyframeWaypointSource, EveryPhaseReturnsAGripperWidthInRange)
         Phase::kPreplace, Phase::kPlace, Phase::kOpen, Phase::kRetract, Phase::kVerify,
         Phase::kDone, Phase::kRecover, Phase::kFailed})
   {
-    const JointTarget target = source.jointTargetFor(phase, pose);
+    const JointTarget target = source.jointTargetFor(phase, pose, kTable);
     EXPECT_GE(target.gripper_width_m, 0.0) << phaseName(phase);
     EXPECT_LE(target.gripper_width_m, 0.08) << phaseName(phase);
   }
@@ -55,8 +58,8 @@ TEST(KeyframeWaypointSource, ObjectPoseIsIgnored)
   far_away.y = -99.0;
   far_away.z = 99.0;
   EXPECT_EQ(
-    source.jointTargetFor(Phase::kGrasp, near_origin).arm_positions,
-    source.jointTargetFor(Phase::kGrasp, far_away).arm_positions);
+    source.jointTargetFor(Phase::kGrasp, near_origin, kTable).arm_positions,
+    source.jointTargetFor(Phase::kGrasp, far_away, kTable).arm_positions);
 }
 
 TEST(KeyframeWaypointSource, CloseTargetsTheSameArmPoseAsGrasp)
@@ -64,12 +67,12 @@ TEST(KeyframeWaypointSource, CloseTargetsTheSameArmPoseAsGrasp)
   const KeyframeWaypointSource source;
   const ObjectPose pose;
   EXPECT_EQ(
-    source.jointTargetFor(Phase::kGrasp, pose).arm_positions,
-    source.jointTargetFor(Phase::kClose, pose).arm_positions);
+    source.jointTargetFor(Phase::kGrasp, pose, kTable).arm_positions,
+    source.jointTargetFor(Phase::kClose, pose, kTable).arm_positions);
   // ...but a narrower gripper target -- that is the entire point of kClose.
   EXPECT_LT(
-    source.jointTargetFor(Phase::kClose, pose).gripper_width_m,
-    source.jointTargetFor(Phase::kGrasp, pose).gripper_width_m);
+    source.jointTargetFor(Phase::kClose, pose, kTable).gripper_width_m,
+    source.jointTargetFor(Phase::kGrasp, pose, kTable).gripper_width_m);
 }
 
 }  // namespace

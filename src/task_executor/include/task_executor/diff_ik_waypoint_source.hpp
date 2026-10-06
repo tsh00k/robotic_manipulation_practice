@@ -44,7 +44,8 @@ public:
 
   void beginEpisode();
   void setSeed(const std::array<double, 7> & positions);
-  JointTarget jointTargetFor(Phase phase, const ObjectPose & object_pose) const override;
+  JointTarget jointTargetFor(
+    Phase phase, const ObjectPose & object_pose, const PlaceTarget & place) const override;
   const std::optional<WaypointDiagnostics> & diagnostics() const {return diagnostics_;}
 
 private:

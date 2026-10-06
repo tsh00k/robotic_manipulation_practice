@@ -54,12 +54,31 @@ latch    Week 4.1 Stage 7: bridge + estimator + executor (vision) with the box A
               status of that generation and its LATCHED;
            A2 the latched box and bin are within the S4 limits of the truth, and the TCP x, y
               of the GRASP target in the executor log are within 1 mm of the latched box;
-           A3 (no bin in the scene, latch.require_bin:=true, latch.timeout_s:=8) the episode
+           A3 (no bin in the scene, place.into_bin:=true, latch.timeout_s:=8) the episode
               ends with VISION_LATCH_TIMEOUT, failure layer "perception", a reason that names
               the bin and not the box, and no joint command was published at all;
            A4 the second episode latches under a new generation, from estimates that belong to
               that generation (their sequence lies in the range of the bridge samples of that
               generation), again with no command before LATCHED.
+place    Week 4.1 Stage 8. `--source oracle|vision`, the first `--count` random layouts (box AND
+         bin random), one bridge and one episode per layout, place.into_bin:=true. Checks,
+         written before the first run:
+           B1 (oracle) PREPLACE and PLACE TCP x, y within 1 mm of the true bin, PLACE z =
+              0.227 + 0.07 m (+-1 mm); the episode succeeds with zero retries and the box ends
+              inside the bin (all four corners inside the inner walls, centre below 0.252 m,
+              judged on the bridge's true box pose). A layout ending in IK_FAILED is recorded,
+              not failed, but at least one layout must succeed.
+           B2 (vision) the same targets, against the LATCHED bin (x, y within 1 mm, z = latched
+              floor + 0.07 m +-1 mm), and the box inside the bin after the release; the
+              episode's own outcome is reported only (VERIFY is expected to end
+              OBSERVATION_STALE until Stage 11).
+           B3 (reported) at the release: the fingertip (8.9 mm below the TCP) above the wall
+              top (0.239 m), and the box bottom above the inner floor (0.227 m). The release
+              is the sample right after the LAST attached run; it was first the first
+              attached-to-not-attached change, which caught an attachment change during the
+              grasp (Week 4.1 8.3).
+         `--scene legacy`: no bin, place.into_bin false, three episodes in one run (B4): each
+         succeeds with zero retries and the PLACE target is (0.5, 0.3, 0.29).
 episode  Bridge + estimator + executor with observation_source=vision, three episodes in a
          row, on the legacy scene (no bin; --scene bin adds the bin). Acceptance:
            E1 every episode ends in success with zero retries (the older detector path still
@@ -134,7 +153,7 @@ class Rig:
     """Bridge + estimator (+ executor), started directly and always reaped."""
 
     def __init__(self, workspace, bridge_params, with_executor, initial_box=True,
-                 executor_params=()):
+                 executor_params=(), source='vision'):
         self.install = Path(workspace) / 'install'
         self.processes = []
         self.logs = []
@@ -190,7 +209,7 @@ class Rig:
              {'LIBGL_ALWAYS_SOFTWARE': '1'}),
         ]
         if with_executor:
-            executor_arguments = sim_time + ['-p', 'observation_source:=vision']
+            executor_arguments = sim_time + ['-p', f'observation_source:={source}']
             for item in executor_params:
                 executor_arguments += ['-p', item.replace('=', ':=', 1)]
             nodes.append(('task_executor', 'task_executor_node', executor_arguments, {}))
@@ -482,7 +501,7 @@ def run_latch(args):
         'scene.enabled=true', 'enable_rgbd_camera=true', f'scene.box.x={box[0]}',
         f'scene.box.y={box[1]}', f'scene.box.yaw={box[2]}', f'scene.bin.x={bin_pose[0]}',
         f'scene.bin.y={bin_pose[1]}', f'scene.bin.yaw={bin_pose[2]}'], True,
-        executor_params=['latch.require_bin=true'])
+        executor_params=['place.into_bin=true'])
     try:
         if not rig.spin_until(lambda: rig.start.get_subscription_count() > 0, 30):
             raise RuntimeError('executor did not come up')
@@ -516,9 +535,9 @@ def run_latch(args):
     finally:
         rig.close()
 
-    print('no-bin scene, latch.require_bin:=true, latch.timeout_s:=8', flush=True)
+    print('no-bin scene, place.into_bin:=true, latch.timeout_s:=8', flush=True)
     rig = Rig(args.workspace, ['enable_rgbd_camera=true'], True,
-              executor_params=['latch.require_bin=true', 'latch.timeout_s=8.0'])
+              executor_params=['place.into_bin=true', 'latch.timeout_s=8.0'])
     try:
         if not rig.spin_until(lambda: rig.start.get_subscription_count() > 0, 30):
             raise RuntimeError('executor did not come up')
@@ -544,6 +563,183 @@ def run_latch(args):
     finally:
         rig.close()
     print('\nLATCH ACCEPTANCE:', 'PASS' if not failures else 'FAIL')
+    for failure in failures:
+        print('  ', failure)
+    return 0 if not failures else 1
+
+
+PHASE_TARGET = re.compile(
+    r'phase (PREPLACE|PLACE) target_frame=world tcp_xyz=\[([-\d.]+) ([-\d.]+) ([-\d.]+)\]')
+BIN_INNER = (0.070, 0.065)  # inner faces of the bin walls, half extents in the bin frame
+ON_FLOOR_Z_MAX = 0.252      # box centre above this rests on a wall rim, not on the floor
+FINGERTIP_BELOW_TCP = 0.0089
+WALL_TOP_Z = 0.239
+
+
+def phase_targets():
+    """Return [(phase, x, y, z)] of the PREPLACE and PLACE targets the executor logged."""
+    if not EXECUTOR_LOG.exists():
+        return []
+    return [(m.group(1), float(m.group(2)), float(m.group(3)), float(m.group(4)))
+            for m in PHASE_TARGET.finditer(EXECUTOR_LOG.read_text(errors='replace'))]
+
+
+def box_in_bin(observation, bin_pose):
+    """Return True if all four box corners lie inside the bin's inner walls, on its floor."""
+    pose = observation.object_pose.pose
+    yaw = yaw_of(pose.orientation)
+    bx, by, byaw = bin_pose
+    for sx in (-1, 1):
+        for sy in (-1, 1):
+            cx = pose.position.x + BOX_HALF * (sx * math.cos(yaw) - sy * math.sin(yaw))
+            cy = pose.position.y + BOX_HALF * (sx * math.sin(yaw) + sy * math.cos(yaw))
+            lx = math.cos(byaw) * (cx - bx) + math.sin(byaw) * (cy - by)
+            ly = -math.sin(byaw) * (cx - bx) + math.cos(byaw) * (cy - by)
+            if abs(lx) > BIN_INNER[0] or abs(ly) > BIN_INNER[1]:
+                return False
+    return pose.position.z < ON_FLOOR_Z_MAX
+
+
+def release_geometry(observations):
+    """
+    Return the fingertip margin and box bottom height at the end of the LAST attached run.
+
+    Also returns the attachment states in order, run-length encoded, because the first run
+    used the first attached-to-not-attached change and caught a change during the grasp.
+    """
+    runs = []
+    for o in observations:
+        if not runs or runs[-1][0] != o.attachment_state:
+            runs.append([o.attachment_state, 0])
+        runs[-1][1] += 1
+    release = None
+    for previous, o in zip(observations, observations[1:]):
+        if (previous.attachment_state == BridgeObservation.ATTACHMENT_ATTACHED and
+                o.attachment_state != BridgeObservation.ATTACHMENT_ATTACHED):
+            release = o
+    if release is None:
+        return None
+    tcp_z = release.world_to_hand_tcp.transform.translation.z
+    names = {BridgeObservation.ATTACHMENT_NOT_ATTACHED: 'N',
+             BridgeObservation.ATTACHMENT_ATTACHED: 'A',
+             BridgeObservation.ATTACHMENT_RELEASED: 'R'}
+    return ((tcp_z - FINGERTIP_BELOW_TCP - WALL_TOP_Z) * 1000.0,
+            (release.object_pose.pose.position.z - BOX_HALF - BIN_FLOOR_Z) * 1000.0,
+            ' '.join(f'{names.get(state, state)}x{count}' for state, count in runs))
+
+
+def run_place(args):
+    if args.scene == 'legacy':
+        return run_place_legacy(args)
+    failures, successes = [], 0
+    for index, layout in enumerate(make_layouts(args.count)):
+        box, bin_pose = layout['box'], layout['bin']
+        label = (f'layout {index}: box ({box[0]:.3f}, {box[1]:.3f}, {math.degrees(box[2]):.1f}), '
+                 f'bin ({bin_pose[0]:.3f}, {bin_pose[1]:.3f}, {math.degrees(bin_pose[2]):.1f})')
+        if EXECUTOR_LOG.exists():
+            EXECUTOR_LOG.unlink()
+        rig = Rig(args.workspace, [
+            'scene.enabled=true', 'enable_rgbd_camera=true', f'scene.box.x={box[0]}',
+            f'scene.box.y={box[1]}', f'scene.box.yaw={box[2]}', f'scene.bin.x={bin_pose[0]}',
+            f'scene.bin.y={bin_pose[1]}', f'scene.bin.yaw={bin_pose[2]}'], True,
+            executor_params=['place.into_bin=true'], source=args.source)
+        try:
+            if not rig.spin_until(lambda: rig.start.get_subscription_count() > 0, 30):
+                raise RuntimeError('executor did not come up')
+            rig.start.publish(Empty())
+            if not rig.spin_until(lambda: bool(rig.outcomes), 240):
+                failures.append(f'{label}: no outcome within 240 s')
+                continue
+            rig.spin_until(lambda: False, 2.0)  # let the box settle in the recorded samples
+            outcome = rig.outcomes[-1]
+            generation = max(o.generation for o in rig.observations)
+            mine = [o for o in rig.observations if o.generation == generation]
+            targets = phase_targets()
+            problems = []
+            if args.source == 'vision':
+                latched = [e[1] for e in rig.events if e[0] == 'latch' and
+                           e[1].state == InitialPoseLatch.LATCHED]
+                if not latched:
+                    problems.append('never latched')
+                    reference = None
+                else:
+                    pose = latched[-1].bin
+                    reference = (pose.position.x, pose.position.y, pose.position.z)
+            else:
+                reference = (bin_pose[0], bin_pose[1], BIN_FLOOR_Z)
+            ik_failed = outcome.failure_code == 'IK_FAILED'
+            if reference is not None and not ik_failed:
+                for phase in ('PREPLACE', 'PLACE'):
+                    found = [t for t in targets if t[0] == phase]
+                    if not found:
+                        problems.append(f'no {phase} target in the log')
+                        continue
+                    _, x, y, z = found[-1]
+                    dxy = 1000.0 * max(abs(x - reference[0]), abs(y - reference[1]))
+                    if dxy > 1.0:
+                        problems.append(f'{phase} target {dxy:.2f} mm from the bin')
+                    if phase == 'PLACE' and abs(z - (reference[2] + 0.07)) > 0.001:
+                        problems.append(f'PLACE z {z:.4f}, expected {reference[2] + 0.07:.4f}')
+            inside = box_in_bin(mine[-1], bin_pose)
+            geometry = release_geometry(mine)
+            if args.source == 'oracle' and not ik_failed:
+                if not outcome.success or outcome.retries != 0:
+                    problems.append(f'B1 outcome {outcome.failure_code}, retries '
+                                    f'{outcome.retries}')
+                else:
+                    successes += 1
+            if not ik_failed and not inside:
+                problems.append('the box is not inside the bin at the end')
+            if geometry and geometry[0] < 0:
+                problems.append(f'B3 fingertip {geometry[0]:.1f} mm below the wall top')
+            place = [t for t in targets if t[0] == 'PLACE']
+            print(f'{label}\n    outcome {outcome.failure_code} success={outcome.success} '
+                  f'retries={outcome.retries}; box in bin: {inside}; PLACE target '
+                  + (f'({place[-1][1]:.4f}, {place[-1][2]:.4f}, {place[-1][3]:.4f})' if place
+                     else 'none')
+                  + (f'; reference bin ({reference[0]:.4f}, {reference[1]:.4f}, '
+                     f'{reference[2]:.4f})' if reference else '')
+                  + (f'; at release fingertip {geometry[0]:.1f} mm above the wall top, box '
+                     f'bottom {geometry[1]:.1f} mm above the floor; attachment runs '
+                     f'{geometry[2]}' if geometry else '')
+                  + f'  {"OK" if not problems else "FAIL"}', flush=True)
+            failures += [f'{label}: {p}' for p in problems]
+        finally:
+            rig.close()
+    if args.source == 'oracle' and successes == 0:
+        failures.append('B1 no layout succeeded')
+    print('\nPLACE ACCEPTANCE:', 'PASS' if not failures else 'FAIL')
+    for failure in failures:
+        print('  ', failure)
+    return 0 if not failures else 1
+
+
+def run_place_legacy(args):
+    failures = []
+    if EXECUTOR_LOG.exists():
+        EXECUTOR_LOG.unlink()
+    rig = Rig(args.workspace, ['enable_rgbd_camera=true'], True, source=args.source)
+    try:
+        if not rig.spin_until(lambda: rig.start.get_subscription_count() > 0, 30):
+            raise RuntimeError('executor did not come up')
+        for episode in range(args.episodes):
+            rig.outcomes.clear()
+            rig.start.publish(Empty())
+            if not rig.spin_until(lambda: bool(rig.outcomes), 240):
+                failures.append(f'episode {episode}: no outcome within 240 s')
+                break
+            outcome = rig.outcomes[-1]
+            place = [t for t in phase_targets() if t[0] == 'PLACE']
+            target = place[-1][1:] if place else None
+            print(f'episode {episode}: success={outcome.success} retries={outcome.retries} '
+                  f'PLACE target {target}', flush=True)
+            if not outcome.success or outcome.retries != 0:
+                failures.append(f'B4 episode {episode}: {outcome.failure_code}')
+            if target is None or max(abs(a - b) for a, b in zip(target, (0.5, 0.3, 0.29))) > 1e-4:
+                failures.append(f'B4 episode {episode}: PLACE target {target}')
+    finally:
+        rig.close()
+    print('\nPLACE (legacy) ACCEPTANCE:', 'PASS' if not failures else 'FAIL')
     for failure in failures:
         print('  ', failure)
     return 0 if not failures else 1
@@ -633,9 +829,11 @@ def run_episode(args):
 def main():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('command', choices=['static', 'gaps', 'latch', 'episode'])
+    parser.add_argument('command', choices=['static', 'gaps', 'latch', 'place', 'episode'])
     parser.add_argument('--workspace', default=str(Path(__file__).resolve().parents[3]))
     parser.add_argument('--count', type=int, default=6)
+    parser.add_argument('--source', choices=['oracle', 'vision'], default='vision',
+                        help='place: the executor\'s observation source')
     parser.add_argument('--episodes', type=int, default=3)
     parser.add_argument('--baseline', action='store_true',
                         help='episode: a workspace without the initial box topic; only report '
@@ -646,7 +844,7 @@ def main():
     parser.add_argument('--gaps', type=float, nargs='*', default=[21, 40, 60, 80],
                         help='gaps: box-to-bin gaps in mm')
     args = parser.parse_args()
-    return {'static': run_static, 'gaps': run_gaps, 'latch': run_latch,
+    return {'static': run_static, 'gaps': run_gaps, 'latch': run_latch, 'place': run_place,
             'episode': run_episode}[args.command](args)
 
 

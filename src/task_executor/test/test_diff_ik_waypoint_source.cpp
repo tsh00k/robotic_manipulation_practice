@@ -26,6 +26,9 @@ namespace task_executor
 namespace
 {
 
+// The legacy scene's place target on the table.
+const PlaceTarget kTable{};
+
 DiffIkWaypointSource makeSource()
 {
   return DiffIkWaypointSource(
@@ -43,17 +46,17 @@ TEST(DiffIkWaypointSource, UsesObjectPositionAndHoldsTargetForPhase)
   auto source = makeSource();
   source.setSeed(home());
   const ObjectPose box{0.52, 0.01, 0.241};
-  const JointTarget first = source.jointTargetFor(Phase::kPregrasp, box);
+  const JointTarget first = source.jointTargetFor(Phase::kPregrasp, box, kTable);
   ASSERT_TRUE(source.diagnostics());
   const double shifted_x = source.diagnostics()->tcp_target.translation().x();
   source.beginEpisode();
   source.setSeed(home());
-  source.jointTargetFor(Phase::kPregrasp, {0.5, 0.0, 0.241});
+  source.jointTargetFor(Phase::kPregrasp, {0.5, 0.0, 0.241}, kTable);
   EXPECT_NEAR(shifted_x - source.diagnostics()->tcp_target.translation().x(), 0.02, 1e-9);
   source.beginEpisode();
   source.setSeed(home());
-  source.jointTargetFor(Phase::kPregrasp, box);
-  const JointTarget cached = source.jointTargetFor(Phase::kPregrasp, {0.7, 0.0, 0.241});
+  source.jointTargetFor(Phase::kPregrasp, box, kTable);
+  const JointTarget cached = source.jointTargetFor(Phase::kPregrasp, {0.7, 0.0, 0.241}, kTable);
   EXPECT_EQ(first.arm_positions, cached.arm_positions);
   EXPECT_EQ(first.gripper_width_m, cached.gripper_width_m);
 }
@@ -62,10 +65,10 @@ TEST(DiffIkWaypointSource, ResetRelatchesObjectPosition)
 {
   auto source = makeSource();
   source.setSeed(home());
-  const JointTarget first = source.jointTargetFor(Phase::kPregrasp, {0.5, 0.0, 0.241});
+  const JointTarget first = source.jointTargetFor(Phase::kPregrasp, {0.5, 0.0, 0.241}, kTable);
   source.beginEpisode();
   source.setSeed(home());
-  const JointTarget shifted = source.jointTargetFor(Phase::kPregrasp, {0.52, 0.0, 0.241});
+  const JointTarget shifted = source.jointTargetFor(Phase::kPregrasp, {0.52, 0.0, 0.241}, kTable);
   EXPECT_GT(
     std::abs(first.arm_positions[1] - shifted.arm_positions[1]) +
     std::abs(first.arm_positions[3] - shifted.arm_positions[3]), 1e-4);
@@ -76,20 +79,19 @@ TEST(DiffIkWaypointSource, RejectsUnreachableObjectWithoutPublishingACommand)
   auto source = makeSource();
   source.setSeed(home());
   EXPECT_THROW(
-    source.jointTargetFor(Phase::kPregrasp, {5.0, 5.0, 5.0}), std::runtime_error);
+    source.jointTargetFor(Phase::kPregrasp, {5.0, 5.0, 5.0}, kTable), std::runtime_error);
 }
 
 TEST(DiffIkWaypointSource, ConsumesInjectedCartesianTaskTarget)
 {
-  PickPlaceGeometry geometry;
-  geometry.place_x_m = 0.48;
-  geometry.place_y_m = 0.28;
-  auto cartesian_source = std::make_shared<PickPlaceCartesianWaypointSource>(geometry);
+  auto cartesian_source = std::make_shared<PickPlaceCartesianWaypointSource>();
   DiffIkWaypointSource source(
     arm_kinematics::loadFrankaFerModel(KINEMATICS_YAML_PATH, JOINT_LIMITS_YAML_PATH),
     cartesian_source);
   source.setSeed(home());
-  const auto target = source.jointTargetFor(Phase::kPlace, {0.5, 0.0, 0.241});
+  const auto target = source.jointTargetFor(
+    Phase::kPlace, {0.5, 0.0, 0.241}, PlaceTarget{0.48,
+      0.28, kTable.support_z});
   ASSERT_TRUE(source.diagnostics());
   EXPECT_EQ(target.gripper_width_m, 0.0);
   EXPECT_NEAR(source.diagnostics()->tcp_target.translation().x(), 0.48, 1e-12);

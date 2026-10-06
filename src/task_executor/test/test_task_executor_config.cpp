@@ -111,6 +111,16 @@ TEST_F(LoadedTaskExecutorConfig, PreservesModeDefaultsAndOverrides)
   EXPECT_DOUBLE_EQ(legacy.fsm.place_region_radius_m, legacy.verification.radius_m);
 }
 
+TEST_F(LoadedTaskExecutorConfig, PlacesIntoTheBinOnlyWhenAsked)
+{
+  auto default_node = std::make_shared<rclcpp::Node>("config_place_default_test");
+  EXPECT_FALSE(loadTaskExecutorConfig(*default_node).place_into_bin);
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({rclcpp::Parameter("place.into_bin", true)});
+  auto node = std::make_shared<rclcpp::Node>("config_place_bin_test", options);
+  EXPECT_TRUE(loadTaskExecutorConfig(*node).place_into_bin);
+}
+
 TEST_F(LoadedTaskExecutorConfig, RejectsUnapprovedIkMismatch)
 {
   rclcpp::NodeOptions options;
@@ -129,7 +139,7 @@ TEST_F(LoadedTaskExecutorConfig, AcceptsIntentionalIkMismatch)
   auto node = std::make_shared<rclcpp::Node>("config_experiment_test", options);
   const auto config = loadTaskExecutorConfig(*node);
   EXPECT_TRUE(config.allow_target_mismatch);
-  EXPECT_DOUBLE_EQ(config.task.geometry().place_x_m, 0.6);
+  EXPECT_DOUBLE_EQ(config.task.fixedPlace().x, 0.6);
   EXPECT_DOUBLE_EQ(config.verification.box_target_x_m, 0.5);
   EXPECT_DOUBLE_EQ(config.fsm.place_x_m, 0.5);
 }
@@ -144,8 +154,8 @@ TEST_F(LoadedTaskExecutorConfig, PreservesExplicitMatchingOverrides)
       rclcpp::Parameter("verify.place_y_m", 0.2)});
   auto node = std::make_shared<rclcpp::Node>("config_matching_test", options);
   const auto config = loadTaskExecutorConfig(*node);
-  EXPECT_DOUBLE_EQ(config.task.geometry().place_x_m, 0.6);
-  EXPECT_DOUBLE_EQ(config.task.geometry().place_y_m, 0.2);
+  EXPECT_DOUBLE_EQ(config.task.fixedPlace().x, 0.6);
+  EXPECT_DOUBLE_EQ(config.task.fixedPlace().y, 0.2);
   EXPECT_DOUBLE_EQ(config.fsm.place_x_m, 0.6);
   EXPECT_DOUBLE_EQ(config.fsm.place_y_m, 0.2);
 }

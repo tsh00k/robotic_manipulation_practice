@@ -123,9 +123,9 @@ def generate_launch_description():
 
     # Optional box/bin start layout (bridge only, see scene_parameters). Off by default;
     # with it off the simulator is the legacy single-box scene. This moves objects in the
-    # simulator only. With observation_source:=vision the perception detects the box and the
-    # bin and the executor grasps the latched box (Week 4.1 Stages 5-7), but the place target
-    # is still a fixed position, so a moved bin is not a validated pick-and-place scene yet.
+    # simulator only. The executor then puts the box into the bin (place.into_bin), taking the
+    # bin from vision or, with the oracle source, from ~/ground_truth/bin_pose (Week 4.1
+    # Stages 5-8). With vision the episode still ends at VERIFY until Stage 11.
     # Lengths in metres, angles in radians, R = Rz(yaw) Ry(pitch) Rx(roll); 'auto' = the
     # node's default. box_* is the box centre, bin_* the centre of the bin's inner floor.
     scene_args = [DeclareLaunchArgument('scene_enabled', default_value='false')]
@@ -149,9 +149,10 @@ def generate_launch_description():
             'vision.min_confidence': LaunchConfiguration('vision_min_confidence'),
             'vision.max_residual_m': LaunchConfiguration('vision_max_residual_m'),
             'vision.min_inlier_ratio': LaunchConfiguration('vision_min_inlier_ratio'),
-            # A scene with the bin makes the vision executor wait for the bin as well as the
-            # box before it starts (Week 4.1 Stage 7); the default scene has no bin.
-            'latch.require_bin': LaunchConfiguration('scene_enabled'),
+            # A scene with the bin: put the box into the bin, whose pose comes from vision
+            # (latched) or, with the oracle source, from the bridge's ground-truth bin pose
+            # (Week 4.1 Stages 7, 8). The default scene has no bin and keeps the fixed target.
+            'place.into_bin': LaunchConfiguration('scene_enabled'),
         }],
     )
 

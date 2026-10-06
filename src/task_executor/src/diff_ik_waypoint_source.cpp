@@ -46,7 +46,7 @@ void DiffIkWaypointSource::setSeed(const std::array<double, 7> & positions)
 }
 
 JointTarget DiffIkWaypointSource::jointTargetFor(
-  Phase phase, const ObjectPose & object_pose) const
+  Phase phase, const ObjectPose & object_pose, const PlaceTarget & place) const
 {
   if (cached_phase_ == phase) {
     return cached_target_;
@@ -67,7 +67,7 @@ JointTarget DiffIkWaypointSource::jointTargetFor(
     phase == Phase::kClose || phase == Phase::kLift;
   const ObjectPose & task_object =
     grasp_side ? grasp_object_pose_.value_or(object_pose) : object_pose;
-  const CartesianWaypoint waypoint = cartesian_source_->waypointFor(phase, task_object);
+  const CartesianWaypoint waypoint = cartesian_source_->waypointFor(phase, task_object, place);
   const Eigen::Isometry3d & tcp_target = waypoint.world_to_hand_tcp;
   const auto result = arm_kinematics::solveIk(model_, seed_, tcp_target);
   if (result.status != arm_kinematics::IkStatus::kConverged) {

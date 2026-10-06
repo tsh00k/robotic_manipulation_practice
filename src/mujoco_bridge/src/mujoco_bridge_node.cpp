@@ -578,6 +578,22 @@ private:
 
     const ScenePoses poses = resolveScene(request, geometry);
     applyScene(api_, model_, data_, poses);
+    // The bin's true pose, for the oracle source's place target only (Week 4.1 Stage 8):
+    // same category as ~/ground_truth/object_pose, never for perception. The bin is static
+    // and reset restores the same layout, so it is published once, latched.
+    bin_pose_pub_ = create_publisher<geometry_msgs::msg::PoseStamped>(
+      "~/ground_truth/bin_pose", rclcpp::QoS(1).transient_local());
+    geometry_msgs::msg::PoseStamped bin_pose;
+    bin_pose.header.frame_id = "world";
+    bin_pose.pose.position.x = poses.bin.translation().x();
+    bin_pose.pose.position.y = poses.bin.translation().y();
+    bin_pose.pose.position.z = poses.bin.translation().z();
+    const Eigen::Quaterniond bin_rotation(poses.bin.linear());
+    bin_pose.pose.orientation.w = bin_rotation.w();
+    bin_pose.pose.orientation.x = bin_rotation.x();
+    bin_pose.pose.orientation.y = bin_rotation.y();
+    bin_pose.pose.orientation.z = bin_rotation.z();
+    bin_pose_pub_->publish(bin_pose);
     RCLCPP_INFO(
       get_logger(),
       "scene.enabled=true: box xyz=[%.4f %.4f %.4f] rpy=[%.3f %.3f %.3f], "
@@ -1203,6 +1219,7 @@ private:
   rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr depth_camera_info_pub_;
   int object_body_id_ = -1;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr object_pose_pub_;
+  rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr bin_pose_pub_;
   int hand_body_id_ = -1;
   int left_finger_body_id_ = -1;
   int right_finger_body_id_ = -1;

@@ -45,13 +45,17 @@ struct PlacementVerification
 
 struct PlacementTask
 {
+  // The fixed place target, used without a bin (place.into_bin false): the legacy scene's
+  // marker on the table.
   double tcp_target_x_m = 0.5;
   double tcp_target_y_m = 0.3;
+  double table_top_z_m = 0.22;
   double hover_height_m = 0.15;
   double tcp_above_box_center_m = 0.05;
   double tool_yaw_rad = 0.0;
 
   PickPlaceGeometry geometry() const;
+  PlaceTarget fixedPlace() const {return {tcp_target_x_m, tcp_target_y_m, table_top_z_m};}
 };
 
 // Waiting for the initial box (and bin) pose to be latched before an episode starts
@@ -63,9 +67,6 @@ struct InitialPoseLatchConfig
   double max_yaw_spread_rad = 0.0523598775598;  // 3 degrees
   // Wall time from the reset to the latch; longer than the estimator needs (about 2.3 s).
   double timeout_s = 10.0;
-  // Also wait for the bin. The default scene has no bin; the demo launch sets this with
-  // scene_enabled. From Stage 8 on the bin is always needed and this goes away.
-  bool require_bin = false;
 };
 
 struct TaskExecutorConfig
@@ -87,6 +88,12 @@ struct TaskExecutorConfig
   double vision_min_inlier_ratio = 0.7;
   bool allow_target_mismatch = false;
   InitialPoseLatchConfig latch;
+  // Put the box into the bin (Week 4.1 Stage 8): the place target is the bin's inner floor,
+  // from the latched vision bin or, with the oracle source, from the bridge's ground-truth
+  // bin pose; the episode waits for it and never falls back to the fixed target. False: the
+  // fixed target on the table (the legacy scene has no bin). The demo launch sets it with
+  // scene_enabled. Replaces Stage 7's latch.require_bin.
+  bool place_into_bin = false;
 };
 
 const char * waypointModeName(WaypointMode mode);

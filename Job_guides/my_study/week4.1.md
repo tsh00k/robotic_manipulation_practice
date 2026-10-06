@@ -1322,11 +1322,80 @@ oracle 来源的行为没有变（连看门狗也是原来的 5 s）；`VisionOb
 
 ## Stage 8：place 目标与支撑高度取自锁存 bin
 
-**出口：** PREPLACE / PLACE / RETRACT 与支撑高度由锁存的视觉 bin 派生；bin 的真实位置变化，目标随之变化。
+**状态（2026-10-06）：已完成，尚未提交。** 8.0、8.1 是实现之前写定的，没有改动。**按登记的规则 B1 不通过**（3 个布局里 1 个在抓取时失败，原因不在放置，见 8.3）；B2、B4 通过；B3 的测量定义在看到结果后改过一次（8.3）。验证是仿真的。**分量：轻。**
 
-- **范围：** executor 配置与 Cartesian 几何、FSM 的 place 区域参数（来自同一锁存变换，不新增第二套 task/verify 坐标）；vision 作为 launch 主入口（改变默认 demo，需在文档显式记录）；bridge 发布**标明 oracle** 的 bin 位姿，仅供 oracle 对照路径使用。
-- **验收要点：** 移动 bin 的真实位置，PLACE 目标随检测变动；同一 bin 位姿下 oracle 对照路径可达，不可达明确报 `IK_FAILED`，不重置到默认场景；释放高度写成相对 bin 内底面（锁存的地板高度）的量，不再沿用 `table_top + box_half + 0.05`；用一次真实运行核对释放时指尖仍在壁顶之上（12 mm 壁时余量 35 mm，见 [Stage 4](#43-b-的计算)），盒子被释放时离地板的高度（实测 23.8 mm）与定位误差一起写进预算；world 向下释放，不要求最终 box yaw 等于 bin yaw。
-- **前置：** Stage 7（以及 Stage 2(c) 的放置容差）。
+### 8.0 一句话总结（目标）
+
+场景里有 bin 时，PREPLACE / PLACE / OPEN / RETRACT 的 TCP 目标、释放高度和 VERIFY 的放置区中心都取自同一个“放置目标”（bin 内底面中心 x、y 和内底面高度 z）：vision 来源取锁存的视觉 bin，oracle 来源取 bridge 新发布的、标明是真值的 bin 位姿。没有 bin 的旧场景仍用配置里的固定目标和桌面高度。工具朝向不变，不要求盒子最终的 yaw 等于 bin 的 yaw。
+
+### 8.1 设计与出口断言（实现前写定，不因结果改动）
+
+**放置目标 `PlaceTarget{x, y, support_z}`** 每个 episode 一个，由 executor 节点交给控制器，控制器同时用它算 IK 目标和 VERIFY 的放置区中心，所以没有第二套 task/verify 坐标。PLACE 的 TCP 高度 = `support_z + 盒子半高 + target.place_tcp_above_box_center_m`，与现在的公式相同，只是把固定的桌面高度换成支撑面高度：桌面 0.22 m 时是 0.29 m（不变），bin 内底面 0.227 m 时是 0.297 m。PREPLACE、RETRACT 同理加 `hover_height_m`。
+
+**参数。** Stage 7 的 `latch.require_bin` 改名为 `place.into_bin`，对两种来源都生效：true 时 vision 等锁存的 bin、oracle 等 bridge 的真值 bin 位姿，**不退回配置**；false 时用配置的固定目标（旧场景本来就没有 bin，那个目标是旧场景的属性，不是“检测不到时的后备”）。**与 Stage 7 写的不一致：** 那里说这个参数“Stage 8 起失去意义、删掉”，没有考虑到旧场景没有 bin、删掉后旧场景的回归就没有放置目标了，所以保留并改名。launch 仍随 `scene_enabled` 设置。
+
+**oracle 的 bin 位姿。** bridge 在 `scene.enabled` 时新增 `~/ground_truth/bin_pose`（PoseStamped，transient local，启动时发一次；bin 是静态的，reset 恢复同一布局），话题名带 `ground_truth`，与 `~/ground_truth/object_pose` 同类，只给 oracle 路径用；vision 路径不订阅它。
+
+**不做（与 Stage 8 原计划的偏差）：** “vision 作为 launch 默认入口”推迟到 Stage 11。原因：bin 场景里 vision episode 会在 VERIFY 以 `OBSERVATION_STALE` 结束（旧检测器拒绝 bin 里的盒子，Stage 5 的 5.6.5），改了默认值 demo 就是一个注定失败的入口；Stage 11 换掉 VERIFY 的判据后再改默认值才有意义。
+
+| 编号 | 条件 | 预期 | 否定条件（任一出现即不通过） |
+| --- | --- | --- | --- |
+| B1 | oracle，scene 开，3 个随机布局（box、bin 位置与 bin yaw 都随机），每个一个 episode | 日志里 PREPLACE、PLACE 的 TCP x、y 与 bin 真值相差 ≤ 1 mm，PLACE 的 TCP z 是 0.297 m（± 1 mm）；episode 成功、零重试，**结束时盒子四角都在 bin 内口里、盒心高度在地板上**（按真值判，与 Stage 2 的判定相同） | 某个布局成功但盒子不在 bin 里；或以 `IK_FAILED` 以外的失败结束。以 `IK_FAILED` 结束的布局记录下来，不算 Stage 8 的失败，但 3 个里至少要有 1 个成功，否则这个检查什么也没证明 |
+| B2 | vision，同样 3 个布局 | PLACE 的 TCP x、y 与锁存的 bin 相差 ≤ 1 mm，z 等于锁存的内底面 + 0.07 m（± 1 mm）；释放后盒子按真值在 bin 内。episode 的结局**只报告**：预期在 VERIFY 以 `OBSERVATION_STALE` 结束（Stage 11 的事） | PLACE 目标不来自锁存的 bin；或盒子没有落进 bin |
+| B3 | B1 的第一个成功 episode，释放时刻（第一个 ATTACHED 之后的非 ATTACHED 样本） | **只报告**，与 Stage 4 的数比较：指尖（TCP 下方 8.9 mm）在壁顶（0.239 m）之上的余量，预计约 42 mm（Stage 4 是 35 mm，PLACE 高了 7 mm）；盒底离内底面的高度，预计约 30 mm（Stage 4 实测 23.8 mm） | 指尖低于壁顶 |
+| B4 | 旧场景（scene 关，`place.into_bin` 默认 false）：vision 3 个 episode 与 oracle 3 个 episode | 都成功、零重试；PLACE 的 TCP 目标仍是 (0.5, 0.3, 0.29) | 任一失败或目标变化 |
+
+单测：Cartesian 源的放置目标来自传入的 `PlaceTarget`（含支撑高度）；控制器把同一个放置目标同时用于 IK 和 VERIFY；配置把 `place.into_bin` 读进来。
+
+### 8.2 改动清单
+
+| 文件 | 内容 |
+| --- | --- |
+| [waypoint_source.hpp](../../src/task_executor/include/task_executor/waypoint_source.hpp) | 新增 `PlaceTarget{x, y, support_z}`（默认是旧场景的 (0.5, 0.3, 0.22)）；`jointTargetFor` 多一个放置目标参数 |
+| [cartesian_waypoint_source.hpp](../../src/task_executor/include/task_executor/cartesian_waypoint_source.hpp) / [.cpp](../../src/task_executor/src/cartesian_waypoint_source.cpp) | `PickPlaceGeometry` 去掉固定的放置 x、y 与桌面高度；放置侧的目标来自传入的 `PlaceTarget` |
+| [diff_ik_waypoint_source.hpp](../../src/task_executor/include/task_executor/diff_ik_waypoint_source.hpp) / [.cpp](../../src/task_executor/src/diff_ik_waypoint_source.cpp)、[keyframe_waypoint_source.hpp](../../src/task_executor/include/task_executor/keyframe_waypoint_source.hpp) | 透传 / 忽略放置目标 |
+| [episode_controller.hpp](../../src/task_executor/include/task_executor/episode_controller.hpp) / [.cpp](../../src/task_executor/src/episode_controller.cpp) | `setPlacement(place, verify_x, verify_y)`：IK 用 `place`，VERIFY 的放置区中心用后两个数 |
+| [task_executor_config.hpp](../../src/task_executor/include/task_executor/task_executor_config.hpp) / [.cpp](../../src/task_executor/src/task_executor_config.cpp) | `latch.require_bin` → `place.into_bin`；`PlacementTask::fixedPlace()` |
+| [task_executor_node.cpp](../../src/task_executor/src/task_executor_node.cpp) | 准入第一个观测之前交出放置目标：bin（锁存值或 oracle 话题），否则固定目标；oracle 来源订阅 `ground_truth/bin_pose`；日志打印本 episode 的放置目标与来源 |
+| [mujoco_bridge_node.cpp](../../src/mujoco_bridge/src/mujoco_bridge_node.cpp) | `scene.enabled` 时发布 `~/ground_truth/bin_pose`（transient local，一次） |
+| [demo.launch.py](../../src/mujoco_bridge/launch/demo.launch.py) | `place.into_bin` 随 `scene_enabled` |
+| 测试与工具 | Cartesian 源 1 项新测试（放置目标与支撑高度来自 episode）、控制器 1 项（交出的放置目标就是 IK 收到的）、配置 1 项；已有测试改为显式传旧场景的放置目标；[initial_box_probe.py](../../src/mujoco_perception/test/initial_box_probe.py) 加 `place` 命令 |
+
+`verify.allow_target_mismatch` 的实验（IK 目标与 VERIFY 中心故意不同，Stage 2 用过）在没有 bin 时仍然可用，这是 `setPlacement` 把两者分开传的原因；有 bin 时两者都是 bin。
+
+### 8.3 验证结果
+
+**单测：** executor 包 236 项、bridge 包 217 项，0 失败。
+
+| 编号 | 结果 | 判定 |
+| --- | --- | --- |
+| B1 oracle（布局 0、1、2） | 布局 0（box yaw 84.3° ≡ −5.7°）、1（27.9°）：成功、零重试，盒子在 bin 内；PREPLACE、PLACE 的 x、y 与 bin 真值相差 < 0.1 mm，PLACE z = 0.2970 m。**布局 2（box yaw 41.0°）：** CLOSE 连续 4 次超时，重试用完，`UNEXPECTED_CONTACT`，从没到 PREPLACE | **不通过**（按登记的规则：以 `IK_FAILED` 以外的失败结束） |
+| B2 vision（布局 0、1） | 两个布局的 PLACE 目标都是锁存的 bin：x、y 一致（< 0.1 mm），z = 锁存内底面 0.2277 + 0.07 = 0.2977 m；盒子都落进了 bin；两个 episode 都在 VERIFY 以 `OBSERVATION_STALE` 结束（预期，Stage 11） | 通过 |
+| B3（报告） | 释放时指尖在壁顶之上：oracle 41.7、44.7 mm，vision 42.5、45.3 mm（预期约 42 mm）。盒底离内底面：oracle 19.7、18.5 mm，vision 22.3、15.3 mm（**预期约 30 mm，偏差大**，见下） | 指尖没有低于壁顶 |
+| B4 旧场景 | vision 3/3、oracle 3/3 成功、零重试；PLACE 目标都是 (0.5, 0.3, 0.29) | 通过 |
+
+**B1 失败的原因不在 Stage 8，但这是我设计 B1 时的错。** 布局 2 的盒子转了 41°，而工具朝向固定为 0，Stage 2 测得的朝向容差是 30°；抓取在放置之前就失败了。B1 的随机布局 box yaw 在 [0°, 90°) 均匀，折到 ±45° 后有大约三分之一超出 30°，我登记规则时没有把它排除，也没有把“抓取失败”列为不算 Stage 8 的情形。规则不改，B1 记为不通过；能说明 Stage 8 的是布局 0、1：两个都把盒子放进了 bin。对齐抓取朝向是 Stage 9 的出口，届时这类布局应当能抓起来。（这次失败顺带走了一次 FSM 触发的重试：4 次重试都在新 generation 下重新交出同一个放置目标，见日志；Stage 7 7.4 说“重试路径没有在线验证过”，这里覆盖了 oracle 来源的一半。）
+
+**B3 的测量定义改过一次，在看到结果之后。** 登记时我写“释放时刻 = 第一个 ATTACHED 之后的非 ATTACHED 样本”。vision 布局 1 第一次运行给出“指尖在壁顶下 12.8 mm、盒底在地板下 7.2 mm”，这不可能：那时盒子还在桌面上（盒心 0.240 m），TCP 在抓取高度。附着状态的序列是 `N×262 A×3 R×21 A×328 R×382`（N 未附着、A 附着、R 已释放，×后是样本数）：bridge 在 CLOSE 时报了 3 个样本的 ATTACHED，接着 21 个样本的 RELEASED，然后才稳定附着。第一个“附着 → 非附着”抓到的是这次反复。我把定义改成“**最后一段** ATTACHED 结束后的那个样本”，并打印附着序列；改后重跑，两个布局的余量都是正的。改的是测量方法，不是门槛。
+
+**盒底只有 15~22 mm，不是预期的约 30 mm。** 我的预期用的是“TCP 比盒心高 12.5 mm”（Stage 4 一次 oracle episode 的最后一个附着样本）加 PLACE 高了 7 mm。这里取的是第一个非附着样本，此时手指已在张开、盒子可能已开始下落，与 Stage 4 取的时刻不同；所以两组数不能直接比，原因没有分开。对任务没有影响（盒子都落进了 bin、指尖余量 > 40 mm），但“释放高度预算”目前只能写成“15~22 mm（这个测量点）”。
+
+### 8.4 你没问但值得注意的
+
+- **（E 可测试性）bridge 的附着状态在抓取时会反复，这会碰到 Stage 7 的一处判断。** 节点用“见过 ATTACHED 之后又不是 ATTACHED”来判定“已经释放、改走旧的逐帧路径”。上面那次 `A×3 R×21` 里，节点在那 21 个样本期间会认为盒子已释放、改用旧检测器的逐帧结果（这时机械臂挨着盒子，旧检测器多半拒绝，于是那 0.2 s 里没有新观测准入），重新附着后又回到锁存值。IK 不受影响（抓取一侧的目标在 PREGRASP 时已锁定），这次 episode 也照常完成；但这个判断依赖附着状态不反复，而它会反复。更稳的做法是按 FSM 的阶段判定（OPEN 之后才算释放），改动很小，**我没有在本阶段改**，因为它是 Stage 7 的逻辑；要不要改、放在哪个阶段，你定。附着为什么会在 CLOSE 时先确认又释放，没有查（Stage 12、13 碰的正是这块）。
+- **（E 可测试性）B1 的失败说明随机布局要按已知的容差约束。** 后面每个用随机布局的检查，在 Stage 9 之前都要么排除 |box yaw| > 30° 的布局，要么把“抓取失败”单独计数。Stage 14 的布局生成条件也要写进这一条。
+- **（C 可观测性）放置目标现在只在日志里。** 节点在第一次准入时打印“place target xy=… support_z=… (来源)”，探针靠解析日志拿到 PLACE 目标；没有话题或 outcome 字段携带它。Stage 11 判定“盒子在 bin 内”时需要它，到时再决定是否放进消息。
+- **oracle 的 bin 位姿只在启动时发一次。** 如果有人在运行中改 bin 的位置（bridge 不支持），executor 不会知道；transient local 也意味着晚启动的 executor 仍能拿到它，这正是选它的原因。
+
+### 8.5 本阶段边界与后续
+
+做完了：每个 episode 的放置目标、支撑高度取自 bin、VERIFY 中心与 IK 目标同源、oracle 的 bin 真值话题、旧场景不变。
+
+**没有做，有意推迟：** vision 作为 launch 默认入口（推迟到 Stage 11，理由见 8.1）；抓取朝向（Stage 9）；VERIFY 的“盒子在 bin 内”判据（Stage 11，现在仍是以 bin 中心为圆心、半径 0.08 m 的圆，比 bin 内口 140 × 130 mm 大，盒子落在壁上也可能通过）；Stage 7 附着判断的加固（见 8.4）。
+
+**没有验证：** 不可达的 bin 位姿是否报 `IK_FAILED`（3 个布局都可达，原计划的这条验收要点没有覆盖到）；倾斜的 bin；vision 来源下 FSM 触发的重试；放置误差的预算（只测了 4 次释放）。
+
+**验证精简的落实：** 单测 3 项新增；没有变异检查、没有基线构建；在线检查扩展了现有探针。executor 与 bridge 的整包测试一次通过（这次先用 `ament_uncrustify --reformat` 和 `ament_cpplint` 在本地处理了格式）；探针改了一次测量定义，所以 B2 跑了两轮；探针的 docstring 格式（pep257）又漏了一处，Python 的 lint 我仍没有在本地先检查，下次和 C++ 一样先跑 `ament_pep257`、`ament_flake8`。前置满足，进入 Stage 9（`grasp_yaw` 取自锁存 box yaw）。
 
 ## Stage 9：`grasp_yaw` 取自锁存 box yaw
 

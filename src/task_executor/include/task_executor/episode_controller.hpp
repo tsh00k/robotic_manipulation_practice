@@ -148,6 +148,14 @@ public:
   // batch always belongs to the phase before its transition.
   EpisodeActions tick(double sim_time_s, TimePoint wall_now);
 
+  // The place target of the current episode (IK targets) and the centre of VERIFY's place
+  // region. With a bin both are the bin (Week 4.1 Stage 8). Without one they are the
+  // configured target and verification centre, which only differ in the deliberate
+  // verify.allow_target_mismatch experiment. Set before the first admitted observation;
+  // kept across retries unless set again.
+  void setPlacement(const PlaceTarget & place, double verify_x_m, double verify_y_m);
+  const PlaceTarget & placeTarget() const {return place_;}
+
   EpisodeActions finishEpisode(
     bool success, std::string failure_code = "NONE", bool append_failed_phase = false);
 
@@ -169,6 +177,7 @@ private:
 
   const WaypointSource & waypoint_source_;
   FsmParams fsm_params_;
+  PlaceTarget place_;
   DiffIkWaypointSource * diff_ik_source_;
   const std::chrono::steady_clock::duration watchdog_timeout_;
   const std::chrono::steady_clock::duration awaiting_observation_timeout_;

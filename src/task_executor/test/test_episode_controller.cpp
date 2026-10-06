@@ -28,8 +28,11 @@ class FakeWaypointSource final : public WaypointSource
 {
 public:
   bool throw_on_target = false;
-  JointTarget jointTargetFor(Phase phase, const ObjectPose & object_pose) const override
+  mutable PlaceTarget last_place;
+  JointTarget jointTargetFor(
+    Phase phase, const ObjectPose & object_pose, const PlaceTarget & place) const override
   {
+    last_place = place;
     if (throw_on_target) {throw std::runtime_error("unreachable waypoint");}
     JointTarget target;
     target.arm_positions[0] = object_pose.x + static_cast<double>(phase);
@@ -256,6 +259,22 @@ TEST(EpisodeController, FreshObservationEnablesWaypointOnTick)
   EXPECT_EQ(controller.telemetry().phases.size(), 0u);
   ASSERT_EQ(controller.onObservation(observation(4, 11), now).diagnostics.size(), 1u);
   EXPECT_TRUE(controller.tick(3.1, now).target.has_value());
+}
+
+TEST(EpisodeController, ThePlacementSetForTheEpisodeIsWhatTheWaypointSourceGets)
+{
+  FakeWaypointSource source;
+  EpisodeController controller(source);
+  ready(controller);
+  controller.setPlacement(PlaceTarget{0.57, -0.11, 0.227}, 0.57, -0.11);
+  ASSERT_EQ(
+    controller.onObservation(observation(4, 1), EpisodeController::TimePoint{}).diagnostics.size(),
+    1u);
+  ASSERT_TRUE(controller.tick(0.0, EpisodeController::TimePoint{}).target.has_value());
+  EXPECT_DOUBLE_EQ(source.last_place.x, 0.57);
+  EXPECT_DOUBLE_EQ(source.last_place.y, -0.11);
+  EXPECT_DOUBLE_EQ(source.last_place.support_z, 0.227);
+  EXPECT_DOUBLE_EQ(controller.placeTarget().support_z, 0.227);
 }
 
 TEST(EpisodeController, SupersededGenerationFailsAndOldSamplesNeverPublish)

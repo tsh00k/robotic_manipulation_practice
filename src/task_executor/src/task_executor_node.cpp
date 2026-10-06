@@ -125,6 +125,16 @@ public:
       "/object_pose_estimator/object_pose", rclcpp::QoS(10),
       std::bind(&TaskExecutorNode::onVisionObservation, this, std::placeholders::_1));
 
+    // The bridge's true bin pose, for the oracle source only (Week 4.1 Stage 8). Latched: the
+    // bridge publishes it once at startup, and the bin does not move.
+    if (config_.observation_source == ObservationSource::kOracle && config_.place_into_bin) {
+      oracle_bin_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
+        "/mujoco_bridge/ground_truth/bin_pose", rclcpp::QoS(1).transient_local(),
+        [this](const geometry_msgs::msg::PoseStamped::SharedPtr msg) {oracle_bin_ = msg;});
+    }
+    controller_->setPlacement(
+      config_.task.fixedPlace(), config_.verification.box_target_x_m,
+      config_.verification.box_target_y_m);
     initial_box_sub_ = create_subscription<manipulation_interfaces::msg::InitialBoxPose>(
       "/object_pose_estimator/initial_box_pose", rclcpp::QoS(10),
       [this](const manipulation_interfaces::msg::InitialBoxPose::SharedPtr msg) {
@@ -236,7 +246,7 @@ private:
   bool latchComplete() const
   {
     return latch_bound_ && box_latch_->latched() &&
-           (!config_.latch.require_bin || bin_latch_->latched());
+           (!config_.place_into_bin || bin_latch_->latched());
   }
 
   // After the box has been carried and released, the task needs where the box is NOW (to
@@ -247,12 +257,43 @@ private:
     return attached_seen_ && !bridge_attached;
   }
 
+  // Hands the controller this episode's place target before anything is admitted. Into the
+  // bin: the latched vision bin, or the bridge's true bin for the oracle source; returns false
+  // while that is not known yet, so nothing is admitted and no command is sent. Not into the
+  // bin: the configured fixed target (the legacy scene has no bin).
+  bool applyPlacement()
+  {
+    if (!config_.place_into_bin) {
+      controller_->setPlacement(
+        config_.task.fixedPlace(), config_.verification.box_target_x_m,
+        config_.verification.box_target_y_m);
+      return true;
+    }
+    PlaceTarget bin;
+    if (config_.observation_source == ObservationSource::kOracle) {
+      if (!oracle_bin_) {
+        last_observation_failure_reason_ = "ORACLE_BIN_POSE_MISSING";
+        return false;
+      }
+      bin = {oracle_bin_->pose.position.x, oracle_bin_->pose.position.y,
+        oracle_bin_->pose.position.z};
+    } else {
+      if (!latchComplete()) {
+        return false;
+      }
+      const auto & latched = *bin_latch_->pose();
+      bin = {latched.x, latched.y, latched.z};
+    }
+    controller_->setPlacement(bin, bin.x, bin.y);
+    return true;
+  }
+
   // Which of the objects the wait is still missing, and why, for the outcome.
   std::string latchWaitReason() const
   {
     std::string reason;
     if (!box_latch_->latched()) {reason += "BOX:" + box_latch_->status();}
-    if (config_.latch.require_bin && !bin_latch_->latched()) {
+    if (config_.place_into_bin && !bin_latch_->latched()) {
       reason += (reason.empty() ? "" : " ") + std::string("BIN:") + bin_latch_->status();
     }
     return reason;
@@ -296,7 +337,7 @@ private:
       (latchComplete() ? manipulation_interfaces::msg::InitialPoseLatch::LATCHED :
       manipulation_interfaces::msg::InitialPoseLatch::WAITING);
     message.box = latchedPoseMessage(*box_latch_, true);
-    message.bin = latchedPoseMessage(*bin_latch_, config_.latch.require_bin);
+    message.bin = latchedPoseMessage(*bin_latch_, config_.place_into_bin);
     latch_pub_->publish(message);
   }
 
@@ -316,6 +357,9 @@ private:
       manipulation_interfaces::msg::BridgeObservation::ATTACHMENT_ATTACHED;
     if (config_.observation_source == ObservationSource::kVision) {
       bindLatchToEpisode();
+    }
+    if (!applyPlacement()) {
+      return;  // waiting for the bin
     }
     if (config_.observation_source == ObservationSource::kOracle) {
       object_pose = bridge->object_pose;
@@ -425,10 +469,15 @@ private:
       return;
     }
     if (!observation_generation_logged_) {
+      const auto & place = controller_->placeTarget();
       RCLCPP_INFO(
         get_logger(), "accepted observation session=%" PRIu64 " generation=%" PRIu64
-        " stamp=%.3fs", controller_->bridgeSession(), controller_->generation(),
-        envelope.sim_time_s);
+        " stamp=%.3fs; place target xy=[%.5f %.5f] support_z=%.4f (%s)",
+        controller_->bridgeSession(), controller_->generation(), envelope.sim_time_s,
+        place.x, place.y, place.support_z,
+        !config_.place_into_bin ? "fixed" :
+        (config_.observation_source == ObservationSource::kOracle ? "oracle bin" :
+        "latched vision bin"));
       observation_generation_logged_ = true;
     }
   }
@@ -670,6 +719,8 @@ private:
     observation_sub_;
   rclcpp::Subscription<manipulation_interfaces::msg::VisionObjectPose>::SharedPtr
     vision_sub_;
+  rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr oracle_bin_sub_;
+  geometry_msgs::msg::PoseStamped::SharedPtr oracle_bin_;
   rclcpp::Subscription<manipulation_interfaces::msg::InitialBoxPose>::SharedPtr initial_box_sub_;
   rclcpp::Subscription<manipulation_interfaces::msg::InitialBinPose>::SharedPtr initial_bin_sub_;
   rclcpp::Publisher<manipulation_interfaces::msg::InitialPoseLatch>::SharedPtr latch_pub_;

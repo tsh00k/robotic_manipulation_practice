@@ -34,14 +34,13 @@ class CartesianWaypointSource
 {
 public:
   virtual ~CartesianWaypointSource() = default;
-  virtual CartesianWaypoint waypointFor(Phase phase, const ObjectPose & object_pose) const = 0;
+  virtual CartesianWaypoint waypointFor(
+    Phase phase, const ObjectPose & object_pose, const PlaceTarget & place) const = 0;
 };
 
 struct PickPlaceGeometry
 {
-  double place_x_m = 0.5;
-  double place_y_m = 0.3;
-  double table_top_z_m = 0.22;
+  // Where to put the box is per episode (PlaceTarget); these are the fixed shape of the task.
   double box_half_height_m = 0.02;
   double hover_height_m = 0.15;
   double place_tcp_above_box_center_m = 0.05;
@@ -54,7 +53,8 @@ class PickPlaceCartesianWaypointSource : public CartesianWaypointSource
 {
 public:
   explicit PickPlaceCartesianWaypointSource(PickPlaceGeometry geometry = {});
-  CartesianWaypoint waypointFor(Phase phase, const ObjectPose & object_pose) const override;
+  CartesianWaypoint waypointFor(
+    Phase phase, const ObjectPose & object_pose, const PlaceTarget & place) const override;
 
 private:
   PickPlaceGeometry geometry_;

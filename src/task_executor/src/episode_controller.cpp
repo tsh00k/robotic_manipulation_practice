@@ -35,6 +35,16 @@ EpisodeController::EpisodeController(
   diff_ik_source_(diff_ik_source), watchdog_timeout_(watchdog_timeout),
   awaiting_observation_timeout_(awaiting_observation_timeout.value_or(watchdog_timeout))
 {
+  place_.x = fsm_params_.place_x_m;
+  place_.y = fsm_params_.place_y_m;
+}
+
+void EpisodeController::setPlacement(
+  const PlaceTarget & place, double verify_x_m, double verify_y_m)
+{
+  place_ = place;
+  fsm_params_.place_x_m = verify_x_m;
+  fsm_params_.place_y_m = verify_y_m;
 }
 
 // Current: any state, including an active or terminal episode.
@@ -225,7 +235,7 @@ EpisodeActions EpisodeController::tick(double sim_time_s, TimePoint wall_now)
     if (diff_ik_source_ && frame.object_frame_id != "world") {
       throw std::invalid_argument("Object pose must be in world frame");
     }
-    target = waypoint_source_.jointTargetFor(phase_, frame.object_pose);
+    target = waypoint_source_.jointTargetFor(phase_, frame.object_pose, place_);
   } catch (const std::exception & e) {
     actions = finishEpisode(false, "IK_FAILED", true);
     actions.diagnostics.push_back(
