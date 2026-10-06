@@ -55,6 +55,7 @@ REPO = Path(__file__).resolve().parents[3]
 POSITION_LIMIT_MM = 0.1
 YAW_LIMIT_DEG = 0.1
 AGREEMENT_LIMIT = 0.99
+SPREAD_LIMIT_M = 0.02  # DepthWindow max_spread_m
 
 DETECTION = re.compile(
     r'detection (\d+) measured=(\d) reason=(\S+) x=(\S+) y=(\S+) z=(\S+) yaw_deg=(\S+) '
@@ -77,13 +78,17 @@ def noisy_frames(layout, sigma_mm, frames, rng):
 
 
 def window_mean(frames):
-    """Per-pixel mean over the frames, the same rule as DepthWindow (all pixels here valid)."""
+    """Per-pixel mean over the frames, the same rule as DepthWindow (valid fraction and spread)."""
     stack = np.stack([f.astype(np.float64) for f in frames])
     valid = np.isfinite(stack) & (stack > 0)
     total = np.where(valid, stack, 0.0).sum(axis=0)
     count = valid.sum(axis=0)
     mean = np.full(total.shape, np.nan)
     ok = count >= 0.5 * len(frames)
+    # A pixel whose valid frames span more than 20 mm saw two surfaces: no measurement.
+    smallest = np.where(valid, stack, np.inf).min(axis=0)
+    largest = np.where(valid, stack, -np.inf).max(axis=0)
+    ok &= (largest - smallest) <= SPREAD_LIMIT_M
     mean[ok] = total[ok] / count[ok]
     return mean.astype(np.float32)
 
