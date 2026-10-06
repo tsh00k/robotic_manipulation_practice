@@ -34,16 +34,17 @@ namespace mujoco_perception
 // measurement made from one lucky frame.
 //
 // A pixel whose valid frames span more than `max_spread_m` (largest minus smallest depth) is
-// also NaN. Such a pixel saw two different surfaces within the window, typically a box edge
-// that moved by a fraction of a pixel (the box settling after a reset, a little arm motion), so
-// that the pixel is the box in some frames and the table behind it in others. Its mean lies
-// between the two surfaces and belongs to neither; back-projected it becomes a point floating
-// beside the box, which enlarged a 40 mm face to 42.5 mm in the Stage 5 online check. The
-// default, 20 mm, is ten standard deviations of the 2 mm noise at which the Stage 3 averaging
-// met its acceptance rule, so that noise of that size does not reach it. At 4 mm noise the span of
-// ten samples is 12 mm on average and exceeds 20 mm for roughly 1 % of the pixels (normal-theory
-// estimate, not counted), which are then dropped. The limit is far below the 51 mm jump at that
-// box edge.
+// also NaN. Such a pixel saw two different surfaces within the window, for instance a box edge
+// that shifted by a fraction of a pixel between frames, so that the pixel is the box in some
+// frames and the table behind it in others. Its mean lies between the two surfaces and belongs
+// to neither; back-projected it becomes a point floating beside the box, which enlarged a 40 mm
+// face to 42.5 mm in the Stage 5 online check (one pixel: box in 9 frames, table in 1; why the
+// edge shifted was not isolated, a 0.24 mm height settling of the box in the first frame fits).
+// The default, 20 mm, is ten standard deviations of the 2 mm noise at which the Stage 3
+// averaging met its acceptance rule, so noise of that size does not reach it. At 4 mm noise the
+// range of ten samples exceeds 20 mm for between 1 % and 5 % of the pixels (from the table of
+// the range of ten normal samples, not counted on data); those pixels are dropped. The limit is
+// far below the 51 mm jump at that box edge.
 //
 // Pure data structure: no ROS and no OpenCV, so it is tested on its own.
 class DepthWindow
