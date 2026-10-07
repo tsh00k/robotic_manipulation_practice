@@ -307,6 +307,11 @@ public:
       RCLCPP_WARN(
         get_logger(), "model has no keyframe `%s`; ~/reset will fail",
         reset_keyframe_name_.c_str());
+    } else {
+      // Start in the reset keyframe, not mj_makeData's qpos0 (arm nearly upright), so that the
+      // first reset does not move the arm (Week 5 Stage 2). Generation stays 0: no reset has
+      // been requested yet. The box pose was written into the keyframe by configureScene().
+      resetToKeyframe(api_, model_, data_, reset_keyframe_id_);
     }
     // Private name (~/reset -> /mujoco_bridge/reset): unlike /joint_states and /clock
     // this is not a system-wide singleton -- a second sim instance in the same graph
@@ -748,8 +753,8 @@ private:
   bool resetScene(std::string & message)
   {
     // mj_resetDataKeyframe restores qpos, qvel, act, ctrl and mocap from the keyframe
-    // -- ctrl included. That matters: the `home` key carries its own
-    // ctrl="0 0 0 -1.57079 0 1.57079 -0.7853 255", so the position servos get targets
+    // -- ctrl included. That matters: the keyframe carries its own ctrl (the same arm
+    // configuration plus the gripper's 255), so the position servos get targets
     // consistent with the new qpos. Resetting qpos alone would leave the old targets
     // in place and the servos would immediately drag the arm back out of home pose.
     // Sim time is kept monotonic and derived quantities (xpos/xquat, qfrc_actuator)

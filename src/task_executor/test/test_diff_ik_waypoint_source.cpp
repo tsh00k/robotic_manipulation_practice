@@ -16,7 +16,11 @@
 
 #include <array>
 #include <cmath>
+#include <fstream>
 #include <memory>
+#include <regex>
+#include <sstream>
+#include <string>
 
 #include "arm_kinematics/forward_kinematics.hpp"
 #include "task_executor/diff_ik_waypoint_source.hpp"
@@ -39,6 +43,66 @@ DiffIkWaypointSource makeSource()
 std::array<double, 7> home()
 {
   return {0.0, 0.0, 0.0, -1.5708, 0.0, 1.5708, -0.7853};
+}
+
+// The arm part of the MJCF keyframe the bridge starts in and resets to.
+std::array<double, 7> mjcfResetKeyframeArm()
+{
+  std::ifstream file(PICK_PLACE_SCENE_MJCF_PATH);
+  std::stringstream text;
+  text << file.rdbuf();
+  const std::string xml = text.str();
+  std::smatch match;
+  const std::regex key(R"re(<key\s+name="pick_place_home"\s+qpos="([^"]*)")re");
+  if (!std::regex_search(xml, match, key)) {
+    ADD_FAILURE() << "no pick_place_home keyframe in " << PICK_PLACE_SCENE_MJCF_PATH;
+    return {};
+  }
+  std::istringstream values(match[1].str());
+  std::array<double, 7> arm{};
+  for (double & q : arm) {
+    values >> q;
+  }
+  return arm;
+}
+
+TEST(DiffIkWaypointSource, HomeIsTheBridgeResetKeyframe)
+{
+  const std::array<double, 7> keyframe = mjcfResetKeyframeArm();
+  for (std::size_t i = 0; i < keyframe.size(); ++i) {
+    EXPECT_NEAR(kFrankaReadyPose[i], keyframe[i], 1e-4) << "joint" << i + 1;
+  }
+}
+
+TEST(DiffIkWaypointSource, HomeAndVerifyCommandTheHomeJointsWithoutIk)
+{
+  auto source = makeSource();
+  // A seed far from HOME: an IK solution would depend on it, the joint target must not.
+  source.setSeed({0.5, 0.3, -0.2, -1.2, 0.1, 1.9, -0.4});
+  const ObjectPose box{0.52, 0.01, 0.241};
+  for (const Phase phase : {Phase::kHome, Phase::kVerify}) {
+    source.beginEpisode();
+    const JointTarget target = source.jointTargetFor(phase, box, kTable);
+    EXPECT_EQ(target.arm_positions, kFrankaReadyPose) << phaseName(phase);
+    EXPECT_DOUBLE_EQ(target.gripper_width_m, 0.08) << phaseName(phase);
+    ASSERT_TRUE(source.diagnostics());
+    // The ready pose's TCP, with the tool pointing down.
+    EXPECT_NEAR(source.diagnostics()->tcp_target.translation().x(), 0.307, 0.002);
+    EXPECT_NEAR(source.diagnostics()->tcp_target.translation().y(), 0.0, 1e-6);
+    EXPECT_NEAR(source.diagnostics()->tcp_target.translation().z(), 0.487, 0.002);
+    EXPECT_NEAR(source.diagnostics()->tcp_target.linear()(2, 2), -1.0, 1e-6);
+  }
+}
+
+TEST(DiffIkWaypointSource, RejectsAHomeOutsideTheJointLimits)
+{
+  std::array<double, 7> home = kFrankaReadyPose;
+  home[3] = 0.0;  // joint4's upper limit is -0.0698
+  EXPECT_THROW(
+    DiffIkWaypointSource(
+      arm_kinematics::loadFrankaFerModel(KINEMATICS_YAML_PATH, JOINT_LIMITS_YAML_PATH),
+      std::make_shared<PickPlaceCartesianWaypointSource>(), home),
+    std::invalid_argument);
 }
 
 TEST(DiffIkWaypointSource, UsesObjectPositionAndHoldsTargetForPhase)

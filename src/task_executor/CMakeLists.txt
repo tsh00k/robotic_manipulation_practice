@@ -89,6 +89,7 @@ if(BUILD_TESTING)
   target_compile_definitions(test_diff_ik_waypoint_source PRIVATE
     KINEMATICS_YAML_PATH="${FRANKA_DESCRIPTION_SHARE_DIR}/robots/fer/kinematics.yaml"
     JOINT_LIMITS_YAML_PATH="${FRANKA_DESCRIPTION_SHARE_DIR}/robots/fer/joint_limits.yaml"
+    PICK_PLACE_SCENE_MJCF_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../../robot_description/mujoco/franka_emika_panda/pick_place_scene.xml"
   )
 
   ament_add_gtest(test_cartesian_waypoint_source

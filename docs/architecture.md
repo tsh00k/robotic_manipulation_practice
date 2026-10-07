@@ -27,7 +27,7 @@
 
 成熟算法复用现有库；自写运动学作为独立学习/验证模块，项目自有代码集中在生命周期、契约适配与可测试的任务判断。选型理由进入 ADR 或周记，不在此重复平台与公开项目比较。
 
-默认使用 oracle 观测与 diff_ik waypoint，keyframe 保留对照。固定 oracle 场景曾通过回归；完整 vision 抓放尚未验收。
+默认使用 oracle 观测与 diff_ik waypoint，固定关节表模式（`waypoint_source:=keyframe`）保留对照。固定 oracle 场景曾通过回归；完整 vision 抓放尚未验收。
 
 当前 Stage 5 已简化为 bridge 权威附着、视觉暂停/释放重测与 executor 缓存准入，见 [Week 4 Stage 5](../Job_guides/my_study/week4.md#stage-5视觉接口收紧与简化状态机)。四包构建/测试通过；2026-10-03 修复抬升前附着循环依赖并补 LIFT 到位门，见 [ADR 012](adr/012-prelift-attachment-confirmation.md)。oracle 持续注入视觉拒绝的真实回归为 20/20 成功、零重试，两包 build/test 通过（工作区汇总 492 tests、0 errors、0 failures、71 skipped）；详情见 Week 4 Stage 5；当前接口 replay 和完整 vision episode 未执行。旧独立夹持与 TCP 预测实验只作为历史证据；[ADR 009](adr/009-robot-aware-stateful-vision.md)、[ADR 010](adr/010-grasp-conditioned-object-state.md)、[ADR 011](adr/011-vision-object-pose-contract-tightening.md) 保留当时决策快照，不能代替下文当前契约。原 Stage 6（可配置 bin 与运输监控）已废弃并回退，不在代码中，见 [Week 4 6.9](../Job_guides/my_study/week4.md#69-回退决定与存档) 与 [ADR 015](adr/015-rollback-stage6-perception-side-transport-diagnostics.md)；后续改动按 [Week 4.1](../Job_guides/my_study/week4.1.md) 的阶段计划逐个加入，每个阶段通过后再更新本页。Week 4.1 Stage 5、6 已加入初始 box 与 bin 检测（`~/initial_box_pose`、`~/initial_bin_pose`，见 [5.2](#52-机器人掩膜与几何估计) 末尾与 [5.3](#53-视觉消息与原因契约)，决策见 [ADR 018](adr/018-initial-box-detection-in-the-estimator.md)），估计器不再配对 RGB；Stage 7 起 vision 来源的 executor 在 reset 后等这两个估计连续一致并锁存，抓取目标取自锁存的 box，见 [5.5](#55-任务观测来源与质量门)；Stage 8 起场景里有 bin 时放置目标与支撑高度取自 bin（vision 用锁存的视觉 bin，oracle 用 bridge 的 `~/ground_truth/bin_pose`），见 [5.5](#55-任务观测来源与质量门)。MoveIt 规划与 learned policy 尚未完成。
 
@@ -68,8 +68,11 @@
 | --- | --- | --- |
 | vendor MJCF home | `[0, 0, 0, -1.5708, 0, 1.5708, -0.7853]` | 0.04 |
 | SRDF ready / fake system initial_positions.yaml | `[0, -0.785, 0, -2.356, 0, 1.571, 0.785]` | SRDF open 为 0.035 |
+| **pick_place_home（Week 5 Stage 2 起）** | 同 ready：`[0, -π/4, 0, -3π/4, 0, π/2, π/4]`，TCP 约 `(0.307, 0, 0.487) m`、工具朝下 | 0.04 |
 
-当前 reset 权威是 pick_place_home，臂构型沿用 MJCF home 并补足 box 状态。URDF 不保存初始状态，MoveIt ready 与 reset 不是同一构型。
+**用语：** 本文的 keyframe 指 MJCF `<keyframe>` 里带名字的**预设状态**（qpos/qvel/act/ctrl/mocap 的快照），不是动画或视频的关键帧；executor 的 `waypoint_source:=keyframe` 是另一回事（固定关节表，不读 MJCF 预设状态，见 6.2）。
+
+reset 权威是预设状态 pick_place_home。Week 5 Stage 2 起它的臂构型是 Franka ready（此前沿用 vendor home），因为 vendor home 时手和前臂挡住相机看工作区远侧（默认 bin (0.5, 0.3) 被截断，Week 4.1 14.6）；ready 时 estimator 的机器人遮罩投到桌面后离工作区 x∈[0.30,0.70]、y∈[−0.30,0.40] 最近 80 mm。**bridge 启动即进入该预设状态**（generation 仍为 0），不再从 `mj_makeData` 的 qpos0（臂近乎竖直）开始，所以第一次 reset 不移动手臂；executor 的 HOME 是同一关节构型（`home.joint_positions`，默认 `kFrankaReadyPose`，单测核对与 MJCF 一致）。URDF 不保存初始状态。
 
 `mj_resetDataKeyframe` 同时恢复 ctrl。vendor home 的夹爪 ctrl 为 255（actuator 范围 0..255），不是米制指位置。
 
@@ -128,7 +131,7 @@ URDF hand:=true 强制加 fer_ 前缀，跨库代码须显式映射。下表采�
 | /mujoco_bridge/reset | std_srvs/srv/Trigger | 手动兼容入口，成功也递增 generation |
 | /mujoco_bridge/reset_with_generation | manipulation_interfaces/srv/ResetScene | executor 使用，成功返回 session/generation |
 
-两服务共用实现：恢复 keyframe 的 qpos/qvel/act/ctrl/mocap，保留 mjData::time 单调，调用 mj_forward 刷新派生量。bridge 是唯一 /clock 来源。reset 为仿真专有接口；真机回初始位姿需要可取消、有反馈的轨迹 action。
+两服务共用实现（bridge 启动时也执行一次，但不递增 generation）：恢复预设状态的 qpos/qvel/act/ctrl/mocap，保留 mjData::time 单调，调用 mj_forward 刷新派生量。bridge 是唯一 /clock 来源。reset 为仿真专有接口；真机回初始位姿需要可取消、有反馈的轨迹 action。
 
 每次 bridge 启动创建新 session，每次成功 reset 严格递增 generation。controller 只接受本次 reset 的 session/generation 与递增 sample sequence；旧会话/代际/序号被拒绝，更高 generation 报 RESET_SUPERSEDED。请求 token 隔离旧回执。默认 5 s steady-clock 看门狗约束服务与观测等待/断流，失败码包括 RESET_UNAVAILABLE、RESET_FAILED、OBSERVATION_STALE。见 [ADR 003](adr/003-reset-generation-observation.md)。
 
@@ -254,17 +257,17 @@ EpisodeController 独占生命周期、phase、retry、失败原因与 telemetry
 
 任务顺序 `HOME -> PREGRASP -> GRASP -> CLOSE -> LIFT -> PREPLACE -> PLACE -> OPEN -> RETRACT -> VERIFY -> DONE`，执行异常经 RECOVER 重试，耗尽后 FAILED。纯 step() 不依赖 ROS/MuJoCo；executor 的 classifyGrasp() 复用 mujoco_bridge::grasp_criteria，仅用于 CLOSE 超时原因分类，不作为第二套附着权威。
 
-CLOSE 要求 ATTACHED+close_settle；LIFT 要求 ATTACHED+机械臂关节位置/速度到达抬升目标+min_settle，不以视觉高度判定。LIFT 到达臂目标但未附着且超过 grace 时 recover/slipped，阶段超时 recover/timeout。PREPLACE/PLACE 先检查 ATTACHED，缺失时 recover/slipped，否则检查运动到位；这些门依赖 bridge 锁存，不能独立检测闭爪滑落。OPEN 要求实际宽度 >0.06 m 与 settle；VERIFY 要求 RELEASED、物体 XY 在验收区域及 settle，vision 路径须释放后的新测量。
+CLOSE 要求 ATTACHED+close_settle；LIFT 要求 ATTACHED+机械臂关节位置/速度到达抬升目标+min_settle，不以视觉高度判定。LIFT 到达臂目标但未附着且超过 grace 时 recover/slipped，阶段超时 recover/timeout。PREPLACE/PLACE 先检查 ATTACHED，缺失时 recover/slipped，否则检查运动到位；这些门依赖 bridge 锁存，不能独立检测闭爪滑落。OPEN 要求实际宽度 >0.06 m 与 settle；VERIFY 的臂目标是 HOME（Week 5 Stage 2），要求 RELEASED、物体在验收区域（有 bin 时为入 bin 判据）、机械臂回到 HOME 及 settle，vision 路径须释放后的新测量；所以 DONE 时手臂已在 reset 构型。
 
 20 Hz tick 最多消费一份新鲜观测，设 IK seed、求当前目标、调用 FSM、记录迁移；无新观测不重发旧目标，新观测下 phase 未变则重发。动作顺序为当前 phase 目标、迁移日志、reset/outcome。阶段计时用仿真时间，看门狗用 steady clock，准入先检查超时再刷新新鲜度。见 [ADR 004](adr/004-episode-controller-orchestration.md) 与 [编排图](task_executor_episode_orchestration.html)。
 
 ### 6.2 Cartesian 任务与 waypoint
 
-WaypointSource::jointTargetFor(Phase,ObjectPose) 返回关节目标。默认 DiffIkWaypointSource 消费独立、无 ROS 的 CartesianWaypointSource，以实测关节作 seed、阶段内缓存离线 IK 目标；HOME/retry 清抓取锁定与缓存。失败报 IK_FAILED，不发布失败解。keyframe 查表且忽略物体位姿，详表/调参见 [Week 2 Stage I](../Job_guides/my_study/week2.md#10-stage-ifsm-与-waypointsource-抽象新包-task_executor)。
+WaypointSource::jointTargetFor(Phase,ObjectPose) 返回关节目标。默认 DiffIkWaypointSource 消费独立、无 ROS 的 CartesianWaypointSource，以实测关节作 seed、阶段内缓存离线 IK 目标；HOME 与 VERIFY 不求 IK，直接用 `home.joint_positions`（Week 5 Stage 2）；HOME/retry 清抓取锁定与缓存。失败报 IK_FAILED，不发布失败解。固定关节表模式（`keyframe`）查表且忽略物体位姿，详表/调参见 [Week 2 Stage I](../Job_guides/my_study/week2.md#10-stage-ifsm-与-waypointsource-抽象新包-task_executor)。
 
 | 默认几何 | world-frame hand_tcp 目标 |
 | --- | --- |
-| HOME | `(0.5545,0,0.5211) m` |
+| HOME、VERIFY | 关节目标 `home.joint_positions`（= pick_place_home 的臂构型，见 2.3），不经 IK；表中其余阶段经 IK |
 | GRASP/CLOSE | 首次 PREGRASP 锁定的物体中心 |
 | PREGRASP/LIFT | 锁定中心上方 0.15 m |
 | PLACE/OPEN | 放置目标 XY（无 bin 时 `(0.5,0.3) m`），支撑面+半高+0.05 m：桌面时 z=0.29 m，bin 内底面时 0.297 m（Week 4.1 Stage 8） |

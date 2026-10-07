@@ -1,6 +1,6 @@
 # Week 5 学习笔记
 
-> **状态（2026-10-07）：计划，尚未开始。** 本周承接 [Week 4.1](week4.1.md)（视觉初始位姿 + 离线 IK 的 pick-and-place，留出集验收 vision 39/40、oracle 40/40）。Week 4.5 的旧计划（多物体、多颜色）已于 2026-10-07 删除，原文见提交 `60293a2`。
+> **状态（2026-10-07）：进行中，Stage 1、2 已完成。** 本周承接 [Week 4.1](week4.1.md)（视觉初始位姿 + 离线 IK 的 pick-and-place，留出集验收 vision 39/40、oracle 40/40）。Week 4.5 的旧计划（多物体、多颜色）已于 2026-10-07 删除，原文见提交 `60293a2`。
 
 ## 学习重点范围
 
@@ -19,6 +19,7 @@
 - [3. VLA 数据契约的审阅与差距](#3-vla-数据契约的审阅与差距)
 - [4. 阶段计划](#4-阶段计划)
 - [Stage 1：基线测量](#stage-1基线测量)
+- [Stage 2：统一的新启动姿态兼 HOME](#stage-2统一的新启动姿态兼-home)
 - [5. 本周最终出口](#5-本周最终出口)
 - [6. 悬挂与暂缓](#6-悬挂与暂缓)
 
@@ -33,7 +34,7 @@
 | U1 | 开始时视觉识别停顿明显 | 窗口要装满 10 帧（相机 10 Hz，0.9 s 仿真）再连续 5 条一致才锁存；Week 4.1 Stage 7 实测约 3.4 s 墙钟。仿真 RTF 约 0.6 |
 | U2 | 夹住盒子后停顿过长 | `fsm.close_settle_s` = 2.0 s：CLOSE 固定等满 2 s 才 LIFT；附着在合拢后约 0.25 s 就确认了（Week 4.1 Stage 13），中间约 1.7 s 是白等 |
 | U3 | 搬运中打滑，盒子整体相对 TCP 偏移 | 实测见第 2 节：盒子在 TCP 坐标系里累计偏 16 mm、转 15°，滑动出现在高加速度段 |
-| U4 | 启动后的初始状态与 start episode 后的状态之间有跳变 | bridge 启动用 MJCF keyframe `home`，executor 的 HOME 是 Cartesian 目标 (0.5545, 0, 0.5211) 经 IK 求得，两者不同；HOME 时手臂还挡住相机看 bin 远侧（Week 4.1 14.6，用户用 rqt 证实） |
+| U4 | 启动后的初始状态与 start episode 后的状态之间有跳变 | （写计划时以为 bridge 启动用预设状态 `home`；Stage 2 实测是启动时不加载任何预设状态，见 2.1）executor 的 HOME 是 Cartesian 目标 (0.5545, 0, 0.5211) 经 IK 求得；HOME 时手臂还挡住相机看 bin 远侧（Week 4.1 14.6，用户用 rqt 证实） |
 | U5 | 纯色的 box 和 bin 不好看 | 放到最后 |
 | U6 | architecture.md 要成为给开发者的最终细节，结构简洁准确 | 放到最后 |
 | U7 | README.md 还不够好 | 现在只有 18 行，停在 Week 3 的描述 |
@@ -145,7 +146,7 @@ MuJoCo 的关节没有“速度上限”这一属性。执行器是 `biastype="a
 
 ### 3.2 契约改为 v0.2（2026-10-07，用户同意）
 
-改动三处，原文备份在 `/tmp/dataset_contract_v0.1_backup.md`（该目录不在版本控制里，重启会丢）：
+改动三处（v0.1 原文曾备份在 `/tmp`，2026-10-07 `/tmp` 被清空时丢失；契约所在目录不在版本控制里，此后过程文件放 `.claude/artifacts/`）：
 
 - **action 的时间形态：** frame t 的 action 是控制器在那一刻实际采用的关节目标，来自满足速度、加速度限值的时间参数化轨迹；相邻帧平滑变化，不是“每阶段一个目标保持后跳变”。导出器拒绝相邻两帧之间任一臂关节目标变化超过“速度上限 × 帧间隔”的记录（10 Hz 时 joint1–4 0.2175 rad、joint5–7 0.261 rad）。夹爪豁免，只取 0.08 和 0.0。
 - **无效深度：** 仿真用 NaN 表示，导出时把 NaN、Inf、非正值换成 0.0。
@@ -193,7 +194,7 @@ C4（RTF）在 Stage 1 测量后决定要不要处理、放在哪个阶段。每
 
 ## Stage 1：基线测量
 
-**状态（2026-10-07）：已完成，尚未提交。** 1.1 是测量之前写定的，没有改动；有效性检查 V1~V3 全部满足。**分量：轻。** 本阶段只测不改：Stage 2 起会改 HOME、运动和等待，这些数字是它们的“改之前”。
+**状态（2026-10-07）：已完成（提交 `ef9608a`）。** 1.1 是测量之前写定的，没有改动；有效性检查 V1~V3 全部满足。**分量：轻。** 本阶段只测不改：Stage 2 起会改 HOME、运动和等待，这些数字是它们的“改之前”。
 
 ### 1.0 一句话总结
 
@@ -292,6 +293,130 @@ RGB 在一个与估计器无关的订阅者那里也只到 22~37%，所以**丢�
 做完了：基线时间线、等待、按阶段切开的打滑、相机到达率、RTF。没有改产品代码。
 
 给后续阶段的输入：Stage 3 的速度、加速度限值（第 2 节）；Stage 4 的打滑基线（PLACE 末 7~16 mm、5~41°，全部在搬运期）；Stage 5 的等待（CLOSE 多等 1.7 s、HOME 0.5 s、VERIFY 0.5 s、vision 锁存 1.4 s）；Stage 6 的 RGB 到达率（22~37%，在估计器之前就丢了）；C4 的 RTF 0.58。
+
+## Stage 2：统一的新启动姿态兼 HOME
+
+**状态（2026-10-07）：已完成。** 2.1、2.2 是实现之前写定的，没有改动（K4 的一个扫描点不合法，见 2.4 的更正）。**分量：重。**
+
+### 2.0 目标
+
+启动、每次 reset、executor 的 HOME、VERIFY 时机械臂停的位置，都是同一个关节姿态；这个姿态不挡相机看桌面工作区（初始检测 box 与 bin、VERIFY 时检测 bin 里的盒子）。
+
+### 2.1 现状（实测）与候选
+
+**用语：** 本节的“预设状态”指 MJCF 里的 `<keyframe>`：一份带名字、预先存好的完整仿真状态（各关节角 qpos、执行器目标 ctrl 等），`mj_resetDataKeyframe` 把仿真恢复成它。这个词借自动画，但与时间序列、图像帧无关；也不要和 executor 的**固定关节表模式**（参数值 `waypoint_source:=keyframe`，Week 2 的遗留模式，每个阶段查一张写死的关节角表，并不读 MJCF 的预设状态）混淆。
+
+**跳变的来源（实测）：** bridge 用 `mj_makeData` 建状态，**启动时是 MuJoCo 的默认状态**（各关节约 0，手臂几乎竖直，TCP 在 (0.13, 0, 0.84)）；第一次 reset 才把它放到预设状态 `pick_place_home`，最大关节跳变 **1.52 rad**。之后每个 episode 结束在 bin 上方，下一个 reset 又把手臂瞬移回预设状态。executor 的 HOME 是 Cartesian 目标 (0.5545, 0, 0.5211) 经 IK，Stage 1 实测它与预设状态的手臂姿态一致（HOME 阶段手臂不动）。
+
+**候选：Franka 标准 ready 姿态** `q = [0, −π/4, 0, −3π/4, 0, π/2, π/4]`，TCP 在 (0.307, 0, 0.487)，工具竖直向下，手的长轴（手指张开方向）沿世界 y。
+
+**几何估计（只是估计，在线以机器人遮罩为准）：** 从相机 (0.5, −0.45, 1.0) 把机械臂各连杆点与手的外形投影到桌面（z = 0.22），看投影是否落进工作区 x ∈ [0.30, 0.70]、y ∈ [−0.30, 0.40]（各点按 5 cm 半径放大）：
+
+| 候选 | 离工作区最近的距离 |
+| --- | --- |
+| 现在的 HOME | −199 mm（落在工作区里） |
+| ready 姿态，但手腕转成手指沿世界 x（`j7 = −π/4`） | −126 mm |
+| **ready 姿态（标准，`j7 = +π/4`）** | **+17.5 mm** |
+
+手的长轴约 0.2 m，横在视线上就会挡住；标准 ready 姿态把它顺着视线方向放，所以只有它是正的。选它还因为它是 Franka 自己的标准姿态，换到真机上没有意外。
+
+### 2.2 设计与出口断言（实现前写定，不因结果改动）
+
+**改动：**
+
+1. 预设状态 `pick_place_home` 的手臂部分与 ctrl 改为 ready 姿态。
+2. bridge 启动时（建模、配置场景之后）就把仿真置为 reset 用的预设状态：启动即 HOME，不再从默认状态开始；generation 仍为 0。
+3. executor 的 HOME 改为**关节目标**（不再经 IK）：新参数 `home.joint_positions`，默认 ready 姿态。单测读 MJCF 里的预设状态，核对两者一致。
+4. **VERIFY 时机械臂回到 HOME**（RETRACT 仍是抬离 bin）：VERIFY 的目标改为 HOME 关节目标，VERIFY 的退出条件加上“机械臂到位”。这样 VERIFY 时手不在相机与 bin 之间；DONE 时机械臂已在 HOME，下一次 reset 只瞬移盒子，不瞬移手臂。
+5. Week 4.1 的收尾（C7）：14.6 的“推断”改为“已由用户用 rqt 证实”，补覆盖缺口的说明。
+
+| 编号 | 条件 | 预期 | 否定条件 |
+| --- | --- | --- | --- |
+| K1 | bridge 刚启动、第一次 reset 前后 | 启动时手臂就在 ready 姿态（各关节与预设状态差 ≤ 0.01 rad）；第一次 reset 的最大关节跳变 ≤ 0.01 rad | 任一超出 |
+| K2 | 单测 | executor 的 `home.joint_positions` 默认值与预设状态的手臂部分逐项相等（≤ 1e-4 rad） | 不等 |
+| K3 | 机械臂在 HOME，估计器的机器人遮罩 | 遮罩像素投到桌面后，落进工作区 x ∈ [0.30, 0.70]、y ∈ [−0.30, 0.40] 的：**0 个** | > 0 |
+| K4 | bin 沿 y 扫：0.20、0.25、0.30、0.35（x = 0.5，yaw 0），机械臂在 HOME | 4 个位置 bin 都 MEASURED；`ros2 launch mujoco_bridge demo.launch.py scene_enabled:=true` 不加别的参数，vision 成功 | 任一检不出，或默认 launch 失败 |
+| K5 | 连续两个 episode（vision，同一布局） | 第一个 DONE 时手臂在 HOME（各关节与 HOME 差 ≤ 0.05 rad）；第二个 episode 的 reset 前后手臂最大跳变 ≤ 0.05 rad | 超出 |
+| K6 | HELD-A（现为回归集）40 个布局，vision 与 oracle | 不比 Week 4.1 Stage 14 差：vision ≥ 39、oracle ≥ 40 成功，零假成功；**布局 16 vision 成功**（VERIFY 不再被手挡） | 任一更差 |
+| K7 | K6 同一批 | 从 HOME 到 PREGRASP 的 IK 全部收敛（没有 `IK_FAILED`） | 出现 `IK_FAILED` |
+
+**不做：** 关节轨迹插值（Stage 3）；HOME 之外的姿态调整；固定关节表模式（`waypoint_source:=keyframe`）的 HOME 不改，它是遗留模式，记在边界里。
+
+### 2.3 改动
+
+| 文件 | 改动 |
+| --- | --- |
+| [pick_place_scene.xml](../../robot_description/mujoco/franka_emika_panda/pick_place_scene.xml) | 预设状态 `pick_place_home` 的手臂 qpos 与 ctrl 改为 ready 姿态 |
+| [mujoco_bridge_node.cpp](../../src/mujoco_bridge/src/mujoco_bridge_node.cpp) | 解析出 reset 用的预设状态后立刻 `resetToKeyframe` 一次（在 `configureScene` 之后，所以盒子与 bin 的布局也在里面），不递增 generation |
+| [waypoint_source.hpp](../../src/task_executor/include/task_executor/waypoint_source.hpp) | 常量 `kFrankaReadyPose` |
+| [diff_ik_waypoint_source.cpp](../../src/task_executor/src/diff_ik_waypoint_source.cpp) | HOME、VERIFY 直接返回 HOME 关节目标（夹爪宽度仍取自任务），不求 IK；诊断里给出该构型的 TCP、残差 0；构造时检查 HOME 有限且在关节极限内 |
+| [fsm.cpp](../../src/task_executor/src/fsm.cpp) | VERIFY 的完成条件加上“机械臂到达目标”（同运动阶段的 0.05 rad、0.05 rad/s） |
+| [task_executor_config.cpp](../../src/task_executor/src/task_executor_config.cpp) | 参数 `home.joint_positions`（7 个值，默认 `kFrankaReadyPose`） |
+| 单测 | `HomeIsTheBridgeResetKeyframe`（K2：用正则读 MJCF 里的预设状态，逐项比对）、`HomeAndVerifyCommandTheHomeJointsWithoutIk`（远离 HOME 的 seed 也给出同一目标，TCP 在 (0.307, 0, 0.487)、朝下）、`RejectsAHomeOutsideTheJointLimits`、`VerifyWaitsForTheArmToReturnHome`；`test_fsm` 的 HOME 常量改为新姿态，两个 VERIFY 用例补上“手臂已到位” |
+| [initial_box_probe.py](../../src/mujoco_perception/test/initial_box_probe.py) | P1（及 Stage 7 的 A1）的判定改为按到达时间，见 2.4 的 P1 一段 |
+| 文档 | architecture 2.3、5、6.1、6.2（HOME、启动状态、VERIFY、用语）；Week 4.1 14.6 的 C7 修订 |
+
+**为什么 HOME 要改成关节目标，而不只是改个数值。** 改之前“HOME”有两份定义，用的不是同一种量：
+
+| 在哪 | 存的是什么 |
+| --- | --- |
+| MJCF 预设状态 `pick_place_home` | 7 个**关节角** |
+| executor 的 HOME | 一个 **TCP 位姿**（位置 (0.5545, 0, 0.5211)、工具朝下）；每个 episode 用 IK 从它反算出关节角再发给 bridge |
+
+两者对得上，是因为那个 TCP 位姿当初就是从 MJCF 的关节角算出来的（Stage 1 实测 HOME 阶段手臂不动）。如果只把 executor 的 TCP 位姿改成 ready 姿态的 TCP (0.307, 0, 0.487)，会出问题：Panda 有 7 个关节，TCP 位姿只确定 6 个量（3 个位置、3 个转角），多出 1 个自由度，**同一个 TCP 位姿对应无穷多组关节角**（肘部可高可低、上臂可绕着转），IK 给出哪一组取决于迭代的初值。于是：
+
+- IK 解出的不一定是 ready 姿态，开局手臂会动一下，“启动 = reset = HOME”不成立；
+- K3 的“不挡相机”是按 ready 姿态下整条手臂的位置算的，TCP 相同而肘部不同，遮挡也不同，结论不适用。
+
+所以 HOME（以及 VERIFY）直接发 7 个关节角 `home.joint_positions`，不经过 IK；executor 与 MJCF 存的是同一种量、同一组数，单测逐项比对。其余阶段的目标取决于盒子和 bin 在哪，只能给出 TCP 位姿，照旧用 IK。
+
+**副作用（2.4 的 P1 就是它引起的）：** 以前 HOME 要先求一次 IK 才能发出第一条命令，锁存完成（LATCHED）和第一条命令之间总隔着一段计算；现在不用算，两条消息几乎同时发出。
+
+一次性测量脚本（K1、K3、K4、K5、P1/P5 排查）放在 `.claude/artifacts/week5_stage2/`，不进仓库。
+
+### 2.4 结果
+
+| 编号 | 结果 | 判定 |
+| --- | --- | --- |
+| K1 | 启动后第一个样本离 ready 姿态 0.0004 rad；第一次 reset 的最大关节跳变 **0.005 rad**（改之前 1.52 rad） | 通过 |
+| K2 | 单测通过（`colcon test` mujoco_bridge + task_executor：760 项，0 失败） | 通过 |
+| K3 | 10 帧机器人遮罩的并集 8234 像素，投到桌面后落进工作区的 **0 个**，离工作区最近 79.6 mm；投影自检：TCP (0.306, 0, 0.484) 投到的像素在遮罩内 | 通过 |
+| K4 | bin 在 y = 0.20、0.25、0.30、0.32 都 MEASURED（21/21 条，误差 ≤ 1.3 mm）；默认 launch `scene_enabled:=true` 不加参数，vision 成功、零重试 | 通过，但见下面的更正 |
+| K5 | 同一 launch 连跑两个 episode，都成功、零重试；DONE 时手臂离 HOME 0.006 rad；两次之间的 reset 跳变 0.006 rad | 通过 |
+| K6 | 见下 | |
+| K7 | 没有 `IK_FAILED` | 通过 |
+
+**K4 的更正（我的错误）：** 2.2 写的扫描点 y = 0.35 本身不是合法布局：bin 外沿半宽 71 mm，y = 0.35 时外沿到 0.421，超出桌面（y ≤ 0.4），bridge 按设计拒绝启动。写断言时没有核对桌面边界。bin 能放的最远处是 y ≈ 0.329，所以用 y = 0.32 代替 0.35；其余三个点不变。
+
+**K6（HELD-A 回归，vision）：** 按改正后的 P1 判定重跑一遍：**40/40 成功、零重试、零假成功**，没有 `IK_FAILED`；**布局 16 成功**（Stage 14 里 VERIFY 被手挡住的那个）；P1~P4、P6 全部 40/40，**P5 39/40（布局 29 告警）**；估计器在 ATTACHED 样本上发出的消息 0 条（N1）。第一次回归（改判定之前）同样 40/40 成功，P1 5 个误报、P5 也只有布局 29。
+
+HELD-A 是 Week 4.1 Stage 14 建的留出集：固定种子 20261006 生成的 40 个布局（box 与 bin 在 x ∈ [0.38, 0.62]、y ∈ [−0.22, 0.22] 内随机位置与朝向，太近的重抽），规则在第一次跑之前写定（[week4.1 14.1](week4.1.md)）。Stage 14 跑过之后它已不再“留出”，现在只当回归集，回答“改完有没有比以前差”；没碰过的 HELD-B（种子 20261009）留给本周最终验收。每个布局起一套新的 bridge、估计器、executor 跑一个 episode，记录成功与否、重试、失败归类，以及过程断言 P1~P6（如 P1：锁存完成之前没有关节命令；P5：搬运期没有开度告警）。
+
+**用语：锁存（LATCHED）。** reset 之后估计器每帧给一个盒子、bin 位置，每帧都略有抖动；executor 先观察，等连续 5 条有效测量的 x、y 相差 ≤ 3 mm、朝向相差 ≤ 3°，就把最新那条“锁住”，这个 episode 一直用它（Week 4.1 Stage 7）。状态每 50 ms 发布到 `/task_executor/initial_pose_latch`：WAITING（还在等）、LATCHED（盒子与 bin 都锁住）、FAILED（10 s 内没锁住）。锁存之前 executor 不知道盒子在哪，按设计不发任何关节命令；Stage 1 量到的 vision 开局停顿约 1.4 s 主要就是在等它。
+
+- **oracle 没有跑完。** 跑到 19 个（19/19 成功、零重试、P1~P6 全部成立）时，用户决定停掉 oracle、以后不再跑，所以 K6 里“oracle ≥ 40”一项**没有执行**，不算通过。
+- **P1 的 5 次失败是探针的测量方法错了，不是 executor 提前发命令（第一次回归：布局 14、22、25、32、33）。** P1 原来按“两个话题的消息到达探针的先后”判定。executor 的 50 ms 定时回调里顺序固定：先发锁存状态（LATCHED），再发第一条命令；观测准入（`onObservation`）不产生命令。但这是两个话题，到达先后没有保证：重跑布局 14，命令比 LATCHED **早 0.12 ms** 到达；布局 32 晚 0.26 ms。真正提前的命令至少早一个回调（50 ms）。为什么 Stage 14 一次也没碰到：以前 HOME 要先求 IK，两条消息之间隔着一次求解；现在 HOME 不求 IK，只隔零点几毫秒（IK 的耗时没测，这是推断）。修法（用户同意）：断言不变，判定改为“命令比 LATCHED 早到超过半个周期（25 ms）才算”，Stage 7 的 A1 是同一个检查，一起改。
+- **P5：布局 29 是真打滑掉盒，盒子碰巧落进 bin。** 逐帧看盒子相对 TCP 的位置：LIFT 时偏 9.6 mm，搬运到 bin 上方（TCP 峰值 1.72 m/s）累计偏到 37 mm，PLACE 下降时从指间滑出（开度降到 4 mm，bridge 的附着仍锁存为 ATTACHED），最后落在 bin 里，所以判为成功。Stage 14 里这个布局没有告警。**是不是 Stage 2 造成的没有证明**：换了起点，IK 的初值链跟着变，搬运时的关节构型也不同（这次搬运中 joint7 转了 0.43 rad），可能是原因；要确认需要用旧 HOME 对比，用户决定不做。现象与 Stage 1 的“打滑全在搬运期、伴随高速”一致，归 Stage 3、4。**布局 29 记为 Stage 3、4 必须通过的回归用例。**
+
+**判定：** K6 没有完全满足——oracle 部分未执行，P5 比 Stage 14 多一次告警。用户同意按现状收尾（2026-10-07）。
+
+### 2.5 你没问但值得注意的
+
+- **（E 可测试性）跨话题的先后不能当断言。** P1 这次是按“到达顺序”判的，executor 内部一个很小的时序变化（不再求 IK）就让它误报。凡是比较两个话题先后的检查都有同样的问题；Stage 6 要做“命令生效证据”，那里应当让消息自己带时间戳或序号（executor 发命令时盖上它依据的观测序号），而不是靠到达顺序。
+- **（C 可观测性）“成功”里混着掉盒。** 布局 29 的盒子从手里滑出、碰巧落进 bin，outcome 是干净的成功，只有探针的开度告警看得见。这正是 C5 担心的：挑 VLA 训练数据时，要把“搬运期出现开度告警”的 episode 排除，而现在 outcome 里没有这个字段（告警只在日志里）。
+- **（E 可测试性）HELD-A 已不是留出集，而且它的 bin 只在 y ∈ [−0.22, 0.22]。** 这次 K4 单独扫了 y = 0.20~0.32，但完整 episode 的回归仍只覆盖 HELD-A 的范围。本周最终验收用 HELD-B 时，生成器的 bin 范围要按桌面实际可放的范围（y 到 ±0.329）重写，否则又是同一个覆盖缺口。
+- **（C 可观测性）DONE 现在依赖“手臂回到 HOME”。** 如果将来 HOME 附近有东西挡住手臂（或 Stage 3 的轨迹回 HOME 很慢），VERIFY 会以 `PLACE_MISSED` 超时，但真实原因是手臂没到位；失败码分不出两者。
+
+### 2.6 本阶段边界与后续
+
+做完了：启动、reset、HOME、VERIFY 停在同一个关节姿态（Franka ready），启动与 reset 之间、episode 之间都不再瞬移手臂；HOME 时机器人遮罩不覆盖工作区；默认 bin 位置可见，默认 launch 直接成功；Week 4.1 的 C7。
+
+没有做：
+- 固定关节表模式（`waypoint_source:=keyframe`）的 HOME 仍是旧姿态（遗留模式，Stage 7 清理时一并处理）；Week 3 的对照场景 `stage_n_shifted_scene.xml` 的预设状态也没改，只有 Week 3 的实验用它。
+- oracle 的回归（用户决定不再跑）。
+- 布局 29 的打滑（Stage 3、4）。
+
+给后续阶段的输入：布局 29 是打滑的回归用例；Stage 3 的轨迹从 ready 姿态出发、在 VERIFY 回到它，HOME 的时长要按轨迹重新算；Stage 6 的命令生效证据不要依赖跨话题的到达顺序。
 
 ---
 

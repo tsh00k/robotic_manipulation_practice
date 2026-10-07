@@ -14,11 +14,13 @@
 
 #pragma once
 
+#include <array>
 #include <cstddef>
 
 #include <rclcpp/node.hpp>
 
 #include "task_executor/cartesian_waypoint_source.hpp"
+#include "task_executor/waypoint_source.hpp"
 #include "task_executor/fsm.hpp"
 
 namespace task_executor
@@ -95,6 +97,9 @@ struct TaskExecutorConfig
   // fixed target on the table (the legacy scene has no bin). The demo launch sets it with
   // scene_enabled. Replaces Stage 7's latch.require_bin.
   bool place_into_bin = false;
+  // HOME, and where VERIFY returns to (Week 5 Stage 2): a joint target in the diff_ik mode,
+  // the same configuration as the bridge's reset keyframe.
+  std::array<double, 7> home_joint_positions = kFrankaReadyPose;
 };
 
 const char * waypointModeName(WaypointMode mode);

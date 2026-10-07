@@ -16,6 +16,7 @@
 
 #include <Eigen/Geometry>
 
+#include <array>
 #include <optional>
 #include <memory>
 
@@ -35,12 +36,16 @@ struct WaypointDiagnostics
 // Solves once on phase entry, then holds the commanded joint target while the
 // physical arm settles. The grasp-side object reference is latched at PREGRASP;
 // later object motion while carried cannot drag the target along with it.
+// HOME and VERIFY are a joint target, not an IK solution: the arm starts every episode
+// in the configuration it was reset to, and returns there to look at the bin (Week 5
+// Stage 2).
 class DiffIkWaypointSource : public WaypointSource
 {
 public:
   DiffIkWaypointSource(
     arm_kinematics::ArmModel model,
-    std::shared_ptr<const CartesianWaypointSource> cartesian_source);
+    std::shared_ptr<const CartesianWaypointSource> cartesian_source,
+    std::array<double, 7> home_joint_positions = kFrankaReadyPose);
 
   void beginEpisode();
   void setSeed(const std::array<double, 7> & positions);
@@ -51,6 +56,7 @@ public:
 private:
   arm_kinematics::ArmModel model_;
   std::shared_ptr<const CartesianWaypointSource> cartesian_source_;
+  std::array<double, 7> home_joint_positions_;
   arm_kinematics::JointVector seed_ = arm_kinematics::JointVector::Zero();
   bool have_seed_ = false;
   mutable std::optional<Phase> cached_phase_;

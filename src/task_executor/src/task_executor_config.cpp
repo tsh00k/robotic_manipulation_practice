@@ -14,8 +14,10 @@
 
 #include "task_executor/task_executor_config.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <stdexcept>
+#include <vector>
 
 namespace task_executor
 {
@@ -84,6 +86,13 @@ TaskExecutorConfig loadTaskExecutorConfig(rclcpp::Node & node)
     "latch.max_yaw_spread_deg", config.latch.max_yaw_spread_rad * 180.0 / M_PI) * M_PI / 180.0;
   config.latch.timeout_s = node.declare_parameter("latch.timeout_s", config.latch.timeout_s);
   config.place_into_bin = node.declare_parameter("place.into_bin", config.place_into_bin);
+  const std::vector<double> home = node.declare_parameter(
+    "home.joint_positions",
+    std::vector<double>(config.home_joint_positions.begin(), config.home_joint_positions.end()));
+  if (home.size() != config.home_joint_positions.size()) {
+    throw std::invalid_argument("home.joint_positions must have 7 values");
+  }
+  std::copy(home.begin(), home.end(), config.home_joint_positions.begin());
   config.task.tcp_target_x_m = node.declare_parameter("target.place_x_m", 0.5);
   config.task.tcp_target_y_m = node.declare_parameter("target.place_y_m", 0.3);
   config.task.hover_height_m = node.declare_parameter("target.hover_height_m", 0.15);

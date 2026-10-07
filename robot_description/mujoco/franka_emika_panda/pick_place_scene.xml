@@ -68,8 +68,13 @@
        a compile error -- it only gets caught here because the two keyframes also
        happen to collide on the name "home". See week2.md 8.8 for the full
        first-conclusion-was-wrong writeup, including the actual reset output. -->
+  <!-- The arm part is Franka's standard "ready" configuration (Week 5 Stage 2): the bridge
+       starts in this keyframe and resets to it, and task_executor's HOME is the same joint
+       target (kFrankaReadyPose, checked by test_diff_ik_waypoint_source). Chosen so that the
+       arm and hand stay out of the camera's view of the workspace. -->
   <keyframe>
-    <key name="pick_place_home" qpos="0 0 0 -1.57079 0 1.57079 -0.7853 0.04 0.04 0.5 0 0.241 1 0 0 0"
-      ctrl="0 0 0 -1.57079 0 1.57079 -0.7853 255"/>
+    <key name="pick_place_home"
+      qpos="0 -0.785398163397 0 -2.35619449019 0 1.57079632679 0.785398163397 0.04 0.04 0.5 0 0.241 1 0 0 0"
+      ctrl="0 -0.785398163397 0 -2.35619449019 0 1.57079632679 0.785398163397 255"/>
   </keyframe>
 </mujoco>

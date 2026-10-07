@@ -1880,7 +1880,7 @@ ROS_DOMAIN_ID=84 /usr/bin/python3 $P held --source oracle --count 1 --truth-offs
 1. **VERIFY 被手挡住**（布局 16）：可能的做法有 RETRACT 抬得更高、RETRACT 时把手移出相机与 bin 的视线、或 VERIFY 看不见时报感知层失败而不是 `OBSERVATION_STALE`；要先用图像证实原因，再扫 bin 的 y 量出受影响的区域。
 2. 成功时清空 `observation_failure_reason`。
 3. 告警时立刻重试（Stage 12 留给你定的）。
-3b. 默认 bin 位置在视觉范围外（14.6 第 2 条）。
+3b. 默认 bin 位置在视觉范围外（14.6 第 2 条；Week 5 Stage 2 已修）。
 4. 旧检测路径与 `VisionObjectPose`、三个已不起作用的 `vision.*` 参数的清理（Stage 5 的 5.11、Stage 11）。
 5. 悬挂清单里的其余各项（第 4 节）。
 
@@ -1890,7 +1890,9 @@ ROS_DOMAIN_ID=84 /usr/bin/python3 $P held --source oracle --count 1 --truth-offs
 
 **1. 默认参数直接 launch，vision 没有图像（已修）。** Stage 11 把 `observation_source` 的默认值改成 `vision`，`enable_rgbd_camera` 却仍默认 `false`；直接 `ros2 launch mujoco_bridge demo.launch.py` 会起 vision 的 executor 而相机是关的，锁存 10 s 超时。Stage 11 的 G5 只检查了“默认值改了、launch 守卫测试通过”，没有用默认参数真跑一次。修法：launch 参数 `enable_rgbd_camera` 默认改为 `auto`，随 `observation_source` 走（vision 开、oracle 关），显式 true/false 照办；`test_scene_launch.py` 加了 2 项（`auto` 的四种组合与非法值、默认值组合给 vision 开相机）。用 `ros2 launch mujoco_bridge demo.launch.py scene_enabled:=true` 只加这一个参数真跑：相机开、估计器起来——**但又碰到了第 2 件事**。
 
-**2. bridge 的默认 bin 位置 (0.5, 0.3) 在视觉看得见的范围之外（未修，等你定）。** 上面那次运行以 `VISION_LATCH_TIMEOUT` 结束，原因 `BIN:WAITING:NO_RECTANGLE_MATCHES_BIN`。bin 检测器看到的块只有 151 × 76 mm，中心在 y = 0.268（真值 0.30），**远离相机的那一半没了**。把 bin 沿 y 移动量了一次：y = 0.30 和 0.25 检不出（块宽 76、126 mm），0.22 和 0.20 检得出。本周所有视觉验证用的布局 y 都在 [−0.22, 0.22]（Stage 3 的协议），从没测过默认位置。**原因是推断，没有看图像：** 机械臂在 HOME 时手在 (0.55, 0, 0.52) 附近，从相机 (0.5, −0.45, 1.0) 看向 y ≈ 0.3 的视线正好从手和前臂旁边经过，挡住 bin 远侧；机器人遮罩把这些像素去掉，bin 就被截断了。加上 `bin_y:=0.2` 后同一条 launch 命令真跑：vision 成功、零重试，盒子在 bin 内（最小角余量 39.1 mm）。
+**2. bridge 的默认 bin 位置 (0.5, 0.3) 在视觉看得见的范围之外（Week 5 Stage 2 已修：HOME 改为 Franka ready 姿态）。** 上面那次运行以 `VISION_LATCH_TIMEOUT` 结束，原因 `BIN:WAITING:NO_RECTANGLE_MATCHES_BIN`。bin 检测器看到的块只有 151 × 76 mm，中心在 y = 0.268（真值 0.30），**远离相机的那一半没了**。把 bin 沿 y 移动量了一次：y = 0.30 和 0.25 检不出（块宽 76、126 mm），0.22 和 0.20 检得出。本周所有视觉验证用的布局 y 都在 [−0.22, 0.22]（Stage 3 的协议），从没测过默认位置。**原因（写这段时是推断，之后已由用户用 rqt 看图像证实）：** 机械臂在 HOME 时手在 (0.55, 0, 0.52) 附近，从相机 (0.5, −0.45, 1.0) 看向 y ≈ 0.3 的视线正好从手和前臂旁边经过，挡住 bin 远侧；机器人遮罩把这些像素去掉，bin 就被截断了。加上 `bin_y:=0.2` 后同一条 launch 命令真跑：vision 成功、零重试，盒子在 bin 内（最小角余量 39.1 mm）。
+
+**这暴露了一个覆盖缺口，Stage 14 的结论要按它收窄：** 本周所有视觉测试（含 HELD-A）的 bin 都在 y ∈ [−0.22, 0.22]，所以 **Stage 14 的 vision 39/40 只在这个范围内成立**，不能推到整张桌子。修复与 bin 可见范围的扫描、HELD-A 回归见 [Week 5 Stage 2](week5.md#stage-2统一的新启动姿态兼-home)。
 
 ### 14.9 原计划（2026-10-06 之前写的，保留作对照）
 

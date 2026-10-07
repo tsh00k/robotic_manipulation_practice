@@ -72,7 +72,8 @@ public:
         arm_kinematics::loadFrankaFerModel(
           share + "/robots/fer/kinematics.yaml",
           share + "/robots/fer/joint_limits.yaml"),
-        std::make_shared<PickPlaceCartesianWaypointSource>(config_.task.geometry()));
+        std::make_shared<PickPlaceCartesianWaypointSource>(config_.task.geometry()),
+        config_.home_joint_positions);
       waypoint_source_ = diff_ik_source_.get();
     } else if (config_.waypoint_mode == WaypointMode::kKeyframe) {
       waypoint_source_ = &keyframe_source_;

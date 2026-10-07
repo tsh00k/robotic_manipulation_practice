@@ -205,7 +205,9 @@ class Rig:
         self.logs = []
         self.observations = []
         self.messages = []
-        self.events = []  # ('cmd',) and ('latch', message) in the order they arrived
+        # ('cmd', None, t) and ('latch', message, t) in the order they arrived; t is the probe's
+        # monotonic arrival time (see commands_before_latch)
+        self.events = []
         self.bin_messages = []
         self.object_poses = []
         self.depth_stamps = []
@@ -217,10 +219,10 @@ class Rig:
             self.observations.append, 200)
         self.node.create_subscription(
             JointTrajectory, '/mujoco_bridge/joint_command',
-            lambda m: self.events.append(('cmd',)), 50)
+            lambda m: self.events.append(('cmd', None, time.monotonic())), 50)
         self.node.create_subscription(
             InitialPoseLatch, '/task_executor/initial_pose_latch',
-            lambda m: self.events.append(('latch', m)), 200)
+            lambda m: self.events.append(('latch', m, time.monotonic())), 200)
         self.node.create_subscription(
             VisionObjectPose, '/object_pose_estimator/object_pose',
             self.object_poses.append, 200)
@@ -496,6 +498,20 @@ def grasp_targets():
             for m in GRASP_LINE.finditer(EXECUTOR_LOG.read_text(errors='replace'))]
 
 
+# The executor publishes the latch status and then, in the same 50 ms timer callback, the first
+# command. They are two topics, so the probe may receive the command a fraction of a millisecond
+# before LATCHED (Week 5 Stage 2: 0.12 ms on HELD-A layout 14). A command the executor really sent
+# before latching comes at least one callback earlier, so only those more than half a period
+# before LATCHED count.
+COMMAND_ORDER_SLACK_S = 0.025
+
+
+def commands_before_latch(rig, first_status, first_latched):
+    latched_at = rig.events[first_latched][2]
+    return [i for i in range(first_status, first_latched) if rig.events[i][0] == 'cmd' and
+            rig.events[i][2] < latched_at - COMMAND_ORDER_SLACK_S]
+
+
 def statuses(rig, generation):
     return [(i, e[1]) for i, e in enumerate(rig.events)
             if e[0] == 'latch' and e[1].generation == generation]
@@ -510,7 +526,7 @@ def check_generation(rig, generation, truth_box, truth_bin, label):
         last = found[-1][1].box.status if found else 'none'
         return [f'{label}: never LATCHED (last status: {last})']
     first_status, first_latched = found[0][0], latched[0][0]
-    commands = [i for i in range(first_status, first_latched) if rig.events[i][0] == 'cmd']
+    commands = commands_before_latch(rig, first_status, first_latched)
     if commands:
         problems.append(f'{label} A1 {len(commands)} joint commands between the first status and '
                         f'LATCHED')
@@ -1192,8 +1208,7 @@ def held_episode(args, index, layout, offset):
                          if e[0] == 'latch' and e[1].generation == gen]
                 hit = [(i, m) for i, m in found if m.state == InitialPoseLatch.LATCHED]
                 if found and hit:
-                    commands = sum(1 for i in range(found[0][0], hit[0][0])
-                                   if rig.events[i][0] == 'cmd')
+                    commands = len(commands_before_latch(rig, found[0][0], hit[0][0]))
                     checks.setdefault('P1', True)
                     checks['P1'] = checks['P1'] and commands == 0
                     latched[gen] = hit[0][1]

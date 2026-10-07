@@ -189,7 +189,11 @@ FsmDecision step(const FsmInputs & in, const JointTarget & target, const FsmPara
           {in.box_x_m, in.box_y_m, in.box_z_m, in.box_yaw_rad}, params.bin,
           params.containment).inside :
           std::hypot(dx, dy) < params.place_region_radius_m;
-        if (placed && released && pastMinSettle(in, params)) {
+        // The arm is back at its VERIFY target too (HOME, Week 5 Stage 2): out of the camera's
+        // view of the bin, and where the next reset puts it, so DONE leaves nothing to jump.
+        const bool arm_back = armReached(
+          in.arm, target.arm_positions, params.position_epsilon_rad, params.velocity_epsilon_rad_s);
+        if (placed && released && arm_back && pastMinSettle(in, params)) {
           return {Phase::kDone, ExitReason::kReached, false};
         }
         if (in.elapsed_in_phase_s > params.phase_timeout_s) {

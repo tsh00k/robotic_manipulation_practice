@@ -91,6 +91,8 @@ CartesianWaypoint PickPlaceCartesianWaypointSource::waypointFor(
   const double place_box_z = place.support_z + geometry_.box_half_height_m;
   switch (phase) {
     case Phase::kHome:
+      // DiffIkWaypointSource commands HOME (and VERIFY) as a joint target instead of this
+      // pose (Week 5 Stage 2); only the gripper width below is used for them.
       waypoint.world_to_hand_tcp = downwardPose(0.5545, 0.0, 0.5211, geometry_.tool_yaw_rad);
       break;
     case Phase::kPregrasp:

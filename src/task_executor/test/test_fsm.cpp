@@ -58,7 +58,7 @@ ArmState settledAt(const std::array<double, 7> & positions)
   return a;
 }
 
-constexpr std::array<double, 7> kHomeArm = {0.0, 0.0, 0.0, -1.5708, 0.0, 1.5708, -0.7853};
+constexpr std::array<double, 7> kHomeArm = kFrankaReadyPose;
 
 TEST(Fsm, MotionPhaseAdvancesOnceSettledPastMinSettle)
 {
@@ -312,10 +312,32 @@ TEST(Fsm, VerifyDoneWhenBoxNearPlaceAndReleased)
   in.box_y_m = 0.30;  // within place_region_radius_m of (0.43, 0.31)
   in.grasp_signals.left_finger_contact = false;
   in.grasp_signals.right_finger_contact = false;
+  in.arm = settledAt(kHomeArm);
   in.elapsed_in_phase_s = 1.0;
   const FsmDecision d = step(in, targetAt(kHomeArm), defaultParams());
   EXPECT_EQ(d.next_phase, Phase::kDone);
   EXPECT_EQ(d.exit_reason, ExitReason::kReached);
+}
+
+// VERIFY's target is HOME (Week 5 Stage 2): a box already in place is not DONE while the arm
+// is still on its way back, so DONE always leaves the arm where the next reset puts it.
+TEST(Fsm, VerifyWaitsForTheArmToReturnHome)
+{
+  FsmInputs in;
+  in.phase = Phase::kVerify;
+  in.attachment_state = 2;
+  in.box_x_m = 0.43;
+  in.box_y_m = 0.30;
+  in.elapsed_in_phase_s = 1.0;
+  std::array<double, 7> on_the_way = kHomeArm;
+  on_the_way[1] += 0.2;
+  in.arm = settledAt(on_the_way);
+  EXPECT_EQ(step(in, targetAt(kHomeArm), defaultParams()).next_phase, Phase::kVerify);
+  in.arm = settledAt(kHomeArm);
+  in.arm.velocities[3] = 0.3;  // there, but still moving
+  EXPECT_EQ(step(in, targetAt(kHomeArm), defaultParams()).next_phase, Phase::kVerify);
+  in.arm = settledAt(kHomeArm);
+  EXPECT_EQ(step(in, targetAt(kHomeArm), defaultParams()).next_phase, Phase::kDone);
 }
 
 TEST(Fsm, WithABinVerifyIsDoneOnlyWhenTheBoxIsInsideTheBin)
@@ -331,6 +353,7 @@ TEST(Fsm, WithABinVerifyIsDoneOnlyWhenTheBoxIsInsideTheBin)
   in.box_y_m = -0.12;
   in.box_z_m = 0.247;
   in.box_yaw_rad = 0.7;
+  in.arm = settledAt(kHomeArm);
   EXPECT_EQ(step(in, targetAt(kHomeArm), params).next_phase, Phase::kDone);
 
   // 45 mm off centre: inside the old 0.08 m radius, but in the bin frame a corner reaches

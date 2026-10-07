@@ -18,15 +18,26 @@
 #include <stdexcept>
 #include <utility>
 
+#include "arm_kinematics/forward_kinematics.hpp"
+
 namespace task_executor
 {
 DiffIkWaypointSource::DiffIkWaypointSource(
   arm_kinematics::ArmModel model,
-  std::shared_ptr<const CartesianWaypointSource> cartesian_source)
-: model_(std::move(model)), cartesian_source_(std::move(cartesian_source))
+  std::shared_ptr<const CartesianWaypointSource> cartesian_source,
+  std::array<double, 7> home_joint_positions)
+: model_(std::move(model)), cartesian_source_(std::move(cartesian_source)),
+  home_joint_positions_(home_joint_positions)
 {
   if (!cartesian_source_) {
     throw std::invalid_argument("Cartesian waypoint source must not be null");
+  }
+  arm_kinematics::JointVector home;
+  for (std::size_t i = 0; i < home_joint_positions_.size(); ++i) {
+    home(static_cast<Eigen::Index>(i)) = home_joint_positions_[i];
+  }
+  if (!home.allFinite() || !arm_kinematics::withinJointLimits(model_, home)) {
+    throw std::invalid_argument("HOME joint positions must be finite and within joint limits");
   }
 }
 
@@ -69,6 +80,21 @@ JointTarget DiffIkWaypointSource::jointTargetFor(
   // target and do not read the box pose.
   const ObjectPose & task_object = grasp_object_pose_.value_or(object_pose);
   const CartesianWaypoint waypoint = cartesian_source_->waypointFor(phase, task_object, place);
+  if (phase == Phase::kHome || phase == Phase::kVerify) {
+    // No IK: the gripper width comes from the task, the arm is the HOME configuration, and the
+    // diagnostics report that configuration's own TCP with zero residual.
+    arm_kinematics::IkResult exact;
+    exact.status = arm_kinematics::IkStatus::kConverged;
+    for (std::size_t i = 0; i < home_joint_positions_.size(); ++i) {
+      exact.q(static_cast<Eigen::Index>(i)) = home_joint_positions_[i];
+    }
+    exact.position_error = 0.0;
+    exact.orientation_error = 0.0;
+    cached_target_ = JointTarget{home_joint_positions_, waypoint.gripper_width_m};
+    cached_phase_ = phase;
+    diagnostics_ = WaypointDiagnostics{arm_kinematics::fk(model_, exact.q).hand_tcp, exact};
+    return cached_target_;
+  }
   const Eigen::Isometry3d & tcp_target = waypoint.world_to_hand_tcp;
   const auto result = arm_kinematics::solveIk(model_, seed_, tcp_target);
   if (result.status != arm_kinematics::IkStatus::kConverged) {

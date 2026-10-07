@@ -57,6 +57,13 @@ struct JointTarget
   double gripper_width_m = 0.0;
 };
 
+// Franka's standard "ready" configuration (joint1..joint7). Also the MJCF keyframe
+// `pick_place_home` the bridge starts in and resets to; test_diff_ik_waypoint_source checks
+// the two agree. Chosen because the arm and hand then stay out of the camera's view of the
+// workspace (Week 5 Stage 2).
+inline constexpr std::array<double, 7> kFrankaReadyPose{
+  0.0, -0.785398163397, 0.0, -2.35619449019, 0.0, 1.57079632679, 0.785398163397};
+
 // Swappable target abstraction (week2.md Stage I). KeyframeWaypointSource is a
 // fixed lookup table; DiffIkWaypointSource uses object_pose and offline IK.
 // The FSM consumes JointTarget without knowing which source produced it.
