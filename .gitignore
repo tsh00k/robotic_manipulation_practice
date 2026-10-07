@@ -12,3 +12,6 @@ CMakeCache.txt
 # record_demo_bag.sh actually produces; see week2.md Stage J 11.8.
 results/bags/
 results/pick_place_run.csv
+# Process artifacts of the probes (node logs, result files): kept in the workspace
+# instead of /tmp so that a reboot does not lose them, but not committed.
+.claude/artifacts/

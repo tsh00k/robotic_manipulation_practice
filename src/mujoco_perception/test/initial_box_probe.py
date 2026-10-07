@@ -23,7 +23,7 @@ Source the workspace under test and use an otherwise unused ROS domain:
     ROS_DOMAIN_ID=84 /usr/bin/python3 src/mujoco_perception/test/initial_box_probe.py episode
 
 All commands start their own nodes as direct executables (never through ros2 run), log to
-/tmp/initial_box_probe_*.log and always reap them.
+.claude/artifacts/logs/initial_box_probe_*.log and always reap them.
 
 static   One bridge per random layout (seed 20261008; box AND bin positions and the bin yaw are
          random, and the box keeps the bridge's 20 mm clearance from the bin), the arm at HOME,
@@ -166,6 +166,10 @@ from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import Empty
 from trajectory_msgs.msg import JointTrajectory
 
+# Process artifacts (node logs, result files) live in the workspace, not in /tmp, so that a
+# reboot does not lose them; .claude/artifacts/ is ignored by git.
+ARTIFACTS = Path(__file__).resolve().parents[3] / '.claude' / 'artifacts'
+LOGS = ARTIFACTS / 'logs'
 BEST_EFFORT = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, depth=50)
 XY_LIMIT_M = 0.003
 Z_LIMIT_M = 0.002
@@ -256,7 +260,8 @@ class Rig:
                 executor_arguments += ['-p', item.replace('=', ':=', 1)]
             nodes.append(('task_executor', 'task_executor_node', executor_arguments, {}))
         for package, name, arguments, env in nodes:
-            log = open(f'/tmp/initial_box_probe_{package}.log', 'w')
+            LOGS.mkdir(parents=True, exist_ok=True)
+            log = open(LOGS / f'initial_box_probe_{package}.log', 'w')
             self.logs.append(log)
             self.processes.append(subprocess.Popen(
                 [str(self.install / package / 'lib' / package / name)] + arguments,
@@ -273,7 +278,7 @@ class Rig:
                       f'/clock publishers={clock_publishers}')
             self.close()
             raise RuntimeError(
-                f'nodes did not come up ({detail}); see /tmp/initial_box_probe_*.log')
+                f'nodes did not come up ({detail}); see {LOGS}/initial_box_probe_*.log')
 
     def spin_until(self, predicate, timeout):
         deadline = time.monotonic() + timeout
@@ -480,7 +485,7 @@ def run_gaps(args):
 
 GRASP_LINE = re.compile(
     r'phase GRASP target_frame=world tcp_xyz=\[([-\d.]+) ([-\d.]+) ([-\d.]+)\]')
-EXECUTOR_LOG = Path('/tmp/initial_box_probe_task_executor.log')
+EXECUTOR_LOG = LOGS / 'initial_box_probe_task_executor.log'
 
 
 def grasp_targets():
@@ -941,7 +946,7 @@ def run_verify(args):
     return 0 if not failures else 1
 
 
-BRIDGE_LOG = Path('/tmp/initial_box_probe_mujoco_bridge.log')
+BRIDGE_LOG = LOGS / 'initial_box_probe_mujoco_bridge.log'
 FAULT_LINE = re.compile(r'fault\.drop_box_after_attach_s: .* at sim t=([\d.]+)s')
 ALERT_LINE = re.compile(r'(CARRY_WIDTH_LOW: [^(]*)\(sim t=([\d.]+)s')
 
@@ -1603,11 +1608,12 @@ def main():
                                  'held', 'held-summary', 'timeline', 'episode'])
     parser.add_argument('--workspace', default=str(Path(__file__).resolve().parents[3]))
     parser.add_argument('--count', type=int, default=6)
-    parser.add_argument('--out', default='/tmp/stage14/held.jsonl', help='held: JSON lines')
+    parser.add_argument('--out', default=str(ARTIFACTS / 'held' / 'held.jsonl'),
+                        help='held: JSON lines')
     parser.add_argument('--truth-offset', type=float, default=0.0,
                         help='held: bridge fault.truth_offset_x_m (N3)')
     for name in ('vision', 'oracle', 'n3-vision', 'n3-oracle'):
-        parser.add_argument(f'--{name}', default=f'/tmp/stage14/{name}.jsonl',
+        parser.add_argument(f'--{name}', default=str(ARTIFACTS / 'held' / f'{name}.jsonl'),
                             help='held-summary: input file')
     parser.add_argument('--mode', choices=['normal', 'inject', 'attach'], default='normal',
                         help='carry: normal runs (W1) or the fault injection (W2, W3)')
