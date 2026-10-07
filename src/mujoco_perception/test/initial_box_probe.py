@@ -112,6 +112,11 @@ held     Week 4.1 Stage 14 on HELD-A (seed 20261006, 40 layouts, Stage 3's gener
          each episode's process assertions P1..P6 and failure class go to one JSON line in
          `--out` (outside the repo). `--truth-offset` sets the bridge fault
          fault.truth_offset_x_m (N3). The rules are in week4.1 14.1.
+timeline Week 5 Stage 1, baseline measurements (week5.md 1.1), no acceptance: per layout and
+         source, one episode; prints the phase timeline with the time each phase spends
+         with the arm already at its target, the wait before the first command, the waits
+         in CLOSE and VERIFY, the box slip relative to the TCP split by phase, camera topic
+         arrival rates and the RTF, with the validity checks V1..V3.
 held-summary  Read the JSON lines of the vision and oracle runs (and the N3 runs) and judge the
          Stage 14 acceptance rules.
 episode  Bridge + estimator + executor with observation_source=vision, three episodes in a
@@ -157,7 +162,7 @@ except ImportError:  # a workspace from before Stage 5, used by `episode --basel
 from rcl_interfaces.srv import ListParameters
 from manipulation_interfaces.srv import ResetScene
 from rclpy.qos import QoSProfile, ReliabilityPolicy
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import Empty
 from trajectory_msgs.msg import JointTrajectory
 
@@ -1317,6 +1322,198 @@ def run_held_summary(args):
     return 0 if not failures else 1
 
 
+def rotation_matrix(q):
+    w, x, y, z = q.w, q.x, q.y, q.z
+    return np.array([[1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+                     [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+                     [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]])
+
+
+def angle_deg(rotation):
+    return math.degrees(math.acos(max(-1.0, min(1.0, (np.trace(rotation) - 1.0) / 2.0))))
+
+
+def timeline_episode(args, layout):
+    """One episode with everything needed for M1..M6; returns a dict of results."""
+    rig = Rig(args.workspace, layout_params(layout), True,
+              executor_params=['place.into_bin=true'], source=args.source)
+    receipts, commands = [], []
+    camera = {'rgb': [], 'depth': [], 'rgb_info': [], 'depth_info': []}
+    rig.node.create_subscription(
+        BridgeObservation, '/mujoco_bridge/episode_observation',
+        lambda m: receipts.append((time.monotonic(), stamp_ns(m.joint_state.header.stamp),
+                                   m.generation)), 200)
+    rig.node.create_subscription(
+        JointTrajectory, '/mujoco_bridge/joint_command',
+        lambda m: commands.append((time.monotonic(), list(m.points[0].positions))), 200)
+    for key, topic, kind in (('rgb', 'color/image_raw', Image),
+                             ('depth', 'depth/image_raw', Image),
+                             ('rgb_info', 'color/camera_info', CameraInfo),
+                             ('depth_info', 'depth/camera_info', CameraInfo)):
+        rig.node.create_subscription(
+            kind, f'/mujoco_bridge/camera/{topic}',
+            lambda m, key=key: camera[key].append(stamp_ns(m.header.stamp)), BEST_EFFORT)
+    try:
+        if not rig.spin_until(lambda: rig.start.get_subscription_count() > 0, 30):
+            raise RuntimeError('executor did not come up')
+        start_mono = time.monotonic()
+        rig.start.publish(Empty())
+        if not rig.spin_until(lambda: bool(rig.outcomes), 300):
+            raise RuntimeError('no outcome within 300 s')
+        outcome_mono = time.monotonic()
+        rig.spin_until(lambda: False, 0.5)
+        outcome = rig.outcomes[-1]
+        generation = min(g for _, _, g in receipts if g >= 1)
+        obs = sorted((o for o in rig.observations if o.generation == generation),
+                     key=lambda o: stamp_ns(o.joint_state.header.stamp))
+        gen_receipts = [r for r in receipts if r[2] == generation]
+
+        def sim_at(mono):
+            before = [r for r in gen_receipts if r[0] <= mono]
+            return (before[-1][1] if before else gen_receipts[0][1]) / 1e9
+
+        def mono_at(sim):
+            return next(r[0] for r in gen_receipts if r[1] / 1e9 >= sim - 1e-9)
+        anchor = stamp_ns(obs[0].joint_state.header.stamp) / 1e9
+        names = list(outcome.phase_names)
+        bounds = [anchor]
+        for duration in outcome.phase_durations_s:
+            bounds.append(bounds[-1] + duration)
+        result = dict(source=args.source, success=bool(outcome.success),
+                      failure=outcome.failure_code, retries=int(outcome.retries))
+        result['V1_s'] = bounds[-1] - sim_at(outcome_mono)
+        sim_cmds = [(sim_at(mono), pos) for mono, pos in commands if mono >= start_mono]
+        first_cmd = sim_cmds[0][0] if sim_cmds else math.nan
+        result['first_command_after_reset_s'] = first_cmd - anchor
+        result['first_command_wall_s'] = (next(m for m, _ in commands if m >= start_mono) -
+                                          start_mono) if sim_cmds else math.nan
+        joint_names = list(obs[0].joint_state.name)
+        arm = [joint_names.index(f'joint{i}') for i in range(1, 8)]
+        fingers = [joint_names.index(n) for n in ('finger_joint1', 'finger_joint2')]
+        t = np.array([stamp_ns(o.joint_state.header.stamp) / 1e9 for o in obs])
+        q = np.array([[o.joint_state.position[i] for i in arm] for o in obs])
+        dq = np.array([[o.joint_state.velocity[i] for i in arm] for o in obs])
+        width = np.array([sum(o.joint_state.position[i] for i in fingers) for o in obs])
+        tcp = np.array([[o.world_to_hand_tcp.transform.translation.x,
+                         o.world_to_hand_tcp.transform.translation.y,
+                         o.world_to_hand_tcp.transform.translation.z] for o in obs])
+        velocity = np.gradient(tcp, t, axis=0)
+        accel = np.linalg.norm(np.gradient(velocity, t, axis=0), axis=1)
+        phases = []
+        for k, name in enumerate(names):
+            start, end = bounds[k], bounds[k + 1]
+            in_phase = (t >= start) & (t < end)
+            targets = [pos for sim, pos in sim_cmds if start <= sim < end]
+            reached = math.nan
+            if targets:
+                # The most frequent target in the window: around a transition the old and the
+                # new phase's targets are both received within one tick of the boundary.
+                counts = collections.Counter(tuple(round(v, 6) for v in x) for x in targets)
+                target = np.array(counts.most_common(1)[0][0])
+                ok = (np.abs(q - target).max(axis=1) < 0.05) & (np.abs(dq).max(axis=1) < 0.05)
+                hits = np.where(in_phase & ok)[0]
+                if len(hits):
+                    reached = t[hits[0]] - start
+            phases.append(dict(name=name, duration=end - start, arm_at_target_after=reached,
+                               peak_tcp_accel=float(accel[in_phase].max()) if in_phase.any()
+                               else math.nan,
+                               width=(float(width[in_phase].min()), float(width[in_phase].max()))
+                               if in_phase.any() else None))
+        result['phases'] = phases
+        attached = np.array([o.attachment_state == BridgeObservation.ATTACHMENT_ATTACHED
+                             for o in obs])
+        attach_index = int(np.argmax(attached)) if attached.any() else None
+        close = next((k for k, n in enumerate(names) if n == 'CLOSE'), None)
+        if attach_index is not None and close is not None:
+            result['V2'] = bounds[close] <= t[attach_index] < bounds[close + 1]
+            result['close_start_to_attach_s'] = t[attach_index] - bounds[close]
+            result['attach_to_lift_s'] = bounds[close + 1] - t[attach_index]
+            last_attached = len(attached) - 1 - int(np.argmax(attached[::-1]))
+            release = t[min(last_attached + 1, len(t) - 1)]
+            result['release_s'] = release - anchor
+            verify = next((k for k, n in enumerate(names) if n == 'VERIFY'), None)
+            if verify is not None:
+                result['verify_s'] = bounds[verify + 1] - bounds[verify]
+            if args.source == 'vision':
+                after_release = [
+                    stamp_ns(m.header.stamp) / 1e9 for m in rig.messages
+                    if m.generation == generation and m.state == InitialBoxPose.MEASURED and
+                    stamp_ns(m.header.stamp) / 1e9 > release]
+                first = after_release[0] if after_release else math.nan
+                result['release_to_measured_s'] = first - release
+            # M4: box in the TCP frame relative to the attach sample, until the box leaves.
+            r0 = rotation_matrix(obs[attach_index].world_to_hand_tcp.transform.rotation)
+            p0 = obs[attach_index].world_to_hand_tcp.transform.translation
+            b0 = obs[attach_index].object_pose.pose
+            rel0 = r0.T @ (np.array([b0.position.x, b0.position.y, b0.position.z]) -
+                           np.array([p0.x, p0.y, p0.z]))
+            rot0 = r0.T @ rotation_matrix(b0.orientation)
+            slip = []
+            for i in range(attach_index, len(obs)):
+                o = obs[i]
+                r = rotation_matrix(o.world_to_hand_tcp.transform.rotation)
+                pt = o.world_to_hand_tcp.transform.translation
+                b = o.object_pose.pose
+                rel = r.T @ (np.array([b.position.x, b.position.y, b.position.z]) -
+                             np.array([pt.x, pt.y, pt.z]))
+                rot = r.T @ rotation_matrix(b.orientation)
+                slip.append((t[i], float(np.linalg.norm(rel - rel0)) * 1000.0,
+                             angle_deg(rot0.T @ rot), bool(attached[i]), float(width[i])))
+            per_phase = []
+            for k, name in enumerate(names):
+                rows = [x for x in slip if bounds[k] <= x[0] < bounds[k + 1]]
+                if not rows:
+                    continue
+                per_phase.append(dict(name=name, start_mm=rows[0][1], end_mm=rows[-1][1],
+                                      start_deg=rows[0][2], end_deg=rows[-1][2],
+                                      attached_at_end=rows[-1][3],
+                                      width_mm=(min(x[4] for x in rows) * 1000,
+                                                max(x[4] for x in rows) * 1000)))
+                if name == 'VERIFY':
+                    break
+            result['slip'] = per_phase
+        window = (anchor, bounds[-1])
+        expected = (window[1] - window[0]) * 10.0
+        result['camera'] = {k: sum(1 for x in v if window[0] <= x / 1e9 < window[1]) / expected
+                            for k, v in camera.items()}
+        result['rtf'] = (window[1] - window[0]) / (mono_at(window[1]) - mono_at(window[0])) \
+            if window[1] <= gen_receipts[-1][1] / 1e9 else math.nan
+        result['episode_sim_s'] = window[1] - window[0]
+        return result
+    finally:
+        rig.close()
+
+
+def run_timeline(args):
+    for index, layout in enumerate(make_layouts(args.count)):
+        r = timeline_episode(args, layout)
+        print(f'\n=== {args.source} layout {index}: success={r["success"]} {r["failure"]} '
+              f'retries={r["retries"]}; episode {r["episode_sim_s"]:.2f} s sim, RTF '
+              f'{r["rtf"]:.2f}; V1 {r["V1_s"]:+.3f} s, V2 {r.get("V2")}', flush=True)
+        print(f'    first command {r["first_command_after_reset_s"]:.2f} s sim after the reset, '
+              f'{r["first_command_wall_s"]:.2f} s wall after start_episode')
+        print('    phase       duration  arm at target after  waiting  peak TCP accel  width mm')
+        for ph in r['phases']:
+            wait = ph['duration'] - ph['arm_at_target_after']
+            width = (f'{ph["width"][0] * 1000:5.1f}..{ph["width"][1] * 1000:5.1f}'
+                     if ph['width'] else '')
+            print(f'    {ph["name"]:<10} {ph["duration"]:7.2f}  {ph["arm_at_target_after"]:15.2f}'
+                  f'  {wait:9.2f}  {ph["peak_tcp_accel"]:12.1f}  {width}')
+        print(f'    CLOSE: attach {r.get("close_start_to_attach_s", math.nan):.2f} s after its '
+              f'start, LIFT {r.get("attach_to_lift_s", math.nan):.2f} s after the attach; '
+              f'VERIFY {r.get("verify_s", math.nan):.2f} s; release to first new measurement '
+              f'{r.get("release_to_measured_s", math.nan):.2f} s')
+        print('    slip (box in TCP frame since the attach): phase  start->end mm  start->end deg'
+              '  attached at end  width mm')
+        for x in r.get('slip', []):
+            print(f'        {x["name"]:<10} {x["start_mm"]:6.2f} -> {x["end_mm"]:6.2f}   '
+                  f'{x["start_deg"]:5.2f} -> {x["end_deg"]:5.2f}   {x["attached_at_end"]}   '
+                  f'{x["width_mm"][0]:5.1f}..{x["width_mm"][1]:5.1f}')
+        print('    camera arrivals / expected at 10 Hz: ' +
+              ', '.join(f'{k} {v:.2f}' for k, v in r['camera'].items()), flush=True)
+    return 0
+
+
 def run_episode(args):
     bridge_params = ['enable_rgbd_camera=true']
     if args.scene == 'bin':
@@ -1403,7 +1600,7 @@ def main():
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('command',
                         choices=['static', 'gaps', 'latch', 'place', 'verify', 'carry',
-                                 'held', 'held-summary', 'episode'])
+                                 'held', 'held-summary', 'timeline', 'episode'])
     parser.add_argument('--workspace', default=str(Path(__file__).resolve().parents[3]))
     parser.add_argument('--count', type=int, default=6)
     parser.add_argument('--out', default='/tmp/stage14/held.jsonl', help='held: JSON lines')
@@ -1432,7 +1629,8 @@ def main():
     args = parser.parse_args()
     return {'static': run_static, 'gaps': run_gaps, 'latch': run_latch, 'place': run_place,
             'verify': run_verify, 'carry': run_carry, 'held': run_held,
-            'held-summary': run_held_summary, 'episode': run_episode}[args.command](args)
+            'held-summary': run_held_summary, 'timeline': run_timeline,
+            'episode': run_episode}[args.command](args)
 
 
 if __name__ == '__main__':
