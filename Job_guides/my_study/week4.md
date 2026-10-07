@@ -1,6 +1,6 @@
 # Week 4 学习笔记
 
-> Stage 1~5 保留历史记录，对应 `main` 当前代码（提交 `e37dcb2`）。Stage 6（可配置单 box/bin、实体 bin、持续视觉与 TCP 推算、四态运输监测）于 2026-10-04 收尾后**决定回退**：完整实现只归档在分支 `archive/stage6-transport-monitor`（提交 `3587adf`），`main` 上不存在；Stage 6 章节保留为历史记录与教训，回退原因和对照见 [6.9](#69-回退决定与存档)，决策见 [ADR 015](../../docs/adr/015-rollback-stage6-perception-side-transport-diagnostics.md)。后续按 [Week 4.1](week4.1.md) 的分阶段计划逐步重新加入。Week 4.5 保持 [HOLD UP](week4.5.md)。
+> Stage 1~5 保留历史记录，对应 `main` 当前代码（提交 `e37dcb2`）。Stage 6（可配置单 box/bin、实体 bin、持续视觉与 TCP 推算、四态运输监测）于 2026-10-04 收尾后**决定回退**：完整实现只归档在分支 `archive/stage6-transport-monitor`（提交 `3587adf`），`main` 上不存在；Stage 6 章节保留为历史记录与教训，回退原因和对照见 [6.9](#69-回退决定与存档)，决策见 [ADR 015](../../docs/adr/015-rollback-stage6-perception-side-transport-diagnostics.md)。后续按 [Week 4.1](week4.1.md) 的分阶段计划逐步重新加入。Week 4.5 保持 HOLD UP（Week 4.5 计划已于 2026-10-07 删除，内容过时；原文见提交 `60293a2`）。
 
 **Stage 4 历史现象（2026-10-01）：** 用户观察到 GRASP 遮挡后以 VISION_LOW_CONFIDENCE 停止。当时质量失败直接结束 episode，绕过 FSM 重试，增加 max_retries 无效；具体失败指标尚未核实。掩膜只能去除机器人表面，不能恢复遮挡像素。
 
@@ -1929,7 +1929,7 @@ Stage 6 于 2026-10-04 收尾，后续进入独立的 [Week 4.1](week4.1.md) 学
 
 ## 12. Week 4.5 交接
 
-Week 4.5 当前为 **HOLD UP**；用户暂不做多物体、多颜色任务，其原计划仅保留历史参考，不作为 Stage 6 的下一步。当前后续主线是 [Week 4.1](week4.1.md) 的单摄像头双目标视觉定位、现有离线 IK 接入及过程验收。未来若恢复策略/数据接口工作，再围绕单物体实际需求重写 [week4.5.md](week4.5.md)，保留观测来源、episode 生命周期及实际动作记录等有用契约。
+Week 4.5 当前为 **HOLD UP**；用户暂不做多物体、多颜色任务，其原计划仅保留历史参考，不作为 Stage 6 的下一步。当前后续主线是 [Week 4.1](week4.1.md) 的单摄像头双目标视觉定位、现有离线 IK 接入及过程验收。未来若恢复策略/数据接口工作，再围绕单物体实际需求重写 Week 4.5 计划（该计划已于 2026-10-07 删除，内容过时；原文见提交 `60293a2`，后续工作改在 Week 5），保留观测来源、episode 生命周期及实际动作记录等有用契约。
 
 ## 13. 悬挂问题与反向清单
 

@@ -1287,7 +1287,7 @@ Week 3 完成了从模型数学到任务执行的第一条可验证闭环：
 
 第 4 周可以在 Stage O 的 Cartesian 契约上接 RGB-D/视觉估计和随机物体位姿，但必须先决定视觉输出的语义：world-frame 还是 camera-frame、是否带时间戳/置信度、物体四元数是否参与抓取。当前 ground-truth oracle 只能作为仿真验证源，不能伪装成视觉接口。详细计划见 [Week 4](week4.md)。
 
-Week 4.5 单独处理策略无关的 observation/action/episode 契约、逐步数据记录、replay、LeRobot adapter 和容器交付，见 [Week 4.5](week4.5.md)。MoveIt planner 和 learned policy 是并行 execution backend；learned policy 可以自行承担 motion planning、碰撞规避和关节约束，MoveIt 不作为其接入前置条件。
+Week 4.5 单独处理策略无关的 observation/action/episode 契约、逐步数据记录、replay、LeRobot adapter 和容器交付，见 Week 4.5（Week 4.5 计划已于 2026-10-07 删除，内容过时；原文见提交 `60293a2`）。MoveIt planner 和 learned policy 是并行 execution backend；learned policy 可以自行承担 motion planning、碰撞规避和关节约束，MoveIt 不作为其接入前置条件。
 
 第 4 周仍不接入 MoveIt planner、VLA/RL/IL 运行时或障碍规划；这些后续能力消费 Week 4 和 Week 4.5 冻结的契约。
 
