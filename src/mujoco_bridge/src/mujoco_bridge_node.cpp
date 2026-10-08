@@ -17,6 +17,7 @@
 #include <tf2_ros/transform_broadcaster.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cinttypes>
 #include <cmath>
@@ -99,6 +100,9 @@ constexpr const char * kDefaultModelRelativePath =
 constexpr const char * kBinModelRelativePath =
   "/mujoco/franka_emika_panda/pick_place_bin_scene.xml";
 constexpr const char * kDefaultResetKeyframeName = "pick_place_home";
+// The arm joints in the order BridgeObservation.arm_command reports them (Week 5 Stage 6).
+constexpr std::array<const char *, 7> kArmJointNames{
+  "joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "joint7"};
 
 constexpr const char * kHandBodyName = "hand";
 constexpr const char * kTcpFrameName = "hand_tcp";
@@ -1225,6 +1229,16 @@ private:
     // simulator-only signal: a real Franka Hand has no fingertip sensors. No decision uses it;
     // the executor only labels a CLOSE timeout with it. Contact identified as the box is only
     // on ~/ground_truth/*_finger_contact, for evaluation.
+    // The targets ctrl held during the step that just ran (Week 5 Stage 6): ctrl is written
+    // before mj_step (applyTrajectory, the command callbacks) and not touched after it.
+    msg.arm_command.reserve(kArmJointNames.size());
+    for (const char * name : kArmJointNames) {
+      const auto it = actuator_by_joint_.find(name);
+      msg.arm_command.push_back(
+        it == actuator_by_joint_.end() ? std::nan("") : data_->ctrl[it->second]);
+    }
+    msg.gripper_command_width_m = gripper_actuator_id_ < 0 ? std::nan("") :
+      2.0 * data_->ctrl[gripper_actuator_id_] / gripper_ctrl_scale_;
     msg.left_finger_contact = bodyTouchesExternal(
       model_, data_, left_finger_body_id_, robot_root_id_);
     msg.right_finger_contact = bodyTouchesExternal(

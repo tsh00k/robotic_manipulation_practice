@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, OpaqueFunction
+from launch.actions import DeclareLaunchArgument, OpaqueFunction, SetEnvironmentVariable
 from launch.conditions import LaunchConfigurationEquals
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
@@ -203,6 +203,12 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
+        # Every node in this launch uses the project's Fast DDS profile: a 4 MB shared-memory
+        # segment, without which most RGB frames are lost (config/fastdds_shm.xml, week5 6.1).
+        SetEnvironmentVariable(
+            'FASTRTPS_DEFAULT_PROFILES_FILE',
+            PathJoinSubstitution(
+                [FindPackageShare('mujoco_bridge'), 'config', 'fastdds_shm.xml'])),
         rviz_config_arg,
         joint_state_rate_hz_arg,
         tf_rate_hz_arg,

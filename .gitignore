@@ -11,6 +11,8 @@ CMakeCache.txt
 # installed in this container. The old *.bag/*.mcap rules never matched what
 # record_demo_bag.sh actually produces; see week2.md Stage J 11.8.
 results/bags/
+# Raw episode records for the VLA dataset (scripts/record_episode.py, Week 5 Stage 6).
+results/episodes/
 results/pick_place_run.csv
 # Process artifacts of the probes (node logs, result files): kept in the workspace
 # instead of /tmp so that a reboot does not lose them, but not committed.

@@ -149,6 +149,12 @@ URDF hand:=true 强制加 fer_ 前缀，跨库代码须显式映射。下表采�
 | 隔离 | 视觉独立 topic，oracle 仅作仿真对照 |
 | bin（Week 4.1 Stage 8） | /mujoco_bridge/ground_truth/bin_pose，PoseStamped，world，bin 原点 = 内底面中心；transient local，仅 `scene.enabled` 时在启动时发布一次（bin 静态，reset 恢复同一布局）；只给 oracle 来源的放置目标用 |
 
+
+**实际采用的指令（Week 5 Stage 6，[ADR 021](adr/021-applied-command-in-bridge-observation.md)）。** `BridgeObservation.arm_command`（joint1..7，rad）与 `gripper_command_width_m`（m）是 bridge 刚跑完的那一步 `ctrl` 里的手臂伺服目标与夹爪目标开口，与 `joint_state` 同一物理步，是数据集的 action。
+
+**中间件配置（Week 5 Stage 6）。** `mujoco_bridge/config/fastdds_shm.xml` 把 Fast DDS 的共享内存段从默认 512 KB 加到 4 MB；demo launch 用 `SetEnvironmentVariable` 给所有节点设 `FASTRTPS_DEFAULT_PROFILES_FILE`，探针同样设置。原因：每帧 RGB（230 KB）与深度（307 KB）连着发布，合计超过 512 KB，best-effort 的 RGB 被后到的深度挤掉，35%~80% 丢失。不用这个配置（例如手动 `ros2 topic echo`）仍能通信，只是会丢 RGB。
+
+**原始记录（Week 5 Stage 6）。** `scripts/record_episode.py`：在已运行的 demo 上，`ros2 bag record --use-sim-time` 显式录相机四个话题、`~/episode_observation`、手臂与夹爪命令、锁存状态、outcome、`/tf_static`（相机话题 best-effort 的 QoS 覆盖），触发一个 episode、等 outcome 后停止；另写契约格式的 `metadata.json`（task、objects、targets）与 `sidecar.json`（布局、outcome、锁存的盒子 yaw、抓取转角及其到 ±45° 切换点的距离、git 版本）。一个 episode 的帧是从 reset（本 generation 的第一个观测）到 outcome 之间的相机帧，按时间戳与观测精确配对。导出器不在本周。
 ## 5. RGB-D 与视觉契约
 
 ### 5.1 相机与精确同步
@@ -289,7 +295,7 @@ FSM 默认位置/GRASP-CLOSE 位置/速度容差为 0.05 rad/0.3 rad/0.05 rad/s�
 
 ### 6.4 时间参数化的关节轨迹（Week 5 Stage 3，[ADR 020](adr/020-path-then-time-parameterized-joint-trajectories.md)）
 
-进入一个阶段时，`EpisodeController` 规划一条从上一段参考终点（reset 后为 `home.joint_positions`，即预设状态的臂构型；不用实测关节：没有重力补偿，实测在重力下比伺服目标低，joint4 约 6 mrad）到本阶段目标的轨迹，作为 `EpisodeActions::trajectory` 只返回一次；节点把它发成一条 `JointTrajectory`（每 1 ms 一个点，`positions`、`velocities`、`time_from_start`）。路径：GRASP、LIFT、PLACE、RETRACT 为 TCP 直线（`DiffIkWaypointSource::cartesianLine`：每 5 mm 一个位姿、转角按四元数球面插值，逐点 IK 以上一点为初值，相邻点关节差 > 0.05 rad 或不收敛判 `TRAJECTORY_FAILED`；终点改用这条线最后一点的解），其余为关节空间直线；CLOSE、OPEN 手臂保持上一段终点（单点，不发）。时间：`planJointPath()` 调用 moveit_core 的 TOTG（`trajectory_processing::Path`/`Trajectory`，路径点间允许偏离 0 或 1 mrad），限值 `trajectory.max_velocity`（默认 FCI 的 2.175/2.61 rad/s）与 `trajectory.max_acceleration`（默认 FCI 的 1/4：3.75、1.875、2.5、3.125、3.75、5、5 rad/s²，使 TOTG 的加速度突变在 1 kHz 下也不超过 FCI 加加速度上限）。只用 `getPosition`/`getVelocity` 采样：`getAcceleration` 在部分时刻报出超过上限的值，而位置的差分并不超限。
+进入一个阶段时，`EpisodeController` 规划一条从上一段参考终点（reset 后为 `home.joint_positions`，即预设状态的臂构型；不用实测关节：没有重力补偿，实测在重力下比伺服目标低，joint4 约 6 mrad）到本阶段目标的轨迹，作为 `EpisodeActions::trajectory` 只返回一次；节点把它发成一条 `JointTrajectory`（每 1 ms 一个点，`positions`、`velocities`、`time_from_start`）。路径：GRASP、LIFT、PLACE、RETRACT 为 TCP 直线（`DiffIkWaypointSource::cartesianLine`：每 5 mm 一个位姿、转角按四元数球面插值，逐点 IK 以上一点为初值，相邻点关节差 > 0.05 rad 或不收敛判 `TRAJECTORY_FAILED`；终点改用这条线最后一点的解），其余为关节空间直线；CLOSE、OPEN 手臂保持上一段终点（单点，不发）。时间：`planJointPath()` 调用 moveit_core 的 TOTG（`trajectory_processing::Path`/`Trajectory`，路径点间允许偏离 0 或 1 mrad），限值 `trajectory.max_velocity`（默认 FCI 的 95%：2.066/2.480 rad/s，Week 5 Stage 6 为数据契约留的余量）与 `trajectory.max_acceleration`（默认 FCI 的 1/4：3.75、1.875、2.5、3.125、3.75、5、5 rad/s²，使 TOTG 的加速度突变在 1 kHz 下也不超过 FCI 加加速度上限）。只用 `getPosition`/`getVelocity` 采样：`getAcceleration` 在部分时刻报出超过上限的值，而位置的差分并不超限。
 
 bridge 的 `~/joint_command`：单点消息照旧立即写入 `ctrl`（固定关节表模式、探针）；多点消息是带时间的轨迹（`TrajectoryInterpolator`，独立库 `mujoco_bridge::trajectory_interpolator`），从到达时的仿真时间开始，每个物理步在点之间线性插值写入 `ctrl`，走完后保持终点；新消息替换正在执行的轨迹，reset 清除它；`velocities` 不使用。采样固定 1 ms，从轨迹开始计时，所以 2 ms 物理步读参考的时刻恰好落在采样点上，伺服拿到的是 TOTG 的精确位置；点之间线性插值的速度是阶梯状的，只在有人于点间读参考时才暴露（2 ms 采样在 1 ms 上看加速度为上限的 2 倍；三次 Hermite 10 ms 采样在加减速切换处超限 24%，见 Week 5 Stage 3 的 3.5）。
 

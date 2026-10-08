@@ -632,7 +632,9 @@ private:
     outcome.observation_residual_m = last_observation_residual_m_;
     outcome.observation_failure_layer = finished.success ? "" :
       (finished.failure_code.rfind("VISION_", 0) == 0 ? "perception" : "execution");
-    outcome.observation_failure_reason = last_observation_failure_reason_;
+    // A success carries no failure reason (Week 5 Stage 6): VERIFY records a rejected detection
+    // while it waits for the box to settle, which used to survive into a successful outcome.
+    outcome.observation_failure_reason = finished.success ? "" : last_observation_failure_reason_;
     outcome.retries = finished.retry_count;
     outcome.carry_width_alert = carry_width_.alert().value_or("");
     outcome.carry_width_min_m = carry_width_.minWidth();

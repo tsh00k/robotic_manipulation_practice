@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Fast DDS profile for this project's nodes (Week 5 Stage 6). Same transports as Fast DDS's
+  built-in default (shared memory between processes on one machine, UDP otherwise), with the
+  shared-memory segment raised from the default 512 KB to 4 MB.
+
+  Why: the bridge publishes RGB (320x240x3 = 230 KB) and depth (320x240x4 = 307 KB) back to back
+  every camera frame. Together they exceed a 512 KB segment, so on the best-effort camera topics
+  the depth image overwrote the RGB image before a subscriber had read it: 35-80 % of the RGB
+  frames were lost, depth never (measured with the bridge alone and an independent subscriber,
+  week5 Stage 6, 6.1). With 4 MB none are lost.
+
+  Used through FASTRTPS_DEFAULT_PROFILES_FILE, which demo.launch.py sets for every node.
+-->
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+  <transport_descriptors>
+    <transport_descriptor>
+      <transport_id>shm_4mb</transport_id>
+      <type>SHM</type>
+      <segment_size>4194304</segment_size>
+    </transport_descriptor>
+    <transport_descriptor>
+      <transport_id>udp</transport_id>
+      <type>UDPv4</type>
+    </transport_descriptor>
+  </transport_descriptors>
+  <participant profile_name="default_participant" is_default_profile="true">
+    <rtps>
+      <userTransports>
+        <transport_id>shm_4mb</transport_id>
+        <transport_id>udp</transport_id>
+      </userTransports>
+      <useBuiltinTransports>false</useBuiltinTransports>
+    </rtps>
+  </participant>
+</profiles>

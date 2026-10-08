@@ -28,13 +28,16 @@ struct JointLimits
 };
 
 // Franka Emika Robot (Panda) limits from the FCI documentation ("Control Interface
-// Specification and Robot Limits"): velocity as given, acceleration a quarter of the given
-// 15, 7.5, 10, 12.5, 15, 20, 20 rad/s^2 -- the values MoveIt's own Panda configuration uses.
+// Specification and Robot Limits"): velocity 95 % of the given 2.175 / 2.61 rad/s, acceleration
+// a quarter of the given 15, 7.5, 10, 12.5, 15, 20, 20 rad/s^2 -- the values MoveIt's own Panda
+// configuration uses. The 5 % keeps the recorded actions clear of the dataset contract's
+// per-frame limit (velocity limit x 0.1 s): at 100 % a cruising joint changed by exactly the
+// limit, so a converter's strict comparison would reject frames on rounding (week5 Stage 6).
 // With a quarter, TOTG's piecewise-constant acceleration may switch from -max to +max within
 // one 1 ms control cycle without exceeding the FCI jerk limits (7500 .. 10000 rad/s^3), so no
 // separate jerk limiting is needed (Week 5 Stage 3, ADR 020).
 inline constexpr JointLimits kPandaReferenceLimits{
-  {2.175, 2.175, 2.175, 2.175, 2.61, 2.61, 2.61},
+  {2.06625, 2.06625, 2.06625, 2.06625, 2.4795, 2.4795, 2.4795},
   {3.75, 1.875, 2.5, 3.125, 3.75, 5.0, 5.0}};
 
 // A timed joint trajectory, sampled: the reference positions and velocities at times_s (from 0,

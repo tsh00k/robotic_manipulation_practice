@@ -175,9 +175,11 @@ TEST(JointTrajectoryPlanner, NoMotionIsASingleSample)
   EXPECT_DOUBLE_EQ(plan.duration_s(), 0.0);
 }
 
-TEST(JointTrajectoryPlanner, ReferenceLimitsAreAQuarterOfTheFciAcceleration)
+TEST(JointTrajectoryPlanner, ReferenceLimitsAre95PercentVelocityAndAQuarterAcceleration)
 {
+  const std::array<double, 7> fci_velocity{2.175, 2.175, 2.175, 2.175, 2.61, 2.61, 2.61};
   for (std::size_t i = 0; i < 7; ++i) {
+    EXPECT_NEAR(kPandaReferenceLimits.max_velocity[i], 0.95 * fci_velocity[i], 1e-12);
     EXPECT_DOUBLE_EQ(kPandaReferenceLimits.max_acceleration[i], kFciAcceleration[i] / 4.0);
   }
 }

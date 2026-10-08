@@ -129,6 +129,18 @@ motion   Week 5 Stage 3 (week5.md 3.4): one vision episode per layout -- HELD-A 
          the episode time, phase durations, the lag of the actual motion behind the reference,
          the TCP peak speed and acceleration, and the box slip in the TCP frame at the end of
          LIFT, PREPLACE and PLACE.
+record   Week 5 Stage 6 (week5.md 6.4): for each of the same five layouts as `motion`, one
+         vision episode recorded by scripts/record_episode.py, then the bag is read back and
+         checked against dataset contract v0.2. D1: every 10 Hz camera frame of the episode
+         (from its reset to its outcome) has RGB, depth and a BridgeObservation with exactly the
+         same stamp, and none is missing. D2: every frame's
+         action (arm_command, gripper_command_width_m) is finite, 7 + 1 values, the gripper
+         only 0.0 or 0.08, and consecutive frames' arm targets change by at most 0.2175 rad
+         (joint1-4) / 0.261 rad (joint5-7). D3: every observation's arm_command equals a sample
+         of a joint trajectory recorded in the bag (or the reset configuration before the
+         first), within 1e-6 rad, and the trajectories are used in the order they were sent.
+         D4: metadata.json has exactly the contract's fields; sidecar.json has the layout, the
+         outcome and the grasp yaw. D5: a successful outcome has no failure reason.
 held-summary  Read the JSON lines of the vision and oracle runs (and the N3 runs) and judge the
          Stage 14 acceptance rules.
 episode  Bridge + estimator + executor with observation_source=vision, three episodes in a
@@ -181,6 +193,12 @@ from trajectory_msgs.msg import JointTrajectory
 # Process artifacts (node logs, result files) live in the workspace, not in /tmp, so that a
 # reboot does not lose them; .claude/artifacts/ is ignored by git.
 ARTIFACTS = Path(__file__).resolve().parents[3] / '.claude' / 'artifacts'
+# The project's Fast DDS profile (Week 5 Stage 6), as demo.launch.py sets it: set before rclpy
+# starts, and inherited by the nodes the rig starts. Without it most RGB frames are lost.
+os.environ.setdefault(
+    'FASTRTPS_DEFAULT_PROFILES_FILE',
+    str(Path(__file__).resolve().parents[3] / 'install' / 'mujoco_bridge' / 'share' /
+        'mujoco_bridge' / 'config' / 'fastdds_shm.xml'))
 LOGS = ARTIFACTS / 'logs'
 BEST_EFFORT = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, depth=50)
 XY_LIMIT_M = 0.003
@@ -1796,12 +1814,158 @@ def run_motion(args):
     return 0 if not failures else 1
 
 
+def read_bag(path):
+    """All messages of a rosbag2 directory, per topic, as (receive ns, message)."""
+    import rosbag2_py
+    from rclpy.serialization import deserialize_message
+    from rosidl_runtime_py.utilities import get_message
+    reader = rosbag2_py.SequentialReader()
+    reader.open(rosbag2_py.StorageOptions(uri=str(path), storage_id='sqlite3'),
+                rosbag2_py.ConverterOptions('cdr', 'cdr'))
+    types = {t.name: get_message(t.type) for t in reader.get_all_topics_and_types()}
+    out = collections.defaultdict(list)
+    while reader.has_next():
+        topic, data, received = reader.read_next()
+        out[topic].append((received, deserialize_message(data, types[topic])))
+    return out
+
+
+CONTRACT_STEP = np.array([0.2175] * 4 + [0.261] * 3)
+
+
+def check_record(episode_dir, label):
+    problems, notes = [], []
+    bag = read_bag(episode_dir / 'bag')
+    obs = [m for _, m in bag['/mujoco_bridge/episode_observation']]
+    generation = max(o.generation for o in obs)
+    mine = [o for o in obs if o.generation == generation]
+    by_stamp = {stamp_ns(o.joint_state.header.stamp): o for o in mine}
+    # The episode runs from its reset (the first observation of its generation) to the outcome.
+    # The recorder runs on for a second after the outcome and is stopped in the middle of a
+    # camera frame, so the record's last frames are not part of the episode. Recorded with
+    # --use-sim-time, the bag's receive stamps are simulated time.
+    first = min(by_stamp)
+    outcome_received = bag['/task_executor/episode_outcome'][-1][0]
+    last = max(t for t in by_stamp if t <= outcome_received)
+    rgb = {stamp_ns(m.header.stamp) for _, m in bag['/mujoco_bridge/camera/color/image_raw']}
+    depth = sorted({stamp_ns(m.header.stamp)
+                    for _, m in bag['/mujoco_bridge/camera/depth/image_raw']})
+    frames = [t for t in depth if first <= t <= last]
+    paired = [t for t in frames if t in rgb and t in by_stamp]
+    # Frames the camera should have produced in the window: one per multiple of 0.1 s.
+    expected = int(last // 100_000_000) - int(-(-first // 100_000_000)) + 1
+    notes.append(f'{len(frames)} depth frames in the episode (expected about {expected}), '
+                 f'{len(paired)} with RGB and an observation at the same stamp')
+    if not frames or len(paired) != len(frames) or len(frames) != expected:
+        problems.append(f'D1 {len(paired)} of {len(frames)} frames paired, '
+                        f'{expected} expected')
+    # D2: the action per frame.
+    actions = []
+    for t in paired:
+        o = by_stamp[t]
+        arm = np.array(o.arm_command)
+        if arm.shape != (7,) or not np.all(np.isfinite(arm)) or \
+                not np.isfinite(o.gripper_command_width_m):
+            problems.append(f'D2 frame {t}: arm_command {list(o.arm_command)} gripper '
+                            f'{o.gripper_command_width_m}')
+            continue
+        actions.append((arm, o.gripper_command_width_m))
+    grippers = sorted({round(g, 9) for _, g in actions})
+    if any(abs(g) > 1e-9 and abs(g - 0.08) > 1e-9 for g in grippers):
+        problems.append(f'D2 gripper targets {grippers}')
+    steps = np.array([np.abs(b[0] - a[0]) for a, b in zip(actions, actions[1:])])
+    worst = (steps / CONTRACT_STEP).max() if len(steps) else 0.0
+    notes.append(f'action: {len(actions)} frames, gripper targets {grippers}, largest arm '
+                 f'change between frames {worst:.3f} of the contract limit')
+    if worst > 1.0:
+        problems.append(f'D2 arm target changes by {worst:.3f} of the contract limit')
+    # D3: every arm_command is a sample of a recorded trajectory, used in order.
+    trajectories = [np.array([p.positions for p in m.points])
+                    for _, m in bag['/mujoco_bridge/joint_command'] if len(m.points) > 1]
+    ready = np.array([0.0, -0.785398163397, 0.0, -2.35619449019, 0.0, 1.57079632679,
+                      0.785398163397])
+    current, mismatched = -1, 0
+    for o in mine:
+        arm = np.array(o.arm_command)
+        if current < 0 and np.max(np.abs(arm - ready)) < 1e-6:
+            continue
+        for k in range(max(current, 0), len(trajectories)):
+            if np.min(np.max(np.abs(trajectories[k] - arm), axis=1)) < 1e-6:
+                current = k
+                break
+        else:
+            mismatched += 1
+    notes.append(f'{len(trajectories)} trajectories; {mismatched} of {len(mine)} observations '
+                 f'whose arm_command is not a sample of the current or a later trajectory')
+    if mismatched:
+        problems.append(f'D3 {mismatched} observations off the recorded trajectories')
+    # D4: metadata and sidecar.
+    metadata = json.loads((episode_dir / 'metadata.json').read_text())
+    entity_ok = all(set(e) == {'id', 'class', 'color'} and all(
+        isinstance(v, str) and v for v in e.values())
+        for e in metadata.get('objects', []) + metadata.get('targets', []))
+    if set(metadata) != {'task', 'objects', 'targets'} or not metadata['task'] or not entity_ok:
+        problems.append(f'D4 metadata {metadata}')
+    sidecar = json.loads((episode_dir / 'sidecar.json').read_text())
+    if len(sidecar.get('layout', {})) != 12 or sidecar.get('grasp_tool_yaw_deg') is None:
+        problems.append(f'D4 sidecar layout {sidecar.get("layout")} grasp yaw '
+                        f'{sidecar.get("grasp_tool_yaw_deg")}')
+    # D5: a clean outcome.
+    outcome = sidecar['outcome']
+    if outcome['success'] and outcome['observation_failure_reason']:
+        problems.append(f'D5 success with reason {outcome["observation_failure_reason"]!r}')
+    notes.append(f'outcome success={outcome["success"]} retries={outcome["retries"]} reason '
+                 f'{outcome["observation_failure_reason"]!r}; grasp yaw '
+                 f'{sidecar["grasp_tool_yaw_deg"]:.1f} deg, '
+                 f'{sidecar["grasp_yaw_distance_to_switch_deg"]:.1f} from the switch')
+    if not outcome['success'] or outcome['retries']:
+        problems.append(f'episode success={outcome["success"]} retries={outcome["retries"]}')
+    print(f'{label}: ' + ('OK' if not problems else 'FAIL') + f' ({episode_dir})', flush=True)
+    for note in notes:
+        print('    ' + note, flush=True)
+    for problem in problems:
+        print('    PROBLEM ' + problem, flush=True)
+    return [f'{label}: {p}' for p in problems]
+
+
+def run_record(args):
+    held, _ = held_layouts(40)
+    layouts = [('HELD-A 14', held[14]), ('HELD-A 29', held[29])] + [
+        (f'Stage 1 layout {i}', layout) for i, layout in enumerate(make_layouts(3))]
+    out = ARTIFACTS / 'episodes'
+    failures = []
+    for label, layout in layouts:
+        rig = Rig(args.workspace, layout_params(layout), True,
+                  executor_params=['place.into_bin=true'], source='vision')
+        try:
+            if not rig.spin_until(lambda: rig.start.get_subscription_count() > 0, 30):
+                raise RuntimeError('executor did not come up')
+            before = set(out.glob('*')) if out.exists() else set()
+            result = subprocess.run(
+                ['/usr/bin/python3', str(Path(args.workspace) / 'scripts' / 'record_episode.py'),
+                 '--out', str(out), '--label', label.replace(' ', '_')],
+                capture_output=True, text=True, timeout=400)
+            print(result.stdout.strip() + result.stderr.strip()[-500:], flush=True)
+        finally:
+            rig.close()
+        created = sorted(set(out.glob('*')) - before)
+        if not created:
+            failures.append(f'{label}: no record written')
+            continue
+        failures += check_record(created[-1], label)
+    print('\nSTAGE 6 RECORD (D1-D5):', 'PASS' if not failures else 'FAIL')
+    for failure in failures:
+        print('  ', failure)
+    return 0 if not failures else 1
+
+
 def main():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('command',
                         choices=['static', 'gaps', 'latch', 'place', 'verify', 'carry',
-                                 'held', 'held-summary', 'timeline', 'episode', 'motion'])
+                                 'held', 'held-summary', 'timeline', 'episode', 'motion',
+                                 'record'])
     parser.add_argument('--workspace', default=str(Path(__file__).resolve().parents[3]))
     parser.add_argument('--count', type=int, default=6)
     parser.add_argument('--out', default=str(ARTIFACTS / 'held' / 'held.jsonl'),
@@ -1834,7 +1998,8 @@ def main():
     return {'static': run_static, 'gaps': run_gaps, 'latch': run_latch, 'place': run_place,
             'verify': run_verify, 'carry': run_carry, 'held': run_held,
             'held-summary': run_held_summary, 'timeline': run_timeline,
-            'episode': run_episode, 'motion': run_motion}[args.command](args)
+            'episode': run_episode, 'motion': run_motion,
+            'record': run_record}[args.command](args)
 
 
 if __name__ == '__main__':
