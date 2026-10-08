@@ -223,6 +223,8 @@ private:
   // all cleared by a reset.
   std::optional<std::array<double, 7>> reference_end_;
   std::optional<Phase> planned_phase_;
+  // When the bridge first reported ATTACHED in the current run; negative while not attached.
+  double attached_since_s_ = -1.0;
   double trajectory_start_s_ = 0.0;
   double trajectory_duration_s_ = 0.0;
   ExitReason last_failure_reason_ = ExitReason::kNone;

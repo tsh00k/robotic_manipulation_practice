@@ -108,19 +108,19 @@ TEST(Fsm, CloseAdvancesOnBridgeAttachmentBeforeLift)
   in.grasp_signals.box_to_tcp_horizontal_m = 0.003;
   in.grasp_signals.left_finger_contact = true;
   in.grasp_signals.right_finger_contact = true;
-  in.elapsed_in_phase_s = 2.5;  // past close_settle_s
+  in.elapsed_in_phase_s = 0.5;
+  in.attached_for_s = 0.25;  // attached for longer than close_after_attach_s
   const FsmDecision d = step(in, targetAt({0, 0.4, 0, -2.0, 0, 1.5708, -0.7853}), defaultParams());
   EXPECT_EQ(d.next_phase, Phase::kLift);
   EXPECT_EQ(d.exit_reason, ExitReason::kReached);
 }
 
-TEST(Fsm, CloseDoesNotAdvanceOnSlipBeforeCloseSettleS)
+TEST(Fsm, CloseDoesNotAdvanceUntilAttachmentHasHeldForCloseAfterAttachS)
 {
-  // Regression guard for the exact bug caught live in week2.md Stage I: the very
-  // first tick after entering kClose could already read kSlip (fingers still
-  // resting on the box from kGrasp's approach) and advance to kLift before the
-  // gripper had actually finished squeezing -- the grip was not yet firm enough to
-  // survive the lift that followed immediately after.
+  // Regression guard for the exact bug caught live in week2.md Stage I: the very first tick
+  // after entering kClose could already read kSlip and advance to kLift before the gripper had
+  // finished squeezing. Since Week 5 Stage 5 the gate is "attached for close_after_attach_s"
+  // (the bridge's own confirmation already requires the fingers to have stopped for 0.1 s).
   FsmInputs in;
   in.phase = Phase::kClose;
   in.attachment_state = 1;
@@ -129,10 +129,24 @@ TEST(Fsm, CloseDoesNotAdvanceOnSlipBeforeCloseSettleS)
   in.grasp_signals.box_to_tcp_horizontal_m = 0.003;
   in.grasp_signals.left_finger_contact = true;
   in.grasp_signals.right_finger_contact = true;
-  in.elapsed_in_phase_s = 0.5;  // past min_settle_s, but under close_settle_s
+  in.elapsed_in_phase_s = 0.5;
+  in.attached_for_s = 0.05;  // attached, but not yet for close_after_attach_s
   const FsmDecision d = step(in, targetAt({0, 0.4, 0, -2.0, 0, 1.5708, -0.7853}), defaultParams());
   EXPECT_EQ(d.next_phase, Phase::kClose);
   EXPECT_EQ(d.exit_reason, ExitReason::kNone);
+}
+
+// Week 5 Stage 5: OPEN ends as soon as the fingers are actually open, without waiting out
+// min_settle_s (no stale reading is possible: CLOSE ends at about 40 mm).
+TEST(Fsm, OpenAdvancesOnWidthWithoutWaitingForMinSettle)
+{
+  FsmInputs in;
+  in.phase = Phase::kOpen;
+  in.gripper_width_m = 0.07;
+  in.elapsed_in_phase_s = 0.1;  // well under min_settle_s
+  EXPECT_EQ(step(in, targetAt(kHomeArm), defaultParams()).next_phase, Phase::kRetract);
+  in.gripper_width_m = 0.05;  // not open yet
+  EXPECT_EQ(step(in, targetAt(kHomeArm), defaultParams()).next_phase, Phase::kOpen);
 }
 
 TEST(Fsm, CloseRecoversOnGraspEmptyPastTimeout)

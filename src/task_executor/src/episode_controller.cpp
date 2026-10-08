@@ -25,6 +25,9 @@ namespace task_executor
 {
 namespace
 {
+// Per the bridge's attachment contract (manipulation_interfaces/BridgeObservation).
+constexpr uint8_t kAttachmentAttached = 1;
+
 // How far TOTG may round the corners of a TCP line's joint path (waypoints about 5 mm apart).
 constexpr double kTcpLineBlendRad = 1e-3;
 }  // namespace
@@ -100,6 +103,7 @@ EpisodeActions EpisodeController::beginReset(TimePoint now)
   consumed_sample_sequence_ = 0;
   reset_started_at_ = now;
   latest_observation_.reset();
+  attached_since_s_ = -1.0;
   // The reset moves the arm and the bridge drops any running trajectory.
   reference_end_.reset();
   planned_phase_.reset();
@@ -323,6 +327,12 @@ EpisodeActions EpisodeController::tick(double sim_time_s, TimePoint wall_now)
     1.0 - 2.0 * (frame.object_pose.qy * frame.object_pose.qy +
     frame.object_pose.qz * frame.object_pose.qz));
   in.elapsed_in_phase_s = sim_time_s - phase_start_sim_time_s_;
+  if (frame.attachment_state == kAttachmentAttached) {
+    attached_since_s_ = attached_since_s_ < 0.0 ? sim_time_s : attached_since_s_;
+    in.attached_for_s = sim_time_s - attached_since_s_;
+  } else {
+    attached_since_s_ = -1.0;
+  }
   in.retry_count = retry_count_;
   in.trajectory_finished = trajectory_finished;
   const auto decision = step(in, target, fsm_params_);

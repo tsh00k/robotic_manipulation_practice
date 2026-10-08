@@ -257,7 +257,7 @@ EpisodeController 独占生命周期、phase、retry、失败原因与 telemetry
 
 任务顺序 `HOME -> PREGRASP -> GRASP -> CLOSE -> LIFT -> PREPLACE -> PLACE -> OPEN -> RETRACT -> VERIFY -> DONE`，执行异常经 RECOVER 重试，耗尽后 FAILED。纯 step() 不依赖 ROS/MuJoCo；executor 的 classifyGrasp() 复用 mujoco_bridge::grasp_criteria，仅用于 CLOSE 超时原因分类，不作为第二套附着权威。
 
-CLOSE 要求 ATTACHED+close_settle；LIFT 要求 ATTACHED+机械臂关节位置/速度到达抬升目标+min_settle，不以视觉高度判定。LIFT 到达臂目标但未附着且超过 grace 时 recover/slipped，阶段超时 recover/timeout。PREPLACE/PLACE 先检查 ATTACHED，缺失时 recover/slipped，否则检查运动到位；这些门依赖 bridge 锁存，不能独立检测闭爪滑落。OPEN 要求实际宽度 >0.06 m 与 settle；VERIFY 的臂目标是 HOME（Week 5 Stage 2），要求 RELEASED、物体在验收区域（有 bin 时为入 bin 判据）、机械臂回到 HOME 及 settle，vision 路径须释放后的新测量；所以 DONE 时手臂已在 reset 构型。
+CLOSE 要求 bridge 报 ATTACHED 且已持续 `fsm.close_after_attach_s`（默认 0.2 s，Week 5 Stage 5；此前是固定等满 close_settle=2 s）；LIFT 要求 ATTACHED+机械臂关节位置/速度到达抬升目标+min_settle，不以视觉高度判定。LIFT 到达臂目标但未附着且超过 grace 时 recover/slipped，阶段超时 recover/timeout。PREPLACE/PLACE 先检查 ATTACHED，缺失时 recover/slipped，否则检查运动到位；这些门依赖 bridge 锁存，不能独立检测闭爪滑落。OPEN 要求实际宽度 >0.06 m（Week 5 Stage 5 起不再等 min_settle）；VERIFY 的臂目标是 HOME（Week 5 Stage 2），要求 RELEASED、物体在验收区域（有 bin 时为入 bin 判据）、机械臂回到 HOME 及 settle，vision 路径须释放后的新测量；所以 DONE 时手臂已在 reset 构型。
 
 20 Hz tick 最多消费一份新鲜观测，设 IK seed、求当前目标、调用 FSM、记录迁移；无新观测不重发旧目标，新观测下 phase 未变则重发夹爪命令（手臂只在进入阶段时发一次轨迹，见 6.4）。运动阶段的“到位”另须本段轨迹已走完（Week 5 Stage 3）。动作顺序为当前 phase 目标、迁移日志、reset/outcome。阶段计时用仿真时间，看门狗用 steady clock，准入先检查超时再刷新新鲜度。见 [ADR 004](adr/004-episode-controller-orchestration.md) 与 [编排图](task_executor_episode_orchestration.html)。
 
@@ -285,7 +285,7 @@ DLS 默认：阻尼阈值 0.08、最大阻尼 0.05、关节居中增益 0.02；�
 
 solveIk() 反馈来自运动学模型，不是实际执行状态；不修正伺服下垂、饱和或接触扰动，没有碰撞规划。模型 IK 残差、实测 TCP 误差、最终落点误差分别记录，不可互代。
 
-FSM 默认位置/GRASP-CLOSE 位置/速度容差为 0.05 rad/0.3 rad/0.05 rad/s；min_settle=0.5 s、close_settle=2 s、lift_settle_grace=2 s、phase_timeout=6 s、max_retries=3。当前场景经验值已回归，但未证明最小/通用；改变模型、控制或场景需重测。
+FSM 默认位置/GRASP-CLOSE 位置/速度容差为 0.05 rad/0.3 rad/0.05 rad/s；min_settle=0.5 s（OPEN 不受限）、close_after_attach=0.2 s、close_settle=2 s（只在附着确认失败的路径上）、lift_settle_grace=2 s、phase_timeout=6 s、max_retries=3。当前场景经验值已回归，但未证明最小/通用；改变模型、控制或场景需重测。
 
 ### 6.4 时间参数化的关节轨迹（Week 5 Stage 3，[ADR 020](adr/020-path-then-time-parameterized-joint-trajectories.md)）
 

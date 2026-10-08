@@ -74,6 +74,9 @@ struct FsmInputs
   double box_yaw_rad = 0.0;
   double box_y_m = 0.0;
   double elapsed_in_phase_s = 0.0;
+  // How long the bridge has reported ATTACHED, continuously, up to this tick (Week 5 Stage 5);
+  // 0 while not attached. Counted by the controller from the observation stream.
+  double attached_for_s = 0.0;
   int retry_count = 0;
   // The phase's timed arm trajectory has run to its end (Week 5 Stage 3). An arm that only
   // passes near the target while the reference is still moving has not arrived. True when no
@@ -128,6 +131,11 @@ struct FsmParams
   // after the arm has already reached lift height) -- this one waits on the
   // *gripper* stabilizing before the arm moves at all.
   double close_settle_s = 2.0;
+  // Week 5 Stage 5: CLOSE ends this long (simulated) after the bridge first reports ATTACHED,
+  // instead of after a fixed close_settle_s. Attachment already required the fingers to have
+  // stopped for 0.1 s (ADR 019), so the grip is stable by then; the fixed 2 s was 1.7 s of
+  // waiting. close_settle_s remains the observation floor for the failed-confirmation path.
+  double close_after_attach_s = 0.2;
   double phase_timeout_s = 6.0;
   int max_retries = 3;
   mujoco_bridge::GraspCriteria grasp_criteria;

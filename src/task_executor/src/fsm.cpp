@@ -135,7 +135,9 @@ FsmDecision step(const FsmInputs & in, const JointTarget & target, const FsmPara
         // BridgeObservation owns the attachment lifecycle. The local classifier is
         // retained only to label a timeout; it must not create a second attachment
         // decision that can disagree with bridge state.
-        if (attached && in.elapsed_in_phase_s >= params.close_settle_s) {
+        // Week 5 Stage 5: the gate is "attached for close_after_attach_s", not a fixed dwell
+        // from the phase start. close_settle_s now only bounds the failed-confirmation path.
+        if (attached && in.attached_for_s >= params.close_after_attach_s) {
           return {nextPhase(in.phase), ExitReason::kReached, false};
         }
         if (in.elapsed_in_phase_s > params.phase_timeout_s) {
@@ -171,10 +173,12 @@ FsmDecision step(const FsmInputs & in, const JointTarget & target, const FsmPara
         // The one phase where checking the *gripper's* own position (rather than the
         // arm's) is the right criterion -- releasing has no gravity-sag problem the
         // way holding a reach-forward arm pose does, so a plain width threshold is
-        // enough, no phase-specific epsilon needed.
+        // enough, no phase-specific epsilon needed. Deliberately not gated on min_settle_s
+        // (Week 5 Stage 5): CLOSE ends at about 40 mm, so an open width above 60 mm can never
+        // be a leftover reading from the phase before.
         constexpr double kOpenWidthM = 0.08;
         constexpr double kOpenEpsilonM = 0.02;
-        if (in.gripper_width_m > kOpenWidthM - kOpenEpsilonM && pastMinSettle(in, params)) {
+        if (in.gripper_width_m > kOpenWidthM - kOpenEpsilonM) {
           return {nextPhase(in.phase), ExitReason::kReached, false};
         }
         if (in.elapsed_in_phase_s > params.phase_timeout_s) {

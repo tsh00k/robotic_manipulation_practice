@@ -60,7 +60,10 @@ TaskExecutorConfig loadTaskExecutorConfig(rclcpp::Node & node)
     "fsm.velocity_epsilon_rad_s", 0.05);
   config.fsm.min_settle_s = node.declare_parameter("fsm.min_settle_s", 0.5);
   config.fsm.lift_settle_grace_s = node.declare_parameter("fsm.lift_settle_grace_s", 2.0);
-  config.fsm.close_settle_s = node.declare_parameter("fsm.close_settle_s", 2.0);
+  config.fsm.close_settle_s = node.declare_parameter(
+    "fsm.close_settle_s", config.fsm.close_settle_s);
+  config.fsm.close_after_attach_s = node.declare_parameter(
+    "fsm.close_after_attach_s", config.fsm.close_after_attach_s);
   config.fsm.phase_timeout_s = node.declare_parameter("fsm.phase_timeout_s", 6.0);
   config.fsm.max_retries = node.declare_parameter("fsm.max_retries", 3);
 
