@@ -19,6 +19,7 @@
 #include <array>
 #include <optional>
 #include <memory>
+#include <vector>
 
 #include "arm_kinematics/differential_ik.hpp"
 #include "task_executor/cartesian_waypoint_source.hpp"
@@ -52,6 +53,16 @@ public:
   JointTarget jointTargetFor(
     Phase phase, const ObjectPose & object_pose, const PlaceTarget & place) const override;
   const std::optional<WaypointDiagnostics> & diagnostics() const {return diagnostics_;}
+  // The joint path along the TCP straight line from configuration start to configuration goal
+  // (Week 5 Stage 3): TCP poses every step_m (orientation slerped), each solved by IK seeded
+  // with the previous solution. The first point is start; the last is the line's last IK
+  // solution, the same TCP pose as goal but possibly not the same joints (7 joints, 6
+  // constraints), so the caller should take it as the new goal. Throws std::runtime_error if a
+  // point does not converge or two consecutive solutions differ by more than
+  // max_joint_jump_rad (a jump to another branch of solutions).
+  std::vector<std::array<double, 7>> cartesianLine(
+    const std::array<double, 7> & start, const std::array<double, 7> & goal,
+    double step_m = 0.005, double max_joint_jump_rad = 0.05) const;
 
 private:
   arm_kinematics::ArmModel model_;

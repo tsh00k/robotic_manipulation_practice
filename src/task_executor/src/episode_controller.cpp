@@ -23,6 +23,11 @@
 
 namespace task_executor
 {
+namespace
+{
+// How far TOTG may round the corners of a TCP line's joint path (waypoints about 5 mm apart).
+constexpr double kTcpLineBlendRad = 1e-3;
+}  // namespace
 
 // Current: no episode exists.
 // Transition: initialize to kIdle.
@@ -30,10 +35,12 @@ namespace task_executor
 EpisodeController::EpisodeController(
   const WaypointSource & waypoint_source, FsmParams fsm_params,
   DiffIkWaypointSource * diff_ik_source, std::chrono::steady_clock::duration watchdog_timeout,
-  std::optional<std::chrono::steady_clock::duration> awaiting_observation_timeout)
+  std::optional<std::chrono::steady_clock::duration> awaiting_observation_timeout,
+  std::optional<TrajectoryOptions> trajectory)
 : waypoint_source_(waypoint_source), fsm_params_(std::move(fsm_params)),
   diff_ik_source_(diff_ik_source), watchdog_timeout_(watchdog_timeout),
-  awaiting_observation_timeout_(awaiting_observation_timeout.value_or(watchdog_timeout))
+  awaiting_observation_timeout_(awaiting_observation_timeout.value_or(watchdog_timeout)),
+  trajectory_(trajectory)
 {
   place_.x = fsm_params_.place_x_m;
   place_.y = fsm_params_.place_y_m;
@@ -93,6 +100,9 @@ EpisodeActions EpisodeController::beginReset(TimePoint now)
   consumed_sample_sequence_ = 0;
   reset_started_at_ = now;
   latest_observation_.reset();
+  // The reset moves the arm and the bridge drops any running trajectory.
+  reference_end_.reset();
+  planned_phase_.reset();
 
   EpisodeActions actions;
   actions.reset_request = ResetRequest{request_id_};
@@ -244,6 +254,52 @@ EpisodeActions EpisodeController::tick(double sim_time_s, TimePoint wall_now)
       DiagnosticEvent{DiagnosticEvent::Kind::kIkFailed, e.what(), last_sample_sequence_});
     return actions;
   }
+  bool trajectory_finished = true;
+  if (trajectory_ && phase_ != Phase::kRecover && phase_ != Phase::kDone &&
+    phase_ != Phase::kFailed)
+  {
+    // CLOSE and OPEN only move the gripper: the arm holds where the previous phase ended
+    // instead of following a fresh IK solution a few milliradians away.
+    if ((phase_ == Phase::kClose || phase_ == Phase::kOpen) && reference_end_) {
+      target.arm_positions = *reference_end_;
+    }
+    if (planned_phase_ != phase_) {
+      const std::array<double, 7> start =
+        reference_end_.value_or(trajectory_->reset_arm_positions);
+      // The vertical approach and retreat (Week 5 Stage 3, T4): the joint-space line bends
+      // the TCP 6~9 mm away from vertical over the 150 mm grasp descent.
+      const bool tcp_line = diff_ik_source_ &&
+        (phase_ == Phase::kGrasp || phase_ == Phase::kLift || phase_ == Phase::kPlace ||
+        phase_ == Phase::kRetract);
+      JointTrajectoryPlan plan;
+      try {
+        if (tcp_line) {
+          const auto path = diff_ik_source_->cartesianLine(start, target.arm_positions);
+          target.arm_positions = path.back();
+          plan = planJointPath(path, trajectory_->limits, 0.001, kTcpLineBlendRad);
+        } else {
+          plan = planJointLine(start, target.arm_positions, trajectory_->limits);
+        }
+      } catch (const std::exception & e) {
+        actions = finishEpisode(false, "TRAJECTORY_FAILED", true);
+        actions.diagnostics.push_back(
+          DiagnosticEvent{DiagnosticEvent::Kind::kTrajectoryFailed, e.what(),
+            last_sample_sequence_});
+        return actions;
+      }
+      trajectory_start_s_ = sim_time_s;
+      trajectory_duration_s_ = plan.duration_s();
+      if (plan.times_s.size() > 1) {
+        actions.trajectory = std::move(plan);
+      }
+      reference_end_ = target.arm_positions;
+      planned_phase_ = phase_;
+    }
+    // The phase's goal is where its reference ends: for a TCP line that is the line's last IK
+    // solution, not the waypoint source's (cached) solution of the same pose.
+    target.arm_positions = *reference_end_;
+    trajectory_finished = sim_time_s >= trajectory_start_s_ + trajectory_duration_s_;
+  }
   actions.target = TargetCommand{phase_, target};
   if (diff_ik_source_ && diff_ik_source_->diagnostics() &&
     logged_target_phase_ != phase_)
@@ -268,6 +324,7 @@ EpisodeActions EpisodeController::tick(double sim_time_s, TimePoint wall_now)
     frame.object_pose.qz * frame.object_pose.qz));
   in.elapsed_in_phase_s = sim_time_s - phase_start_sim_time_s_;
   in.retry_count = retry_count_;
+  in.trajectory_finished = trajectory_finished;
   const auto decision = step(in, target, fsm_params_);
   if (decision.next_phase == phase_) {return actions;}
 

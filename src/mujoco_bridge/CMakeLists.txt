@@ -42,6 +42,13 @@ target_include_directories(grasp_criteria PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
+# Exported so task_executor's tests can check its planned trajectories through the same
+# interpolation the bridge executes (Week 5 Stage 3).
+add_library(trajectory_interpolator src/trajectory_interpolator.cpp)
+target_include_directories(trajectory_interpolator PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
 
 add_executable(mujoco_bridge_node
   src/mujoco_bridge_node.cpp
@@ -59,7 +66,7 @@ add_executable(mujoco_bridge_node
 target_include_directories(mujoco_bridge_node PRIVATE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
-target_link_libraries(mujoco_bridge_node grasp_criteria glfw Eigen3::Eigen)
+target_link_libraries(mujoco_bridge_node grasp_criteria trajectory_interpolator glfw Eigen3::Eigen)
 ament_target_dependencies(mujoco_bridge_node
   rclcpp
   sensor_msgs
@@ -88,7 +95,7 @@ install(TARGETS mujoco_bridge_node
   DESTINATION lib/${PROJECT_NAME}
 )
 
-install(TARGETS grasp_criteria
+install(TARGETS grasp_criteria trajectory_interpolator
   EXPORT export_grasp_criteria
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
@@ -172,6 +179,9 @@ if(BUILD_TESTING)
   )
   target_include_directories(test_grasp_criteria PRIVATE include)
   target_link_libraries(test_grasp_criteria grasp_criteria)
+
+  ament_add_gtest(test_trajectory_interpolator test/test_trajectory_interpolator.cpp)
+  target_link_libraries(test_trajectory_interpolator trajectory_interpolator)
 
   ament_add_gtest(test_grasp_state
     test/test_grasp_state.cpp

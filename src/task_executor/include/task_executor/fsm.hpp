@@ -75,6 +75,10 @@ struct FsmInputs
   double box_y_m = 0.0;
   double elapsed_in_phase_s = 0.0;
   int retry_count = 0;
+  // The phase's timed arm trajectory has run to its end (Week 5 Stage 3). An arm that only
+  // passes near the target while the reference is still moving has not arrived. True when no
+  // trajectory is used (a step target).
+  bool trajectory_finished = true;
 };
 
 struct FsmParams

@@ -14,6 +14,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <chrono>
 #include <stdexcept>
 
@@ -79,6 +80,85 @@ TEST(EpisodeController, TransitionPublishesOldPhaseTargetBeforeRecordingNewPhase
   ASSERT_EQ(controller.telemetry().phases.size(), 1u);
   EXPECT_EQ(controller.telemetry().phases.front().phase_name, "HOME");
   EXPECT_FALSE(controller.tick(0.6, EpisodeController::TimePoint{}).target.has_value());
+}
+
+// Week 5 Stage 3: with trajectory limits, each phase's arm motion is planned once on entry, from
+// where the previous reference ended (after a reset, the measured joints), and the phase cannot
+// end before the trajectory has run out.
+TEST(EpisodeController, PlansOneTrajectoryPerPhaseAndWaitsForIt)
+{
+  FakeWaypointSource source;  // joint1 targets: HOME 0.25 + 0, PREGRASP 0.25 + 1
+  EpisodeController controller(
+    source, FsmParams{}, nullptr, std::chrono::seconds(5), {}, TrajectoryOptions{});
+  ready(controller);
+  const auto now = EpisodeController::TimePoint{};
+  uint64_t sequence = 0;
+  const auto tickAt = [&](double t, double joint1) {
+      auto frame = observation(4, ++sequence);
+      frame.frame.arm.positions[0] = joint1;
+      controller.onObservation(frame, now, t);
+      return controller.tick(t, now);
+    };
+
+  // HOME starts from the reset configuration (joint1 0 in the ready pose, whatever the measured
+  // joints say) and goes to the fake HOME target: joint1 0.25, the other joints from the ready
+  // pose to 0 -- joint4 moves 2.36 rad, longer than the 0.5 s minimum settle.
+  const auto home = tickAt(0.0, -0.5);
+  ASSERT_TRUE(home.trajectory.has_value());
+  EXPECT_EQ(home.trajectory->positions.front(), kFrankaReadyPose);
+  EXPECT_DOUBLE_EQ(home.trajectory->positions.back()[0], 0.25);
+  const double home_duration = home.trajectory->duration_s();
+  ASSERT_GT(home_duration, 0.9);
+  // At the target and at rest, past the minimum settle, but the trajectory is still running.
+  const auto early = tickAt(0.9, 0.25);
+  EXPECT_FALSE(early.trajectory.has_value());
+  EXPECT_FALSE(early.transition.has_value());
+  const auto on_time = tickAt(home_duration + 0.01, 0.25);
+  ASSERT_TRUE(on_time.transition.has_value());
+  EXPECT_EQ(on_time.transition->to, Phase::kPregrasp);
+
+  // PREGRASP starts from HOME's reference end (0.25), not from the measured 0.2.
+  const auto pregrasp = tickAt(2.0, 0.2);
+  ASSERT_TRUE(pregrasp.trajectory.has_value());
+  EXPECT_DOUBLE_EQ(pregrasp.trajectory->positions.front()[0], 0.25);
+  EXPECT_DOUBLE_EQ(pregrasp.trajectory->positions.back()[0], 1.25);
+  EXPECT_FALSE(tickAt(2.05, 0.3).trajectory.has_value());
+}
+
+TEST(EpisodeController, WaitsForTheTrajectoryEvenWhenTheArmIsAlreadyThere)
+{
+  FakeWaypointSource source;
+  EpisodeController controller(
+    source, FsmParams{}, nullptr, std::chrono::seconds(5), {}, TrajectoryOptions{});
+  ready(controller);
+  const auto now = EpisodeController::TimePoint{};
+  // From the reset configuration (the ready pose) to the fake target, longer than 0.5 s.
+  auto frame = observation(4, 1);
+  controller.onObservation(frame, now, 0.0);
+  const auto home = controller.tick(0.0, now);
+  ASSERT_TRUE(home.trajectory.has_value());
+  ASSERT_GT(home.trajectory->duration_s(), 1.0);
+  frame = observation(4, 2);
+  frame.frame.arm.positions[0] = 0.25;  // claims to be there already
+  controller.onObservation(frame, now, 0.8);
+  EXPECT_FALSE(controller.tick(0.8, now).transition.has_value());
+  frame = observation(4, 3);
+  frame.frame.arm.positions[0] = 0.25;
+  controller.onObservation(frame, now, home.trajectory->duration_s() + 0.01);
+  const auto done = controller.tick(home.trajectory->duration_s() + 0.01, now);
+  ASSERT_TRUE(done.transition.has_value());
+  EXPECT_EQ(done.transition->to, Phase::kPregrasp);
+}
+
+TEST(EpisodeController, WithoutTrajectoryLimitsTheTargetIsAStep)
+{
+  FakeWaypointSource source;
+  EpisodeController controller(source);
+  ready(controller);
+  controller.onObservation(observation(4, 1), EpisodeController::TimePoint{}, 0.5);
+  const auto actions = controller.tick(0.5, EpisodeController::TimePoint{});
+  EXPECT_FALSE(actions.trajectory.has_value());
+  EXPECT_TRUE(actions.target.has_value());
 }
 
 TEST(EpisodeController, IkFailureProducesNoTargetAndOneOutcome)

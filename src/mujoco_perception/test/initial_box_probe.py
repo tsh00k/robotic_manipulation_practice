@@ -117,6 +117,18 @@ timeline Week 5 Stage 1, baseline measurements (week5.md 1.1), no acceptance: pe
          with the arm already at its target, the wait before the first command, the waits
          in CLOSE and VERIFY, the box slip relative to the TCP split by phase, camera topic
          arrival rates and the RTF, with the validity checks V1..V3.
+motion   Week 5 Stage 3 (week5.md 3.4): one vision episode per layout -- HELD-A 14 and 29 and
+         the three layouts of week5 Stage 1 -- with the arm moved by timed trajectories.
+         T3: peak joint velocity (joint_state.velocity) <= the FCI limit x 1.05 and peak
+         acceleration (difference of consecutive velocities, 10 ms) <= the reference limit (a
+         quarter of FCI) x 1.10; in every joint-space-line trajectory (not the vertical ones,
+         which follow the TCP line, week5 3.6) the joints that move more than 0.05 rad keep the
+         same progress, measured from their actual start to their actual end, within 0.05.
+         T4: in the vertical segments (TCP xy moves < 20 mm, z > 50 mm) the actual TCP
+         stays within 5 mm of the straight line between its actual start and end. T6, reported:
+         the episode time, phase durations, the lag of the actual motion behind the reference,
+         the TCP peak speed and acceleration, and the box slip in the TCP frame at the end of
+         LIFT, PREPLACE and PLACE.
 held-summary  Read the JSON lines of the vision and oracle runs (and the N3 runs) and judge the
          Stage 14 acceptance rules.
 episode  Bridge + estimator + executor with observation_source=vision, three episodes in a
@@ -1365,7 +1377,8 @@ def timeline_episode(args, layout):
                                    m.generation)), 200)
     rig.node.create_subscription(
         JointTrajectory, '/mujoco_bridge/joint_command',
-        lambda m: commands.append((time.monotonic(), list(m.points[0].positions))), 200)
+        # the last point is the goal, also for a timed trajectory (Week 5 Stage 3)
+        lambda m: commands.append((time.monotonic(), list(m.points[-1].positions))), 200)
     for key, topic, kind in (('rgb', 'color/image_raw', Image),
                              ('depth', 'depth/image_raw', Image),
                              ('rgb_info', 'color/camera_info', CameraInfo),
@@ -1615,12 +1628,180 @@ def run_episode(args):
     return 0 if not failures else 1
 
 
+FCI_VELOCITY = np.array([2.175, 2.175, 2.175, 2.175, 2.61, 2.61, 2.61])
+REFERENCE_ACCELERATION = np.array([3.75, 1.875, 2.5, 3.125, 3.75, 5.0, 5.0])
+
+
+def arm_of(observation):
+    names = list(observation.joint_state.name)
+    index = [names.index(f'joint{i}') for i in range(1, 8)]
+    return (np.array([observation.joint_state.position[i] for i in index]),
+            np.array([observation.joint_state.velocity[i] for i in index]))
+
+
+def tcp_of(observation):
+    t = observation.world_to_hand_tcp.transform
+    position = np.array([t.translation.x, t.translation.y, t.translation.z])
+    return position, rotation_matrix(t.rotation)
+
+
+def motion_episode(args, label, layout):
+    trajectories = []  # (sim time of the last bridge sample when it arrived, message)
+    rig = Rig(args.workspace, layout_params(layout), True, executor_params=['place.into_bin=true'],
+              source='vision')
+    rig.node.create_subscription(
+        JointTrajectory, '/mujoco_bridge/joint_command',
+        lambda m: trajectories.append(
+            (stamp_ns(rig.observations[-1].joint_state.header.stamp) / 1e9, m)), 50)
+    try:
+        if not rig.spin_until(lambda: rig.start.get_subscription_count() > 0, 30):
+            raise RuntimeError('executor did not come up')
+        rig.start.publish(Empty())
+        if not rig.spin_until(lambda: bool(rig.outcomes), 300):
+            raise RuntimeError('no outcome within 300 s')
+        rig.spin_until(lambda: False, 1.0)
+    finally:
+        rig.close()
+    outcome = rig.outcomes[-1]
+    generation = max(o.generation for o in rig.observations)
+    obs = sorted((o for o in rig.observations if o.generation == generation),
+                 key=lambda o: stamp_ns(o.joint_state.header.stamp))
+    t = np.array([stamp_ns(o.joint_state.header.stamp) / 1e9 for o in obs])
+    q = np.array([arm_of(o)[0] for o in obs])
+    qd = np.array([arm_of(o)[1] for o in obs])
+    tcp = np.array([tcp_of(o)[0] for o in obs])
+    problems, notes = [], []
+    if not outcome.success or outcome.retries:
+        problems.append(f'success={outcome.success} retries={outcome.retries} '
+                        f'failure={outcome.failure_code} (the checks below use the last attempt)')
+    # T3: velocity and acceleration of the actual motion.
+    v_ratio = np.abs(qd) / FCI_VELOCITY
+    dt = np.diff(t)[:, None]
+    a_ratio = np.abs(np.diff(qd, axis=0) / dt) / REFERENCE_ACCELERATION
+    vi, ai = np.unravel_index(v_ratio.argmax(), v_ratio.shape), np.unravel_index(
+        a_ratio.argmax(), a_ratio.shape)
+    notes.append(f'peak velocity {v_ratio.max():.3f} of the FCI limit (joint{vi[1] + 1}), '
+                 f'peak acceleration {a_ratio.max():.3f} of the reference limit (joint{ai[1] + 1} '
+                 f'at t={t[ai[0]] - t[0]:.2f} s)')
+    if v_ratio.max() > 1.05:
+        problems.append(f'T3 velocity {v_ratio.max():.3f} of the limit')
+    if a_ratio.max() > 1.10:
+        problems.append(f'T3 acceleration {a_ratio.max():.3f} of the limit')
+    # Per trajectory: progress spread (T3), vertical TCP line (T4), lag (T6).
+    mine = [(ts, m) for ts, m in trajectories if len(m.points) > 1 and ts >= t[0] - 1e-9]
+    lags = []
+    for k, (t0, msg) in enumerate(mine):
+        end = msg.points[-1].time_from_start
+        duration = end.sec + end.nanosec * 1e-9
+        t_end = mine[k + 1][0] if k + 1 < len(mine) else t[-1]
+        window = (t >= t0) & (t <= t_end)
+        if window.sum() < 3:
+            continue
+        qw, pw, tw = q[window], tcp[window], t[window]
+        # the actual end: where the motion has settled (within 1 mrad of the last sample)
+        settled = np.where(np.max(np.abs(qw - qw[-1]), axis=1) < 1e-3)[0]
+        last = settled[0] if len(settled) else len(qw) - 1
+        qw, pw, tw = qw[:last + 1], pw[:last + 1], tw[:last + 1]
+        delta = qw[-1] - qw[0]
+        moving = np.abs(delta) > 0.05
+        spread = 0.0
+        worst_pair = ''
+        if moving.sum() > 1:
+            fraction = (qw[:, moving] - qw[0, moving]) / delta[moving]
+            gap = fraction.max(axis=1) - fraction.min(axis=1)
+            spread = float(np.max(gap))
+            at = int(np.argmax(gap))
+            joints = np.where(moving)[0]
+            hi, lo = joints[int(np.argmax(fraction[at]))], joints[int(np.argmin(fraction[at]))]
+            worst_pair = (f' (joint{hi + 1} at {fraction[at].max():.2f} of {delta[hi]:+.3f} rad, '
+                          f'joint{lo + 1} at {fraction[at].min():.2f} of {delta[lo]:+.3f} rad)')
+        d = pw[-1] - pw[0]
+        vertical = np.linalg.norm(d[:2]) < 0.02 and abs(d[2]) > 0.05
+        # Vertical segments follow the TCP straight line, so their joints do not move in
+        # proportion; the progress check applies to the joint-space lines only (week5 3.6).
+        if spread > 0.05 and not vertical:
+            problems.append(f'T3 trajectory {k}: joint progress spread {spread:.3f}')
+        off = 0.0
+        if vertical:
+            u = d / np.linalg.norm(d)
+            off = max(np.linalg.norm((p - pw[0]) - (p - pw[0]).dot(u) * u) for p in pw)
+            if off > 0.005:
+                problems.append(f'T4 trajectory {k}: TCP {1000 * off:.1f} mm off its line')
+        # lag at half way, on the joint that moves most
+        j = int(np.argmax(np.abs(delta)))
+        ref_t = np.array([p.time_from_start.sec + p.time_from_start.nanosec * 1e-9
+                          for p in msg.points])
+        ref_q = np.array([p.positions[j] for p in msg.points])
+        ref_half = ref_t[np.argmax((ref_q - ref_q[0]) / (ref_q[-1] - ref_q[0]) >= 0.5)]
+        act_half = tw[np.argmax((qw[:, j] - qw[0, j]) / delta[j] >= 0.5)] - t0
+        lags.append(act_half - ref_half)
+        notes.append(f'trajectory {k}: {duration:.2f} s, joints moving {int(moving.sum())}, '
+                     f'progress spread {spread:.3f}{worst_pair}, '
+                     f'TCP moved {1000 * np.linalg.norm(d):.0f} mm'
+                     + (f' vertically, {1000 * off:.1f} mm off its line' if vertical else '')
+                     + f', lag at half way {1000 * (act_half - ref_half):.0f} ms')
+    # T6: TCP peaks, episode time, phase durations.
+    v_tcp = np.linalg.norm(np.diff(tcp, axis=0), axis=1) / np.diff(t)
+    a_tcp = np.abs(np.diff(v_tcp)) / np.diff(t)[1:]
+    names = list(outcome.phase_names)
+    durations = list(outcome.phase_durations_s)
+    notes.append(f'episode {sum(durations):.2f} s simulated; phases ' + ', '.join(
+        f'{n} {d:.2f}' for n, d in zip(names, durations)))
+    notes.append(f'TCP peak speed {v_tcp.max():.2f} m/s, '
+                 f'peak |d speed/dt| {a_tcp.max():.1f} m/s^2; '
+                 f'median lag {1000 * np.median(lags):.0f} ms')
+    # T6: slip, the box in the TCP frame relative to the attach, at the end of each carry phase.
+    attached = [i for i, o in enumerate(obs)
+                if o.attachment_state == BridgeObservation.ATTACHMENT_ATTACHED]
+    if attached:
+        i0 = attached[0]
+        p0, r0 = tcp_of(obs[i0])
+        box = obs[i0].object_pose.pose
+        rel0 = r0.T @ (np.array([box.position.x, box.position.y, box.position.z]) - p0)
+        rot0 = r0.T @ rotation_matrix(box.orientation)
+        bounds = np.cumsum([t[0]] + durations)
+        slips = []
+        for phase in ('LIFT', 'PREPLACE', 'PLACE'):
+            if phase not in names:
+                continue
+            end = bounds[names.index(phase) + 1]
+            i = min(int(np.searchsorted(t, end)), len(obs) - 1)
+            p, r = tcp_of(obs[i])
+            b = obs[i].object_pose.pose
+            rel = r.T @ (np.array([b.position.x, b.position.y, b.position.z]) - p)
+            rot = r.T @ rotation_matrix(b.orientation)
+            slips.append(f'{phase} {1000 * np.linalg.norm(rel - rel0):.1f} mm / '
+                         f'{angle_deg(rot0.T @ rot):.1f} deg')
+        notes.append('slip at the end of ' + ', '.join(slips))
+    print(f'{label}: ' + ('OK' if not problems else 'FAIL'), flush=True)
+    for note in notes:
+        print('    ' + note, flush=True)
+    for problem in problems:
+        print('    PROBLEM ' + problem, flush=True)
+    return [f'{label}: {p}' for p in problems]
+
+
+def run_motion(args):
+    held, _ = held_layouts(40)
+    layouts = [('HELD-A 14', held[14]), ('HELD-A 29', held[29])] + [
+        (f'Stage 1 layout {i}', layout) for i, layout in enumerate(make_layouts(3))]
+    if args.only:
+        layouts = [entry for entry in layouts if entry[0] in args.only]
+    failures = []
+    for label, layout in layouts:
+        failures += motion_episode(args, label, layout)
+    print('\nSTAGE 3 MOTION (T3, T4):', 'PASS' if not failures else 'FAIL')
+    for failure in failures:
+        print('  ', failure)
+    return 0 if not failures else 1
+
+
 def main():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('command',
                         choices=['static', 'gaps', 'latch', 'place', 'verify', 'carry',
-                                 'held', 'held-summary', 'timeline', 'episode'])
+                                 'held', 'held-summary', 'timeline', 'episode', 'motion'])
     parser.add_argument('--workspace', default=str(Path(__file__).resolve().parents[3]))
     parser.add_argument('--count', type=int, default=6)
     parser.add_argument('--out', default=str(ARTIFACTS / 'held' / 'held.jsonl'),
@@ -1645,13 +1826,15 @@ def main():
     parser.add_argument('--scene', choices=['legacy', 'bin'], default='legacy',
                         help='episode: the simulator scene (bin = scene.enabled with the bin)')
     parser.add_argument('--timeout-s', type=float, default=60.0)
+    parser.add_argument('--only', nargs='*', default=[],
+                        help="motion: run only these layouts, e.g. 'Stage 1 layout 0'")
     parser.add_argument('--gaps', type=float, nargs='*', default=[21, 40, 60, 80],
                         help='gaps: box-to-bin gaps in mm')
     args = parser.parse_args()
     return {'static': run_static, 'gaps': run_gaps, 'latch': run_latch, 'place': run_place,
             'verify': run_verify, 'carry': run_carry, 'held': run_held,
             'held-summary': run_held_summary, 'timeline': run_timeline,
-            'episode': run_episode}[args.command](args)
+            'episode': run_episode, 'motion': run_motion}[args.command](args)
 
 
 if __name__ == '__main__':

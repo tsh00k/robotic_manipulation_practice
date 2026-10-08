@@ -20,6 +20,7 @@
 #include <rclcpp/node.hpp>
 
 #include "task_executor/cartesian_waypoint_source.hpp"
+#include "task_executor/joint_trajectory_planner.hpp"
 #include "task_executor/waypoint_source.hpp"
 #include "task_executor/fsm.hpp"
 
@@ -100,6 +101,8 @@ struct TaskExecutorConfig
   // HOME, and where VERIFY returns to (Week 5 Stage 2): a joint target in the diff_ik mode,
   // the same configuration as the bridge's reset keyframe.
   std::array<double, 7> home_joint_positions = kFrankaReadyPose;
+  // Limits of every phase's timed arm trajectory (Week 5 Stage 3, ADR 020).
+  JointLimits trajectory_limits = kPandaReferenceLimits;
 };
 
 const char * waypointModeName(WaypointMode mode);

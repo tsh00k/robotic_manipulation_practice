@@ -51,6 +51,7 @@
 #include "mujoco_bridge/mujoco_dl.hpp"
 #include "mujoco_bridge/rgbd_camera.hpp"
 #include "mujoco_bridge/state_ops.hpp"
+#include "mujoco_bridge/trajectory_interpolator.hpp"
 #include "scene_config.hpp"
 #include "scene_ops.hpp"
 
@@ -768,6 +769,8 @@ private:
 
     attachment_state_ = manipulation_interfaces::msg::BridgeObservation::ATTACHMENT_NOT_ATTACHED;
     attachment_confirmer_.reset();
+    // The keyframe set ctrl; a trajectory left over from before the reset must not move the arm.
+    trajectory_.clear();
     ++generation_;
     message = "reset to keyframe `" + reset_keyframe_name_ + "`";
     RCLCPP_INFO(
@@ -792,12 +795,12 @@ private:
     response->generation = generation_;
   }
 
-  // Writes the first trajectory point's positions into mjData::ctrl. Only the first
-  // point is used -- there is no trajectory *execution* here (no interpolation
-  // between points, no timing), just "set today's target and let the position
-  // servos in the MJCF (gainprm/biasprm, see 4.3.4) do the rest". A real trajectory
-  // follower belongs upstream of this bridge, e.g. as a ros2_control controller or
-  // a node that resamples a trajectory into a fast stream of single-point commands.
+  // Arm commands. A single point is a target written straight into mjData::ctrl, and the
+  // position servos in the MJCF (gainprm/biasprm, see 4.3.4) do the rest -- the behaviour
+  // before Week 5 Stage 3, kept for the keyframe source and the probes. Several points with
+  // time_from_start are a timed trajectory (Stage 3, ADR 020): it starts at the simulation time
+  // the message arrives, and every physics step onTimer() writes its reference into ctrl
+  // (applyTrajectory()). Either kind replaces a trajectory still running.
   //
   // Same callback-group reasoning as onReset (10.8.3): this runs on the default
   // single-threaded executor alongside onTimer(), so a command can never be applied
@@ -808,29 +811,9 @@ private:
       RCLCPP_WARN(get_logger(), "~/joint_command: trajectory has no points, ignoring");
       return;
     }
-    if (msg->points.size() > 1) {
-      // Not a bug -- this node was never a trajectory follower -- but a message with
-      // N points and only the first one taking effect is exactly the kind of thing
-      // that should be loud once rather than silent forever, since it produces
-      // correct-looking behavior (something moves) for the wrong reason.
-      RCLCPP_WARN_ONCE(
-        get_logger(),
-        "~/joint_command: message has %zu points; only points[0] is applied "
-        "(no interpolation, no timing -- see Stage E notes)",
-        msg->points.size());
-    }
-    const auto & point = msg->points.front();
-    if (point.positions.size() != msg->joint_names.size()) {
-      RCLCPP_WARN(
-        get_logger(), "~/joint_command: %zu joint_names but %zu positions, ignoring",
-        msg->joint_names.size(), point.positions.size());
-      return;
-    }
-
-    for (size_t i = 0; i < msg->joint_names.size(); ++i) {
-      const std::string & name = msg->joint_names[i];
-      const double target = point.positions[i];
-
+    // One entry per joint name; -1 for a joint that is skipped.
+    std::vector<int> actuators;
+    for (const std::string & name : msg->joint_names) {
       // Stage H split the gripper out to its own topic (see onGripperCommand()) so
       // this bridge's command shape matches a real ros2_control setup, where the
       // arm's JointTrajectoryController and the gripper's GripperActionController
@@ -843,21 +826,69 @@ private:
           "~/joint_command: `%s` is a gripper joint; finger joints must be commanded "
           "via ~/gripper_command now (control_msgs/GripperCommand), ignoring here",
           name.c_str());
-        continue;
-      }
-
-      const auto it = actuator_by_joint_.find(name);
-      if (it == actuator_by_joint_.end()) {
-        RCLCPP_WARN(get_logger(), "~/joint_command: unknown joint `%s`, ignoring", name.c_str());
+        actuators.push_back(-1);
         continue;
       }
       // it->second is an actuator id, not a joint id -- ctrl is indexed by the
       // former. Using the joint's own qpos_adr/dof_adr here would be the Stage E
       // landmine from 4.3.4: it happens to work for the 7 arm joints because
       // actuatorN drives jointN, and would silently misfire for anything else.
-      data_->ctrl[it->second] = target;
+      const auto it = actuator_by_joint_.find(name);
+      if (it == actuator_by_joint_.end()) {
+        RCLCPP_WARN(get_logger(), "~/joint_command: unknown joint `%s`, ignoring", name.c_str());
+        actuators.push_back(-1);
+        continue;
+      }
+      actuators.push_back(it->second);
+    }
+    for (const auto & point : msg->points) {
+      if (point.positions.size() != actuators.size()) {
+        RCLCPP_WARN(
+          get_logger(), "~/joint_command: %zu joint_names but a point has %zu positions, ignoring",
+          actuators.size(), point.positions.size());
+        return;
+      }
+    }
+
+    if (msg->points.size() == 1) {
+      trajectory_.clear();
+      for (std::size_t i = 0; i < actuators.size(); ++i) {
+        if (actuators[i] >= 0) {
+          data_->ctrl[actuators[i]] = msg->points.front().positions[i];
+        }
+      }
+      return;
+    }
+    // Velocities, if present, are not used: the samples are dense (trajectory_interpolator.hpp).
+    std::vector<double> times;
+    std::vector<std::vector<double>> positions;
+    for (const auto & point : msg->points) {
+      times.push_back(rclcpp::Duration(point.time_from_start).seconds());
+      positions.push_back(point.positions);
+    }
+    try {
+      trajectory_.set(std::move(times), std::move(positions));
+    } catch (const std::invalid_argument & e) {
+      RCLCPP_WARN(get_logger(), "~/joint_command: %s, ignoring", e.what());
+      return;
+    }
+    trajectory_actuators_ = std::move(actuators);
+    trajectory_start_s_ = data_->time;
+  }
+
+  // Writes the running trajectory's reference for the coming physics step into ctrl.
+  void applyTrajectory()
+  {
+    if (!trajectory_.sample(data_->time - trajectory_start_s_, trajectory_reference_)) {
+      return;
+    }
+    for (std::size_t i = 0; i < trajectory_actuators_.size(); ++i) {
+      if (trajectory_actuators_[i] >= 0) {
+        data_->ctrl[trajectory_actuators_[i]] = trajectory_reference_[i];
+      }
     }
   }
+
 
   // control_msgs/GripperCommand rather than the action of the same name: this is
   // still a topic-based interface (see the plan doc week2.md Stage H), matching
@@ -947,6 +978,7 @@ private:
   void onTimer()
   {
     injectFaultIfDue();
+    applyTrajectory();
     api_.step(model_, data_);
     ++step_count_;
     logRtfIfDue();
@@ -1267,6 +1299,12 @@ private:
   uint64_t generation_ = 0;
   const uint64_t bridge_session_ = makeBridgeSession();
   int reset_keyframe_id_ = -1;
+  // The timed arm trajectory being executed (Week 5 Stage 3), the actuator of each of its joints,
+  // and the simulation time it started.
+  TrajectoryInterpolator trajectory_;
+  std::vector<int> trajectory_actuators_;
+  double trajectory_start_s_ = 0.0;
+  std::vector<double> trajectory_reference_;
   std::string reset_keyframe_name_;
   rclcpp::Subscription<trajectory_msgs::msg::JointTrajectory>::SharedPtr joint_command_sub_;
   rclcpp::Subscription<control_msgs::msg::GripperCommand>::SharedPtr gripper_command_sub_;

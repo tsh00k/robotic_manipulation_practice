@@ -74,7 +74,16 @@ bool pastMinSettle(const FsmInputs & in, const FsmParams & params)
   return in.elapsed_in_phase_s >= params.min_settle_s;
 }
 
-// Motion-only phases: advance on armReached(), RECOVER on phase_timeout_s, else
+// The arm is at the target and at rest, and its trajectory has run out (Week 5 Stage 3).
+bool armArrived(
+  const FsmInputs & in, const JointTarget & target, const FsmParams & params,
+  double position_epsilon_rad)
+{
+  return in.trajectory_finished && armReached(
+    in.arm, target.arm_positions, position_epsilon_rad, params.velocity_epsilon_rad_s);
+}
+
+// Motion-only phases: advance on armArrived(), RECOVER on phase_timeout_s, else
 // hold. Shared by every phase where the FSM's only job is "wait for the arm to get
 // there" -- kClose/kLift/kVerify each need extra logic layered on top (see step()
 // below) and do not call this helper directly.
@@ -82,10 +91,7 @@ FsmDecision motionStep(
   const FsmInputs & in, const JointTarget & target, const FsmParams & params,
   double position_epsilon_rad)
 {
-  if (armReached(
-      in.arm, target.arm_positions, position_epsilon_rad, params.velocity_epsilon_rad_s) &&
-    pastMinSettle(in, params))
-  {
+  if (armArrived(in, target, params, position_epsilon_rad) && pastMinSettle(in, params)) {
     return {nextPhase(in.phase), ExitReason::kReached, false};
   }
   if (in.elapsed_in_phase_s > params.phase_timeout_s) {
@@ -143,8 +149,7 @@ FsmDecision step(const FsmInputs & in, const JointTarget & target, const FsmPara
 
     case Phase::kLift: {
         const bool attached = in.attachment_state == kAttachmentAttached;
-        const bool arm_at_lift_height = armReached(
-          in.arm, target.arm_positions, params.position_epsilon_rad, params.velocity_epsilon_rad_s);
+        const bool arm_at_lift_height = armArrived(in, target, params, params.position_epsilon_rad);
         if (attached && arm_at_lift_height && pastMinSettle(in, params)) {
           return {nextPhase(in.phase), ExitReason::kReached, false};
         }
@@ -191,8 +196,7 @@ FsmDecision step(const FsmInputs & in, const JointTarget & target, const FsmPara
           std::hypot(dx, dy) < params.place_region_radius_m;
         // The arm is back at its VERIFY target too (HOME, Week 5 Stage 2): out of the camera's
         // view of the bin, and where the next reset puts it, so DONE leaves nothing to jump.
-        const bool arm_back = armReached(
-          in.arm, target.arm_positions, params.position_epsilon_rad, params.velocity_epsilon_rad_s);
+        const bool arm_back = armArrived(in, target, params, params.position_epsilon_rad);
         if (placed && released && arm_back && pastMinSettle(in, params)) {
           return {Phase::kDone, ExitReason::kReached, false};
         }

@@ -14,8 +14,10 @@
 
 #include "task_executor/diff_ik_waypoint_source.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <stdexcept>
+#include <string>
 #include <utility>
 
 #include "arm_kinematics/forward_kinematics.hpp"
@@ -112,6 +114,52 @@ JointTarget DiffIkWaypointSource::jointTargetFor(
   cached_phase_ = phase;
   diagnostics_ = WaypointDiagnostics{tcp_target, result};
   return cached_target_;
+}
+
+std::vector<std::array<double, 7>> DiffIkWaypointSource::cartesianLine(
+  const std::array<double, 7> & start, const std::array<double, 7> & goal, double step_m,
+  double max_joint_jump_rad) const
+{
+  arm_kinematics::JointVector q_start, q_goal;
+  for (std::size_t i = 0; i < 7; ++i) {
+    q_start(static_cast<Eigen::Index>(i)) = start[i];
+    q_goal(static_cast<Eigen::Index>(i)) = goal[i];
+  }
+  const Eigen::Isometry3d a = arm_kinematics::fk(model_, q_start).hand_tcp;
+  const Eigen::Isometry3d b = arm_kinematics::fk(model_, q_goal).hand_tcp;
+  const Eigen::Quaterniond ra(a.linear()), rb(b.linear());
+  // About step_m apart, and at most 0.02 rad of tool rotation between points.
+  const double length = (b.translation() - a.translation()).norm();
+  const int intervals = std::max(
+    1, static_cast<int>(std::ceil(std::max(length / step_m, ra.angularDistance(rb) / 0.02))));
+
+  std::vector<std::array<double, 7>> path{start};
+  arm_kinematics::JointVector seed = q_start;
+  for (int k = 1; k <= intervals; ++k) {
+    const double s = static_cast<double>(k) / intervals;
+    Eigen::Isometry3d pose = Eigen::Isometry3d::Identity();
+    pose.translation() = a.translation() + s * (b.translation() - a.translation());
+    pose.linear() = ra.slerp(s, rb).toRotationMatrix();
+    const auto result = arm_kinematics::solveIk(model_, seed, pose);
+    if (result.status != arm_kinematics::IkStatus::kConverged) {
+      throw std::runtime_error(
+              "TCP line: IK did not converge at point " + std::to_string(k) + " of " +
+              std::to_string(intervals));
+    }
+    const double jump = (result.q - seed).cwiseAbs().maxCoeff();
+    if (jump > max_joint_jump_rad) {
+      throw std::runtime_error(
+              "TCP line: joints jump " + std::to_string(jump) + " rad at point " +
+              std::to_string(k) + " of " + std::to_string(intervals));
+    }
+    std::array<double, 7> q{};
+    for (std::size_t i = 0; i < 7; ++i) {
+      q[i] = result.q(static_cast<Eigen::Index>(i));
+    }
+    path.push_back(q);
+    seed = result.q;
+  }
+  return path;
 }
 
 }  // namespace task_executor

@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <limits>
@@ -24,6 +25,7 @@
 #include "task_executor/episode_telemetry_data.hpp"
 #include "task_executor/observation_frame.hpp"
 #include "task_executor/diff_ik_waypoint_source.hpp"
+#include "task_executor/joint_trajectory_planner.hpp"
 
 namespace task_executor
 {
@@ -74,6 +76,7 @@ struct DiagnosticEvent
     kObservationRejected,
     kEpisodeFinished,
     kIkFailed,
+    kTrajectoryFailed,
   };
 
   Kind kind = Kind::kObservationRejected;
@@ -97,6 +100,9 @@ struct EpisodeActions
 {
   std::optional<ResetRequest> reset_request;
   std::optional<TargetCommand> target;
+  // The arm's timed trajectory for the phase, once on phase entry (Week 5 Stage 3); while
+  // trajectories are used, target only carries the gripper width and the FSM's target.
+  std::optional<JointTrajectoryPlan> trajectory;
   std::optional<EpisodeFinished> finished;
   std::optional<PhaseTransition> transition;
   std::optional<WaypointDiagnostics> target_diagnostics;
@@ -104,9 +110,20 @@ struct EpisodeActions
 
   bool empty() const
   {
-    return !reset_request && !target && !finished && !transition &&
+    return !reset_request && !target && !trajectory && !finished && !transition &&
            !target_diagnostics && diagnostics.empty();
   }
+};
+
+// Timed arm trajectories (Week 5 Stage 3, ADR 020).
+struct TrajectoryOptions
+{
+  JointLimits limits = kPandaReferenceLimits;
+  // Where the bridge's servo targets are right after a reset: the reset keyframe, which is the
+  // HOME configuration (Week 5 Stage 2). The first trajectory after a reset starts here, not at
+  // the measured joints, which sag a few milliradians under gravity: starting there would step
+  // the servo targets by that much.
+  std::array<double, 7> reset_arm_positions = kFrankaReadyPose;
 };
 
 class EpisodeController
@@ -118,11 +135,18 @@ public:
   // for the wait between the reset response and the first admitted observation only: a vision
   // executor first waits for the initial pose to be latched (Week 4.1 Stage 7), which takes
   // longer than the 5 s that is right for a stalled stream.
+  // trajectory, when given, makes every phase's arm motion a timed trajectory (Week 5 Stage 3,
+  // ADR 020): on phase entry the controller plans from where the previous phase's reference
+  // ended (after a reset, TrajectoryOptions::reset_arm_positions) to the phase's target and
+  // returns it once; the phase cannot end before it has run out. The path is the joint-space
+  // line, except GRASP, LIFT, PLACE and RETRACT, which follow the TCP straight line when the
+  // waypoints come from IK (diff_ik_source). Without it, the target is a step, as before.
   explicit EpisodeController(
     const WaypointSource & waypoint_source, FsmParams fsm_params = {},
     DiffIkWaypointSource * diff_ik_source = nullptr,
     std::chrono::steady_clock::duration watchdog_timeout = std::chrono::seconds(5),
-    std::optional<std::chrono::steady_clock::duration> awaiting_observation_timeout = {});
+    std::optional<std::chrono::steady_clock::duration> awaiting_observation_timeout = {},
+    std::optional<TrajectoryOptions> trajectory = {});
 
   // Starts a new episode, including when an earlier episode is still active.
   // The same request id is offered on each pending tick until acknowledged.
@@ -194,6 +218,13 @@ private:
   double phase_start_sim_time_s_ = 0.0;
   double current_sim_time_s_ = 0.0;
   std::optional<Phase> logged_target_phase_;
+  std::optional<TrajectoryOptions> trajectory_;
+  // Where the last planned reference ends, the phase it was planned for, and when it started;
+  // all cleared by a reset.
+  std::optional<std::array<double, 7>> reference_end_;
+  std::optional<Phase> planned_phase_;
+  double trajectory_start_s_ = 0.0;
+  double trajectory_duration_s_ = 0.0;
   ExitReason last_failure_reason_ = ExitReason::kNone;
   TimePoint reset_started_at_{};
   TimePoint last_sample_at_{};

@@ -14,6 +14,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <fstream>
@@ -103,6 +104,44 @@ TEST(DiffIkWaypointSource, RejectsAHomeOutsideTheJointLimits)
       arm_kinematics::loadFrankaFerModel(KINEMATICS_YAML_PATH, JOINT_LIMITS_YAML_PATH),
       std::make_shared<PickPlaceCartesianWaypointSource>(), home),
     std::invalid_argument);
+}
+
+// Week 5 Stage 3: the grasp descent of HELD-A layout 14 as a TCP straight line.
+TEST(DiffIkWaypointSource, CartesianLineKeepsTheTcpOnTheLine)
+{
+  const auto source = makeSource();
+  const std::array<double, 7> pregrasp{0.011, 0.210, -0.217, -1.639, 0.047, 1.844, -1.495};
+  const std::array<double, 7> grasp{0.000, 0.323, -0.200, -1.875, 0.078, 2.190, -1.515};
+  const auto model =
+    arm_kinematics::loadFrankaFerModel(KINEMATICS_YAML_PATH, JOINT_LIMITS_YAML_PATH);
+  const auto tcp = [&model](const std::array<double, 7> & q) {
+      arm_kinematics::JointVector v;
+      for (std::size_t i = 0; i < 7; ++i) {
+        v(static_cast<Eigen::Index>(i)) = q[i];
+      }
+      return arm_kinematics::fk(model, v).hand_tcp;
+    };
+  const auto path = source.cartesianLine(pregrasp, grasp);
+  ASSERT_GE(path.size(), 30u);  // 150 mm at 5 mm
+  EXPECT_EQ(path.front(), pregrasp);
+  const Eigen::Vector3d a = tcp(pregrasp).translation(), b = tcp(grasp).translation();
+  const Eigen::Vector3d u = (b - a).normalized();
+  double worst_off = 0.0, worst_jump = 0.0;
+  for (std::size_t k = 0; k < path.size(); ++k) {
+    const Eigen::Vector3d d = tcp(path[k]).translation() - a;
+    worst_off = std::max(worst_off, (d - d.dot(u) * u).norm());
+    if (k > 0) {
+      for (std::size_t i = 0; i < 7; ++i) {
+        worst_jump = std::max(worst_jump, std::abs(path[k][i] - path[k - 1][i]));
+      }
+    }
+  }
+  EXPECT_LT(worst_off, 2e-4);
+  EXPECT_LT(worst_jump, 0.05);
+  EXPECT_LT((tcp(path.back()).translation() - b).norm(), 2e-4);
+  EXPECT_LT(
+    Eigen::Quaterniond(tcp(path.back()).linear()).angularDistance(
+      Eigen::Quaterniond(tcp(grasp).linear())), 2e-3);
 }
 
 TEST(DiffIkWaypointSource, UsesObjectPositionAndHoldsTargetForPhase)

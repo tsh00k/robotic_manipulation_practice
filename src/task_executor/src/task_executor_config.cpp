@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace task_executor
@@ -93,6 +94,16 @@ TaskExecutorConfig loadTaskExecutorConfig(rclcpp::Node & node)
     throw std::invalid_argument("home.joint_positions must have 7 values");
   }
   std::copy(home.begin(), home.end(), config.home_joint_positions.begin());
+  const auto declareJointArray = [&node](const std::string & name, std::array<double, 7> & values) {
+      const std::vector<double> given = node.declare_parameter(
+        name, std::vector<double>(values.begin(), values.end()));
+      if (given.size() != values.size()) {
+        throw std::invalid_argument(name + " must have 7 values");
+      }
+      std::copy(given.begin(), given.end(), values.begin());
+    };
+  declareJointArray("trajectory.max_velocity", config.trajectory_limits.max_velocity);
+  declareJointArray("trajectory.max_acceleration", config.trajectory_limits.max_acceleration);
   config.task.tcp_target_x_m = node.declare_parameter("target.place_x_m", 0.5);
   config.task.tcp_target_y_m = node.declare_parameter("target.place_y_m", 0.3);
   config.task.hover_height_m = node.declare_parameter("target.hover_height_m", 0.15);
@@ -138,6 +149,15 @@ void validateTaskExecutorConfig(const TaskExecutorConfig & config)
     config.verification.radius_m <= 0.0)
   {
     throw std::invalid_argument("Task executor geometry contains a non-positive distance");
+  }
+  for (std::size_t i = 0; i < 7; ++i) {
+    if (!finite(config.trajectory_limits.max_velocity[i]) ||
+      !finite(config.trajectory_limits.max_acceleration[i]) ||
+      config.trajectory_limits.max_velocity[i] <= 0.0 ||
+      config.trajectory_limits.max_acceleration[i] <= 0.0)
+    {
+      throw std::invalid_argument("Arm trajectory limits must be finite and positive");
+    }
   }
   if (config.fsm.max_retries < 0 || config.fsm.phase_timeout_s <= 0.0) {
     throw std::invalid_argument("Task executor FSM configuration is invalid");

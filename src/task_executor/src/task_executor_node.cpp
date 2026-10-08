@@ -90,8 +90,16 @@ public:
     }
     controller_ = std::make_unique<EpisodeController>(
       *waypoint_source_, config_.fsm, diff_ik_source_.get(), std::chrono::seconds(5),
-      awaiting_timeout);
+      awaiting_timeout,
+      TrajectoryOptions{config_.trajectory_limits, config_.home_joint_positions});
     RCLCPP_INFO(get_logger(), "waypoint source: %s", waypointModeName(config_.waypoint_mode));
+    const auto & v = config_.trajectory_limits.max_velocity;
+    const auto & a = config_.trajectory_limits.max_acceleration;
+    RCLCPP_INFO(
+      get_logger(), "arm trajectories: joint-space lines timed by TOTG, max velocity "
+      "[%.3f %.3f %.3f %.3f %.3f %.3f %.3f] rad/s, max acceleration "
+      "[%.3f %.3f %.3f %.3f %.3f %.3f %.3f] rad/s^2", v[0], v[1], v[2], v[3], v[4], v[5], v[6],
+      a[0], a[1], a[2], a[3], a[4], a[5], a[6]);
     RCLCPP_INFO(
       get_logger(), "observation source: %s (vision confidence>=%.3f residual<=%.4fm inlier>=%.3f)",
       observationSourceName(config_.observation_source), config_.vision_min_confidence,
@@ -514,15 +522,30 @@ private:
   }
 
   // Translate one domain target into the bridge's arm and gripper commands.
-  void publishTarget(const JointTarget & target)
+  // One message per phase; the bridge starts it when it arrives (week5 Stage 3, 3.2).
+  void publishTrajectory(const JointTrajectoryPlan & plan)
   {
     trajectory_msgs::msg::JointTrajectory joint_msg;
     joint_msg.joint_names.assign(kArmJointNames.begin(), kArmJointNames.end());
-    trajectory_msgs::msg::JointTrajectoryPoint point;
-    point.positions.assign(target.arm_positions.begin(), target.arm_positions.end());
-    joint_msg.points.push_back(point);
+    joint_msg.points.reserve(plan.times_s.size());
+    for (std::size_t k = 0; k < plan.times_s.size(); ++k) {
+      trajectory_msgs::msg::JointTrajectoryPoint point;
+      point.positions.assign(plan.positions[k].begin(), plan.positions[k].end());
+      point.velocities.assign(plan.velocities[k].begin(), plan.velocities[k].end());
+      point.time_from_start = rclcpp::Duration::from_seconds(plan.times_s[k]);
+      joint_msg.points.push_back(std::move(point));
+    }
     joint_command_pub_->publish(joint_msg);
+    RCLCPP_INFO(
+      get_logger(), "phase %s arm trajectory: %.3f s, %zu samples", phaseName(controller_->phase()),
+      plan.duration_s(), plan.times_s.size());
+  }
 
+  // The arm moves only by the phase's timed trajectory (Week 5 Stage 3), so per tick only the
+  // gripper is commanded. A phase whose trajectory has a single sample (no motion) still sends
+  // it as a one-point target, which the bridge applies at once.
+  void publishTarget(const JointTarget & target)
+  {
     control_msgs::msg::GripperCommand gripper_msg;
     gripper_msg.position = target.gripper_width_m;
     gripper_msg.max_effort = 0.0;
@@ -652,6 +675,10 @@ private:
         data.ik.iterations, data.ik.position_error, data.ik.orientation_error,
         data.ik.minimum_singular_value);
     }
+    // The arm trajectory once on phase entry, before the phase's gripper command.
+    if (actions.trajectory) {
+      publishTrajectory(*actions.trajectory);
+    }
     // A transition still commands the phase being left on this tick.
     if (actions.target) {
       publishTarget(actions.target->target);
@@ -678,6 +705,10 @@ private:
       if (diagnostic.kind == DiagnosticEvent::Kind::kIkFailed) {
         RCLCPP_ERROR(
           get_logger(), "phase %s IK_FAILED: %s", phaseName(controller_->phase()),
+          diagnostic.code.c_str());
+      } else if (diagnostic.kind == DiagnosticEvent::Kind::kTrajectoryFailed) {
+        RCLCPP_ERROR(
+          get_logger(), "phase %s TRAJECTORY_FAILED: %s", phaseName(controller_->phase()),
           diagnostic.code.c_str());
       }
     }

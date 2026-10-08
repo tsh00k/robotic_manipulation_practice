@@ -259,7 +259,7 @@ EpisodeController 独占生命周期、phase、retry、失败原因与 telemetry
 
 CLOSE 要求 ATTACHED+close_settle；LIFT 要求 ATTACHED+机械臂关节位置/速度到达抬升目标+min_settle，不以视觉高度判定。LIFT 到达臂目标但未附着且超过 grace 时 recover/slipped，阶段超时 recover/timeout。PREPLACE/PLACE 先检查 ATTACHED，缺失时 recover/slipped，否则检查运动到位；这些门依赖 bridge 锁存，不能独立检测闭爪滑落。OPEN 要求实际宽度 >0.06 m 与 settle；VERIFY 的臂目标是 HOME（Week 5 Stage 2），要求 RELEASED、物体在验收区域（有 bin 时为入 bin 判据）、机械臂回到 HOME 及 settle，vision 路径须释放后的新测量；所以 DONE 时手臂已在 reset 构型。
 
-20 Hz tick 最多消费一份新鲜观测，设 IK seed、求当前目标、调用 FSM、记录迁移；无新观测不重发旧目标，新观测下 phase 未变则重发。动作顺序为当前 phase 目标、迁移日志、reset/outcome。阶段计时用仿真时间，看门狗用 steady clock，准入先检查超时再刷新新鲜度。见 [ADR 004](adr/004-episode-controller-orchestration.md) 与 [编排图](task_executor_episode_orchestration.html)。
+20 Hz tick 最多消费一份新鲜观测，设 IK seed、求当前目标、调用 FSM、记录迁移；无新观测不重发旧目标，新观测下 phase 未变则重发夹爪命令（手臂只在进入阶段时发一次轨迹，见 6.4）。运动阶段的“到位”另须本段轨迹已走完（Week 5 Stage 3）。动作顺序为当前 phase 目标、迁移日志、reset/outcome。阶段计时用仿真时间，看门狗用 steady clock，准入先检查超时再刷新新鲜度。见 [ADR 004](adr/004-episode-controller-orchestration.md) 与 [编排图](task_executor_episode_orchestration.html)。
 
 ### 6.2 Cartesian 任务与 waypoint
 
@@ -286,6 +286,14 @@ DLS 默认：阻尼阈值 0.08、最大阻尼 0.05、关节居中增益 0.02；�
 solveIk() 反馈来自运动学模型，不是实际执行状态；不修正伺服下垂、饱和或接触扰动，没有碰撞规划。模型 IK 残差、实测 TCP 误差、最终落点误差分别记录，不可互代。
 
 FSM 默认位置/GRASP-CLOSE 位置/速度容差为 0.05 rad/0.3 rad/0.05 rad/s；min_settle=0.5 s、close_settle=2 s、lift_settle_grace=2 s、phase_timeout=6 s、max_retries=3。当前场景经验值已回归，但未证明最小/通用；改变模型、控制或场景需重测。
+
+### 6.4 时间参数化的关节轨迹（Week 5 Stage 3，[ADR 020](adr/020-path-then-time-parameterized-joint-trajectories.md)）
+
+进入一个阶段时，`EpisodeController` 规划一条从上一段参考终点（reset 后为 `home.joint_positions`，即预设状态的臂构型；不用实测关节：没有重力补偿，实测在重力下比伺服目标低，joint4 约 6 mrad）到本阶段目标的轨迹，作为 `EpisodeActions::trajectory` 只返回一次；节点把它发成一条 `JointTrajectory`（每 1 ms 一个点，`positions`、`velocities`、`time_from_start`）。路径：GRASP、LIFT、PLACE、RETRACT 为 TCP 直线（`DiffIkWaypointSource::cartesianLine`：每 5 mm 一个位姿、转角按四元数球面插值，逐点 IK 以上一点为初值，相邻点关节差 > 0.05 rad 或不收敛判 `TRAJECTORY_FAILED`；终点改用这条线最后一点的解），其余为关节空间直线；CLOSE、OPEN 手臂保持上一段终点（单点，不发）。时间：`planJointPath()` 调用 moveit_core 的 TOTG（`trajectory_processing::Path`/`Trajectory`，路径点间允许偏离 0 或 1 mrad），限值 `trajectory.max_velocity`（默认 FCI 的 2.175/2.61 rad/s）与 `trajectory.max_acceleration`（默认 FCI 的 1/4：3.75、1.875、2.5、3.125、3.75、5、5 rad/s²，使 TOTG 的加速度突变在 1 kHz 下也不超过 FCI 加加速度上限）。只用 `getPosition`/`getVelocity` 采样：`getAcceleration` 在部分时刻报出超过上限的值，而位置的差分并不超限。
+
+bridge 的 `~/joint_command`：单点消息照旧立即写入 `ctrl`（固定关节表模式、探针）；多点消息是带时间的轨迹（`TrajectoryInterpolator`，独立库 `mujoco_bridge::trajectory_interpolator`），从到达时的仿真时间开始，每个物理步在点之间线性插值写入 `ctrl`，走完后保持终点；新消息替换正在执行的轨迹，reset 清除它；`velocities` 不使用。采样固定 1 ms，从轨迹开始计时，所以 2 ms 物理步读参考的时刻恰好落在采样点上，伺服拿到的是 TOTG 的精确位置；点之间线性插值的速度是阶梯状的，只在有人于点间读参考时才暴露（2 ms 采样在 1 ms 上看加速度为上限的 2 倍；三次 Hermite 10 ms 采样在加减速切换处超限 24%，见 Week 5 Stage 3 的 3.5）。
+
+位置伺服对光滑参考近似为延迟 $T_s = (k_d + b)/k_p \approx 0.1\ \mathrm{s}$ 的跟踪（各关节相同），实测实际比参考晚约 100 ms，速度、加速度峰值不超过参考（实测 ≤ 参考上限的 1.008 倍）；没有速度前馈。见 [Week 5 Stage 3](../Job_guides/my_study/week5.md#stage-3时间参数化的关节轨迹)。
 
 ## 7. 验证门禁与已知限制
 

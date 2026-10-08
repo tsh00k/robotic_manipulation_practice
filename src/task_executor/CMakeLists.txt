@@ -18,6 +18,7 @@ find_package(mujoco_bridge REQUIRED)
 find_package(manipulation_interfaces REQUIRED)
 find_package(arm_kinematics REQUIRED)
 find_package(ament_index_cpp REQUIRED)
+find_package(moveit_core REQUIRED)
 
 add_executable(task_executor_node
   src/task_executor_node.cpp
@@ -32,12 +33,14 @@ add_executable(task_executor_node
   src/pose_latch.cpp
   src/bin_containment.cpp
   src/carry_width_monitor.cpp
+  src/joint_trajectory_planner.cpp
 )
 target_include_directories(task_executor_node PRIVATE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
 target_link_libraries(task_executor_node
-  mujoco_bridge::grasp_criteria arm_kinematics::arm_kinematics)
+  mujoco_bridge::grasp_criteria arm_kinematics::arm_kinematics
+  moveit_core::moveit_trajectory_processing)
 ament_target_dependencies(task_executor_node
   rclcpp
   sensor_msgs
@@ -151,10 +154,20 @@ if(BUILD_TESTING)
     src/bin_containment.cpp
     src/phase.cpp
     src/diff_ik_waypoint_source.cpp
+    src/joint_trajectory_planner.cpp
   )
   target_include_directories(test_episode_controller PRIVATE include)
   target_link_libraries(test_episode_controller
-    mujoco_bridge::grasp_criteria Eigen3::Eigen arm_kinematics::arm_kinematics)
+    mujoco_bridge::grasp_criteria Eigen3::Eigen arm_kinematics::arm_kinematics
+    moveit_core::moveit_trajectory_processing)
+
+  ament_add_gtest(test_joint_trajectory_planner
+    test/test_joint_trajectory_planner.cpp
+    src/joint_trajectory_planner.cpp
+  )
+  target_include_directories(test_joint_trajectory_planner PRIVATE include)
+  target_link_libraries(test_joint_trajectory_planner
+    moveit_core::moveit_trajectory_processing mujoco_bridge::trajectory_interpolator)
 
   find_package(ament_lint_auto REQUIRED)
   ament_lint_auto_find_test_dependencies()
