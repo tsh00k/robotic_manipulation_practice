@@ -1,305 +1,355 @@
-# Architecture & Conventions
+# Architecture
 
-本文是当前项目事实与接口约定的唯一权威来源。决策理由见 [ADR](adr/)，历史实现、实测数据与排查过程见 [周记](../Job_guides/my_study/)，环境见 [CLAUDE.md](../CLAUDE.md)。
+给开发者的当前事实：模块边界、接口契约、关键默认值和失败行为。这里只写**现在是什么**；为什么这样定见 [ADR](adr/)，实现过程、测量数据和排查见 [周记](../Job_guides/my_study/)，开发环境见 [CLAUDE.md](../CLAUDE.md)。
 
 ## 目录
 
-- [1. 系统概览与实现状态](#1-系统概览与实现状态)
-- [2. 模型与场景](#2-模型与场景)
-- [3. 坐标与关节约定](#3-坐标与关节约定)
-- [4. 观测与 reset 契约](#4-观测与-reset-契约)
-- [5. RGB-D 与视觉契约](#5-rgb-d-与视觉契约)
-- [6. 任务与运动执行](#6-任务与运动执行)
-- [7. 验证门禁与已知限制](#7-验证门禁与已知限制)
+1. [系统概览](#1-系统概览)
+2. [模型与场景](#2-模型与场景)
+3. [坐标与关节](#3-坐标与关节)
+4. [mujoco_bridge：仿真与机器人接口](#4-mujoco_bridge仿真与机器人接口)
+5. [mujoco_perception：初始位姿检测](#5-mujoco_perception初始位姿检测)
+6. [task_executor：任务与运动](#6-task_executor任务与运动)
+7. [原始记录](#7-原始记录)
+8. [配置与运行](#8-配置与运行)
+9. [验证入口](#9-验证入口)
+10. [已知局限](#10-已知局限)
 
-## 1. 系统概览与实现状态
+## 1. 系统概览
 
-| 模块 | 当前职责 | 边界 |
+任务：Franka Panda 在 MuJoCo 里把桌上的一个 4 cm 方盒放进一个 bin。相机看初始场景，测出盒子和 bin 的位姿；执行器规划带时间的关节轨迹去抓、搬、放，再用相机确认盒子在 bin 里。
+
+| 包 | 职责 | 边界 |
 | --- | --- | --- |
-| `robot_description` | vendor MJCF/mesh 与项目自有场景 | 官方 URDF 从系统包读取 |
-| `mujoco_bridge` | 物理步进、命令执行、reset、clock、TF、同一步观测、RGB-D 与附着生命周期 | 仿真 ground truth 的唯一发布者，不执行视觉估计 |
-| `manipulation_interfaces` | 观测、视觉、结果和 reset 消息/服务 | ROS 数据契约 |
-| `mujoco_perception` | 同帧机器人掩膜、几何候选检查与视觉证据；初始 box 位姿（深度均值 + 最小面积矩形） | 不读取物体真值/接触，不推断夹持或生成预测 |
-| `arm_kinematics` | FK/Jacobian、加权 DLS 与离线 IK | 纯 C++/Eigen/yaml-cpp，不依赖 ROS、MoveIt、MuJoCo |
-| `task_executor` | 观测适配、episode 编排、FSM、waypoint 与结果发布 | ROS 节点适配纯 C++ 控制器，当前单线程 executor |
+| `robot_description` | vendor MJCF 与网格、项目自有场景 | 官方 URDF/SRDF 从系统包读 |
+| `manipulation_interfaces` | 节点间的消息与服务 | 只有类型定义 |
+| `mujoco_bridge` | 物理步进；执行关节轨迹与夹爪命令；reset 与生命周期；`/clock`、TF、同一步观测；RGB-D 相机；附着判定 | 仿真真值的唯一发布者；不做视觉 |
+| `mujoco_perception` | 机器人遮罩；从深度测盒子与 bin 的初始位姿 | 不读真值、不读接触 |
+| `arm_kinematics` | FK、雅可比、加权阻尼最小二乘 IK | 纯 C++/Eigen/yaml-cpp，不依赖 ROS、MoveIt、MuJoCo |
+| `task_executor` | episode 生命周期、阶段状态机、目标与轨迹规划、结果发布 | ROS 节点包着纯 C++ 控制器 |
 
-主链路：`MuJoCo -> BridgeObservation (+ RGB-D/TF -> InitialBoxPose/InitialBinPose) -> task_executor -> joint/gripper command -> MuJoCo`。
+`src/` 下 `arm_controller`、`experiment_runner`、`grasp_planner`、`motion_planner`、`scene_perception` 是空目录（早期占位），不参与构建。
 
-成熟算法复用现有库；自写运动学作为独立学习/验证模块，项目自有代码集中在生命周期、契约适配与可测试的任务判断。选型理由进入 ADR 或周记，不在此重复平台与公开项目比较。
+数据流：
 
-默认使用 oracle 观测与 diff_ik waypoint，固定关节表模式（`waypoint_source:=keyframe`）保留对照。固定 oracle 场景曾通过回归；完整 vision 抓放尚未验收。
-
-当前 Stage 5 已简化为 bridge 权威附着、视觉暂停/释放重测与 executor 缓存准入，见 [Week 4 Stage 5](../Job_guides/my_study/week4.md#stage-5视觉接口收紧与简化状态机)。四包构建/测试通过；2026-10-03 修复抬升前附着循环依赖并补 LIFT 到位门，见 [ADR 012](adr/012-prelift-attachment-confirmation.md)。oracle 持续注入视觉拒绝的真实回归为 20/20 成功、零重试，两包 build/test 通过（工作区汇总 492 tests、0 errors、0 failures、71 skipped）；详情见 Week 4 Stage 5；当前接口 replay 和完整 vision episode 未执行。旧独立夹持与 TCP 预测实验只作为历史证据；[ADR 009](adr/009-robot-aware-stateful-vision.md)、[ADR 010](adr/010-grasp-conditioned-object-state.md)、[ADR 011](adr/011-vision-object-pose-contract-tightening.md) 保留当时决策快照，不能代替下文当前契约。原 Stage 6（可配置 bin 与运输监控）已废弃并回退，不在代码中，见 [Week 4 6.9](../Job_guides/my_study/week4.md#69-回退决定与存档) 与 [ADR 015](adr/015-rollback-stage6-perception-side-transport-diagnostics.md)；后续改动按 [Week 4.1](../Job_guides/my_study/week4.1.md) 的阶段计划逐个加入，每个阶段通过后再更新本页。Week 4.1 Stage 5、6 已加入初始 box 与 bin 检测（`~/initial_box_pose`、`~/initial_bin_pose`，见 [5.2](#52-机器人掩膜与几何估计) 末尾与 [5.3](#53-视觉消息与原因契约)，决策见 [ADR 018](adr/018-initial-box-detection-in-the-estimator.md)），估计器不再配对 RGB；Stage 7 起 vision 来源的 executor 在 reset 后等这两个估计连续一致并锁存，抓取目标取自锁存的 box，见 [5.5](#55-任务观测来源与质量门)；Stage 8 起场景里有 bin 时放置目标与支撑高度取自 bin（vision 用锁存的视觉 bin，oracle 用 bridge 的 `~/ground_truth/bin_pose`），见 [5.5](#55-任务观测来源与质量门)。MoveIt 规划与 learned policy 尚未完成。
+```
+MuJoCo ─▶ mujoco_bridge ─┬─ /mujoco_bridge/episode_observation (BridgeObservation, 100 Hz) ──────────────▶ task_executor
+                         ├─ camera/{color,depth}/{image_raw,camera_info} (10 Hz) ─▶ object_pose_estimator ─┐
+                         └─ /tf, /tf_static, /clock, /joint_states                                          │
+task_executor ◀── initial_box_pose, initial_bin_pose (InitialBoxPose / InitialBinPose) ───────────────────────┘
+task_executor ── joint_command (带时间的 JointTrajectory), gripper_command, reset_with_generation ──▶ mujoco_bridge
+```
 
 ## 2. 模型与场景
 
 ### 2.1 模型来源与组合
 
-| 用途 | 来源 | 关键路径 |
+| 用途 | 来源 | 路径 |
 | --- | --- | --- |
-| 官方 URDF/SRDF/mesh | apt `franka_description` 1.0.1（Humble，型号名 `fer`） | `share/franka_description/robots/fer/fer.urdf.xacro`、`fer.srdf.xacro` |
+| 官方 URDF/SRDF/网格、关节限值 | apt `franka_description` 1.0.1（型号名 `fer`） | `share/franka_description/robots/fer/` |
 | MoveIt 参考配置 | apt `moveit_resources_panda_moveit_config` 2.0.7 | `share/moveit_resources_panda_moveit_config/config/` |
-| MuJoCo MJCF/mesh | vendor [MuJoCo Menagerie](https://github.com/google-deepmind/mujoco_menagerie) | `robot_description/mujoco/franka_emika_panda/panda.xml`、`panda_nohand.xml` |
+| MuJoCo 模型 | vendor [MuJoCo Menagerie](https://github.com/google-deepmind/mujoco_menagerie) | `robot_description/mujoco/franka_emika_panda/panda.xml` |
+| 场景 | 项目自有 | [pick_place_scene.xml](../robot_description/mujoco/franka_emika_panda/pick_place_scene.xml)（桌、盒、相机、预设状态）；[pick_place_bin_scene.xml](../robot_description/mujoco/franka_emika_panda/pick_place_bin_scene.xml)（前者加一个静态 bin） |
 
-系统模型通过 `get_package_share_directory()` 引用。[pick_place_scene.xml](../robot_description/mujoco/franka_emika_panda/pick_place_scene.xml) include vendor `scene.xml`/`panda.xml`，不修改 vendor 文件。
+场景 `include` vendor 文件，不改 vendor。注意：
 
-- MuJoCo include 与 meshdir 路径按顶层主文件目录解析；当前场景保持与 Panda 文件同目录。此规则约束当前布局，不表示其他路径重组方案不可能。
-- 同名 keyframe 导致编译错误；qpos 短于组合模型 nq 会静默补齐，编译/reset 成功不能证明长度正确。
-- qpos 顺序来自合并后 body/关节的文档遍历顺序。代码按 `jnt_qposadr`/`jnt_dofadr` 查地址，二者不可混用；ctrl 按 actuator id 索引。
+- include 与 meshdir 按顶层文件所在目录解析，场景文件与 `panda.xml` 同目录。
+- 同名 keyframe 编译报错；而 qpos 短于模型 nq 时 MuJoCo **静默补零**，编译和 reset 成功都不能证明长度对。
+- qpos 地址用 `jnt_qposadr`、qvel 用 `jnt_dofadr`，二者不可混用；`ctrl` 按执行器 id 索引。
 
-### 2.2 默认场景
+### 2.2 场景
 
-| 项目 | 当前值或规则 |
+| 项 | 值 |
 | --- | --- |
-| 桌面 | box geom：`size="0.3 0.4 0.02"`、`pos="0.5 0 0.2"`；顶面 z=0.22 m，无独立 TF |
-| 物体 | body **`box`**，world 下 freejoint；4 cm 立方体、50 g，初始中心 `(0.5, 0, 0.241) m` |
-| 接触 | condim=3、friction=`1 0.03 0.003`、solref=`0.01 1`；当前仅滑动摩擦生效，改 condim 需重测 |
-| 外观 | 桌面、盒子、bin 用 MuJoCo 内置程序纹理（Week 5 Stage 8）；放置标记已删除（它半透明、不进深度图，从不影响检测）。只影响 RGB |
-| `model_path` 默认 | 项目自有 `pick_place_scene.xml`（`scene.enabled=true` 时为 `pick_place_bin_scene.xml`，见下） |
-| `reset_keyframe_name` 默认 | `pick_place_home`；16 维 qpos = 7 臂 + 2 手指 + box 3 平移/4 四元数 |
+| 桌面 | 顶面 z = 0.22 m，x ∈ [0.2, 0.8]、y ∈ [−0.4, 0.4] |
+| 盒子 | body `box`，自由关节；边长 40 mm、50 g；`condim=3`、`friction="1 0.03 0.003"`；默认中心 (0.5, 0, 0.241) |
+| bin | body `bin`，静态；内口 140 × 130 mm，壁高 12 mm、厚 6 mm，内底面高于桌面 7 mm；默认 (0.5, 0.3)；原点为内底面中心 |
+| 外观 | 桌、盒、bin 用 MuJoCo 内置程序纹理，只影响 RGB |
+| 相机 | `workcell_rgbd`，位于 (0.5, −0.45, 1.0)，见 4.5 |
 
-**可选 box/bin 起始布局（Week 4.1 Stage 1，bridge 专有，默认关闭）。** `scene.enabled:=true` 时 bridge 加载 [pick_place_bin_scene.xml](../robot_description/mujoco/franka_emika_panda/pick_place_bin_scene.xml)（`include` 默认场景并加一个静态 bin：底板 + 四壁，12 mm，有碰撞），并按 `scene.box.{x,y,z,roll,pitch,yaw}` / `scene.bin.*` 设置起始位姿；launch 对应 `scene_enabled`、`box_*`、`bin_*`（缺省为 `auto`，只传用户给出的值）。长度 m、角度 rad、R=Rz(yaw)Ry(pitch)Rx(roll)；`z` 省略取旋转后最低角点距桌面 1 mm；box 原点为中心，bin 原点为内底面中心。位姿写入 `qpos0`、全部 keyframe 的 qpos 与 bin body，reset 恢复同一布局。出桌、穿桌、非有限值、bin 倾斜超约 20°、box 与 bin 包围盒间距小于 20 mm、关闭时给出位姿，都使 bridge 以状态 1 退出并说明原因。**关闭时模型与旧版逐字节相同**：把隐藏的 bin 放进默认场景会使相机 RGB 有 5208 个像素变化（深度与观测不变，根因未明），所以 bin 在单独的文件里。这些位姿是仿真真值，只有 bridge 声明参数，perception 与 executor 不读取；executor 的 place 目标与验收仍是固定位置，所以开启后的抓放结果不代表入 bin（Stage 13、15 才改）。决策见 [ADR 015](adr/015-rollback-stage6-perception-side-transport-diagnostics.md)，过程与验证见 [Week 4.1 Stage 1](../Job_guides/my_study/week4.1.md#stage-1bridge-可配置场景默认关闭)。
+`scene.enabled:=true` 时 bridge 加载带 bin 的场景，并按参数 `scene.box.{x,y,z,roll,pitch,yaw}`、`scene.bin.*` 摆放（米、弧度，R = Rz(yaw)·Ry(pitch)·Rx(roll)；省略 z 时取最低角点离桌 1 mm）。位姿写入 `qpos0`、所有预设状态的 qpos 和 bin body，所以 reset 恢复同一布局。出桌、穿桌、非有限、bin 倾斜超约 20°、盒与 bin 包围盒间距 < 20 mm，都让 bridge 以状态 1 退出并说明原因。这些位姿是仿真真值，只有 bridge 声明这些参数。关闭时加载不带 bin 的场景（旧场景，固定放置点 (0.5, 0.3)）。
 
-换回 panda.xml 时须同时改用 home。找不到指定 keyframe 会使 reset 显式失败；带 box 场景误用仍存在的 vendor home 则可能成功返回并把 box 置于补齐后的错误位置。
+### 2.3 预设状态与 HOME
 
-### 2.3 初始构型
+MJCF 的 `<keyframe>` 在本文叫**预设状态**：一份带名字的完整状态快照（qpos、qvel、act、ctrl、mocap），与动画、视频的“关键帧”无关。
 
-| 来源 | joint1..joint7（rad） | 单指位置（m） |
-| --- | --- | --- |
-| vendor MJCF home | `[0, 0, 0, -1.5708, 0, 1.5708, -0.7853]` | 0.04 |
-| SRDF ready / fake system initial_positions.yaml | `[0, -0.785, 0, -2.356, 0, 1.571, 0.785]` | SRDF open 为 0.035 |
-| **pick_place_home（Week 5 Stage 2 起）** | 同 ready：`[0, -π/4, 0, -3π/4, 0, π/2, π/4]`，TCP 约 `(0.307, 0, 0.487) m`、工具朝下 | 0.04 |
+| 量 | 值 |
+| --- | --- |
+| reset 用的预设状态 | `pick_place_home`（参数 `reset_keyframe_name`）；16 维 qpos = 7 臂 + 2 指 + 盒子 7 |
+| 手臂构型 | Franka ready：`[0, −π/4, 0, −3π/4, 0, π/2, π/4]`，TCP ≈ (0.307, 0, 0.487)，工具朝下，手指张开方向沿 world y |
+| 夹爪 | 每指 0.04 m（全开）；夹爪执行器的 ctrl 为 255（范围 0..255，不是米） |
 
-**用语：** 本文的 keyframe 指 MJCF `<keyframe>` 里带名字的**预设状态**（qpos/qvel/act/ctrl/mocap 的快照），不是动画或视频的关键帧；executor 的 `waypoint_source:=keyframe` 是另一回事（固定关节表，不读 MJCF 预设状态，见 6.2）。
+bridge **启动时**就把仿真置为这个预设状态（generation 仍为 0），之后每次 reset 也是它；executor 的 HOME 是同一组关节角（`home.joint_positions`，默认 `kFrankaReadyPose`，单测逐项比对 MJCF）。选 ready 是因为这时手臂不挡相机看工作区（机器人遮罩投到桌面后离 x ∈ [0.30, 0.70]、y ∈ [−0.30, 0.40] 最近 80 mm）。
 
-reset 权威是预设状态 pick_place_home。Week 5 Stage 2 起它的臂构型是 Franka ready（此前沿用 vendor home），因为 vendor home 时手和前臂挡住相机看工作区远侧（默认 bin (0.5, 0.3) 被截断，Week 4.1 14.6）；ready 时 estimator 的机器人遮罩投到桌面后离工作区 x∈[0.30,0.70]、y∈[−0.30,0.40] 最近 80 mm。**bridge 启动即进入该预设状态**（generation 仍为 0），不再从 `mj_makeData` 的 qpos0（臂近乎竖直）开始，所以第一次 reset 不移动手臂；executor 的 HOME 是同一关节构型（`home.joint_positions`，默认 `kFrankaReadyPose`，单测核对与 MJCF 一致）。URDF 不保存初始状态。
+MJCF 没有重力补偿：静止时手臂在重力下比伺服目标低几毫弧度（ready 姿态下 joint4 约 6.3 mrad，TCP 约低 3.5 mm）。真机控制器自带重力补偿。
 
-`mj_resetDataKeyframe` 同时恢复 ctrl。vendor home 的夹爪 ctrl 为 255（actuator 范围 0..255），不是米制指位置。
-
-## 3. 坐标与关节约定
+## 3. 坐标与关节
 
 ### 3.1 TF 与 TCP
 
-**TF frame 名采用 MJCF 原生 body 名，合成例外为 hand_tcp 和 camera_optical_frame。** bridge 从模型生成树，不做 URDF 名字翻译。
+frame 名用 MJCF 的 body 名，例外是合成的 `hand_tcp` 与 `camera_optical_frame`。bridge 是所有 TF 的唯一发布者。
 
-| Frame | 父 frame | 发布方式/含义 |
+| frame | 父 | 类型 |
 | --- | --- | --- |
-| world | 无 | 唯一根，MuJoCo 隐式 body 0 |
-| link0 | world | static，当前单位变换，不叫 base_link |
-| link1..link7 | link{i-1} | dynamic，7-DoF 臂 |
-| hand | link7 | static；MJCF 合并 URDF link7 -> link8 -> hand，TF 无 link8 |
-| hand_tcp | hand | 合成 static：平移 `[0,0,0.1034] m`、单位旋转 |
-| left_finger / right_finger | hand | dynamic，两指 body |
-| camera_link / camera_optical_frame | world / camera_link | static，安装与光学轴转换 |
-| box | world | dynamic，物体 ground truth；object 是语义称呼，不是当前 body 名 |
+| `world` | — | 根 |
+| `link0` | world | static，单位变换 |
+| `link1`..`link7` | 上一节 | dynamic |
+| `hand` | link7 | static（MJCF 合并了 URDF 的 link8；TF 里没有 link8） |
+| `hand_tcp` | hand | static：平移 (0, 0, 0.1034) m，单位旋转（取自官方 `franka_hand.xacro`；代码常量 `kHandToTcpZ`，有一致性测试） |
+| `left_finger`、`right_finger` | hand | dynamic |
+| `camera_link` → `camera_optical_frame` | world | static：安装位姿；光学系 +X 右、+Y 下、+Z 前 |
+| `box` | world | dynamic，盒子真值 |
 
-每条 TF 边仅允许一个发布者，相机外参也由 bridge 单点发布。接入 robot_state_publisher 必须隔离其 /tf、/tf_static，避免重复边；具体 MoveIt 集成方案尚未定案。视觉输出独立 pose topic，不覆盖 box 的 ground-truth TF。
+抓取与运动学统一用 `hand_tcp`。TCP 不含手的 −45° 转角（它在 `hand` 的变换里）。
 
-抓取/运动学统一参考 hand_tcp。MJCF 无此 body/site；偏移来自官方 franka_hand.xacro 的 tcp_xyz，代码常量 kHandToTcpZ 是副本，由三方测试监控漂移。TCP 不含 -45° 手腕旋转，该旋转已在 hand 变换中。需要原生 site 消费者时使用项目 overlay，而非改 vendor。
+### 3.2 关节与限值
 
-### 3.2 URDF 映射与关节
+| 关节 | 范围（rad） | FCI 速度（rad/s） | FCI 加速度（rad/s²） | 力矩（N·m） |
+| --- | --- | ---: | ---: | ---: |
+| joint1 | ±2.8973 | 2.175 | 15 | 87 |
+| joint2 | ±1.7628 | 2.175 | 7.5 | 87 |
+| joint3 | ±2.8973 | 2.175 | 10 | 87 |
+| joint4 | −3.0718..−0.0698 | 2.175 | 12.5 | 87 |
+| joint5 | ±2.8973 | 2.61 | 15 | 12 |
+| joint6 | −0.0175..3.7525 | 2.61 | 20 | 12 |
+| joint7 | ±2.8973 | 2.61 | 20 | 12 |
+| finger_joint1/2 | 0..0.04 m | — | — | — |
 
-| MJCF / TF | 官方 fer URDF |
+速度、力矩、范围与 `franka_description/robots/fer/joint_limits.yaml` 一致；加速度来自 FCI 文档。官方 URDF 的名字带 `fer_` 前缀（`fer_link0`、`fer_hand_tcp`…），跨库时要显式映射。bridge 的关节顺序是 joint1..7、finger_joint1、finger_joint2，消费者仍应按名字对齐。
+
+## 4. mujoco_bridge：仿真与机器人接口
+
+### 4.1 话题与服务
+
+| 名字 | 类型 | 方向 | 说明 |
+| --- | --- | --- | --- |
+| `/clock` | Clock | 发布 | 每物理步；系统里唯一的时钟源 |
+| `/joint_states` | JointState | 发布 | 9 个关节，默认 100 Hz（可视化用） |
+| `/tf`、`/tf_static` | TFMessage | 发布 | 见 3.1 |
+| `~/episode_observation` | BridgeObservation | 发布 | 100 Hz，见 4.3；executor 与估计器的输入 |
+| `~/camera/color/image_raw`、`~/camera/depth/image_raw`、两个 `camera_info` | Image、CameraInfo | 发布 | 10 Hz，best effort，见 4.5 |
+| `~/ground_truth/object_pose` | PoseStamped | 发布 | 盒子真值，评测与 oracle 用 |
+| `~/ground_truth/bin_pose` | PoseStamped | 发布 | bin 真值，transient local，只在 `scene.enabled` 时启动发布一次 |
+| `~/ground_truth/{left,right}_finger_contact` | Bool | 发布 | 手指是否碰到盒子（按身份），仅评测 |
+| `~/joint_command` | JointTrajectory | 订阅 | 见 4.4 |
+| `~/gripper_command` | GripperCommand | 订阅 | `position` = 两指总开口（m）；`max_effort` 忽略 |
+| `~/reset_with_generation` | ResetScene | 服务 | 回预设状态，返回 session 与 generation |
+| `~/reset` | Trigger | 服务 | 同上的手动入口 |
+
+### 4.2 Reset 与生命周期
+
+reset：`mj_resetDataKeyframe` 恢复预设状态（含 ctrl），`mjData::time` 保持单调，再 `mj_forward`；清除附着锁存、附着计时和正在执行的轨迹。每次 bridge 启动有新的 `bridge_session`，每次成功 reset `generation` 加一（启动时的那次不加）。消费者只接受当前 session、generation、递增 `sample_sequence` 的样本（[ADR 003](adr/003-reset-generation-observation.md)）。reset 是仿真专有接口；真机回初始位姿需要一条可取消、有反馈的轨迹。
+
+### 4.3 同一步观测 `BridgeObservation`
+
+同一物理步之后从同一份 `mjData` 打包，所有字段时间一致：
+
+| 字段 | 内容 |
 | --- | --- |
-| world | base（各自树根，非直接同名） |
-| link0..link7 | fer_link0..fer_link7 |
-| 无对应 TF | fer_link8 |
-| hand / hand_tcp | fer_hand / fer_hand_tcp |
-| left_finger / right_finger | fer_leftfinger / fer_rightfinger |
+| `bridge_session`、`generation`、`sample_sequence` | 生命周期键；`sample_sequence` 是物理步号 |
+| `joint_state` | 9 关节位置、速度、力矩；stamp 为仿真时间 |
+| `object_pose` | 盒子真值（world）。vision 来源的 executor 不用它 |
+| `world_to_hand_tcp` | TCP 位姿（world） |
+| `attachment_state` | NOT_ATTACHED=0、ATTACHED=1、RELEASED=2，见 4.6 |
+| `left_finger_contact`、`right_finger_contact` | 手指是否碰到机器人以外的东西（不带身份）。仿真专有，真实 Franka Hand 没有指尖传感器；只用于给 CLOSE 超时贴诊断标签 |
+| `arm_command`、`gripper_command_width_m` | 这一步 `ctrl` 里的 7 个手臂伺服目标（rad）与夹爪目标开口（m）：控制器**实际采用**的指令，数据集的 action（[ADR 021](adr/021-applied-command-in-bridge-observation.md)） |
 
-URDF hand:=true 强制加 fer_ 前缀，跨库代码须显式映射。下表采用 MJCF/bridge 无前缀名字。
+### 4.4 指令执行
 
-| 关节 | 类型 | 下限 | 上限 | 最大速度 | 最大力矩 |
-| --- | --- | ---: | ---: | ---: | ---: |
-| joint1 | revolute | -2.8973 | 2.8973 | 2.175 | 87 |
-| joint2 | revolute | -1.7628 | 1.7628 | 2.175 | 87 |
-| joint3 | revolute | -2.8973 | 2.8973 | 2.175 | 87 |
-| joint4 | revolute | -3.0718 | -0.0698 | 2.175 | 87 |
-| joint5 | revolute | -2.8973 | 2.8973 | 2.61 | 12 |
-| joint6 | revolute | -0.0175 | 3.7525 | 2.61 | 12 |
-| joint7 | revolute | -2.8973 | 2.8973 | 2.61 | 12 |
-| finger_joint1/2 | prismatic | 0 | 0.04 | 未列 | 未列 |
+**手臂：** `~/joint_command` 有两种形态。
 
-臂角度/速度/力矩单位为 rad、rad/s、N·m，指位置为 m。bridge 顺序为 joint1..joint7, finger_joint1, finger_joint2；消费者仍按 name 对齐。臂局部轴为 Z，两指为 Y。多臂/前缀变化需重新核对。
+- **单点**：立即把 `points[0].positions` 写进 `ctrl`（固定关节表模式、调试脚本用）。
+- **多点**（`time_from_start` 递增、从 0 开始）：带时间的轨迹（[ADR 020](adr/020-path-then-time-parameterized-joint-trajectories.md)）。bridge 记下到达时的仿真时间，此后每个物理步按经过的时间在相邻两点之间**线性插值**写进 `ctrl`，走完后保持终点。新消息替换正在执行的轨迹，reset 清除它。`velocities` 不使用。executor 每 1 ms 一个点，物理步 2 ms 读参考时恰好落在采样点上，所以伺服拿到的是精确的规划位置（采样更稀时，点间插值会让加速度超限，见 Week 5 Stage 3 的 3.5）。
 
-## 4. 观测与 reset 契约
+夹爪关节名出现在 `~/joint_command` 里会被忽略并警告一次（夹爪走 `~/gripper_command`）。
 
-### 4.1 Reset 与生命周期
+**伺服**：每个关节一个独立的位置 PD（MuJoCo `general` 执行器，`biastype="affine"`）：τ = kp·(u − q) − kd·q̇，截到力矩上限。kp/kd：joint1–2 4500/450，joint3–4 3500/350，joint5–7 2000/200。唯一输入是目标角度 u；没有速度前馈、没有重力补偿。对光滑参考，它近似为延迟 Ts = (kd + 1)/kp ≈ 0.1 s 的跟踪（各关节相同）：实际运动比参考晚约 100 ms，速度、加速度峰值不超过参考（实测 ≤ 参考上限的 1.008 倍）。
 
-| 服务 | 类型 | 语义 |
+### 4.5 RGB-D 相机
+
+| 项 | 值 |
+| --- | --- |
+| 启用 | bridge 参数 `enable_rgbd_camera`（默认 false）；demo launch 默认 `auto`，随 `observation_source`：vision 开、oracle 关 |
+| 安装 | `camera_link` 在 (0.5, −0.45, 1.0)，`xyaxes="1 0 0 0 0.857 0.514"`，fovy 50° |
+| 图像 | 320×240；RGB `rgb8`；深度 `32FC1`，米制光轴 z，无效为 NaN |
+| 内参 | 两份 CameraInfo 相同，零畸变，fx = fy = 257.34 px，cx = 159.5，cy = 119.5 |
+| 时间 | RGB、深度、两份 CameraInfo 与该物理步的观测同一 stamp；相机周期必须是观测周期的整数倍 |
+| QoS | best effort（SensorDataQoS） |
+
+**中间件**：RGB（230 KB）与深度（307 KB）每帧连着发，合计超过 Fast DDS 默认 512 KB 的共享内存段，best effort 的 RGB 会被深度挤掉（35%~80% 丢失）。[config/fastdds_shm.xml](../src/mujoco_bridge/config/fastdds_shm.xml) 把段加到 4 MB；demo launch 用 `FASTRTPS_DEFAULT_PROFILES_FILE` 给所有节点设置，探针也设置。不经 launch 起的节点没有这个配置，RGB 会静默丢帧。
+
+### 4.6 附着判定
+
+`attachment_state` 是附着的唯一权威（[ADR 019](adr/019-attachment-from-robot-side-signals.md)）。只用真实 Franka Hand 也报告的量（对应 libfranka 的 `is_grasped`）：夹爪被命令合拢（最近一条命令 < 盒宽 − 10 mm）、两指总开口与盒宽相差 < `grasp.width_epsilon_m`（10 mm）、两指已停下（速度之和 < `grasp.attach_max_finger_speed_m_s`，20 mm/s），连续 `grasp.attach_hold_s`（0.1 s 仿真时间）→ ATTACHED 并锁存；张开超过盒宽 + 15 mm（55 mm）→ RELEASED。reset 清锁存。闭爪后盒子滑出时仍为 ATTACHED（由 executor 的开度窗口发现，见 6.7）。
+
+### 4.7 故障注入（默认关闭，launch 不暴露）
+
+| 参数 | 作用 |
+| --- | --- |
+| `fault.truth_offset_x_m` | 只把**发布**的盒子真值沿 world x 平移，物理不变；用来证明 vision 来源不读真值 |
+| `fault.drop_box_after_attach_s` | 附着持续这么久后把盒子移回 reset 位置（每次 bridge 运行一次）；复现“盒子滑出、附着仍锁存” |
+
+## 5. mujoco_perception：初始位姿检测
+
+节点 `object_pose_estimator`。只处理深度：每帧把深度图、深度 CameraInfo、`BridgeObservation` 和机器人 TF **按完全相同的时间戳**配对（不取各话题最新值拼接）；机器人 TF 等 0.5 s 还不到就报 `MISSING_ROBOT_TRANSFORM`。ATTACHED 期间不处理。
+
+### 5.1 机器人遮罩
+
+用 vendor 的 58 份可见网格（link0..7、hand、两指），MoveIt `moveit_mesh_filter` 按当帧 TF 渲染预测深度；观测深度与预测相差 ≤ `robot_mask.depth_tolerance_m`（12 mm）的像素视为机器人、置为无效。需要 X11/OpenGL，launch 为它设 `LIBGL_ALWAYS_SOFTWARE=1`。调试话题 `~/debug/robot_predicted_depth`、`~/debug/robot_mask`（mono8，255 = 被滤）、`~/debug/filtered_depth`、`~/debug/robot_mask_diagnostics`（像素计数与耗时）。
+
+### 5.2 盒子与 bin 的检测
+
+1. **深度窗口**（`DepthWindow`）：最近 `initial_box.frames`（10）帧掩膜后深度的逐像素均值；某像素有效帧不足一半、或有效帧最大最小相差超过 20 mm（窗口里见过两个表面），就无效。窗口在新的 session/generation、以及 ATTACHED → 非 ATTACHED 时清空。
+2. **盒子**（`detectInitialBox`）：均值深度反投影到 world；取高度在 [顶面 − 15 mm, 顶面 + 40 mm]（[0.245, 0.30] m）、在桌面范围内的像素；8 邻域连通块（≥ 20 像素）；每块对 x–y 求最小面积外接矩形；两边都在 40 ± 5 mm 的块才是盒子，必须恰好一个。x、y 取矩形中心，z 取顶面像素中位数减半高，yaw 取边方向折到 [−45°, 45°)。
+3. **bin**（`detectInitialBin`）：同样步骤，高度带 [0.2235, 0.243] m，矩形两边在 152 ± 8 mm 与 142 ± 8 mm，恰好一块；yaw 为长边方向折到 [−90°, 90°)；z 取矩形中央区域的中位数（内底面高度），中央没有像素就拒绝。
+
+不用颜色、不读真值、不用历史。只支持平放的单个盒子与空的单个 bin，且都要在视野里。`InitialPoseEstimator` 把窗口和两个检测器合起来（同一窗口，各检测一次）；这些类不创建节点，各有单测。
+
+### 5.3 输出
+
+`~/initial_box_pose`（InitialBoxPose）与 `~/initial_bin_pose`（InitialBinPose），每个可处理的深度帧各发一条：
+
+| 字段 | 含义 |
+| --- | --- |
+| `bridge_session`、`generation`、`sample_sequence`、`header.stamp` | 与该帧的观测相同 |
+| `state` | WARMING_UP=0（窗口未满，`reason`=`WINDOW_FILLING`）、NOT_MEASURED=1、MEASURED=2 |
+| `reason` | MEASURED 时为空，否则是拒绝名：`NO_VALID_DEPTH`、`NO_BOX_BAND_PIXELS`、`NO_RECTANGLE_MATCHES_BOX`、`SEVERAL_BOX_CANDIDATES`（bin：`NO_BIN_BAND_PIXELS`、`NO_RECTANGLE_MATCHES_BIN`、`SEVERAL_BIN_CANDIDATES`、`NO_BIN_FLOOR_PIXELS`），或不可用帧的 `INVALID_INPUT`、`MISSING_ROBOT_TRANSFORM`（这种帧不进窗口） |
+| `position`、`yaw_rad` | world；盒子为中心，bin 为内底面中心；只在 MEASURED 时有值，否则 NaN。roll、pitch 不测 |
+| `frames_averaged`、`frames_required` | 窗口进度 |
+| `candidates[]` | 高度带里每一块的像素数、矩形两边长、中心、是否匹配；用来说明漏检原因 |
+
+名字里的 “initial” 是历史：executor 在 VERIFY 时也用 `initial_box_pose` 重新测盒子。
+
+## 6. task_executor：任务与运动
+
+节点 `task_executor`：ROS 适配层负责话题、服务、计时器、日志；`EpisodeController`（纯 C++）负责生命周期、阶段、重试、轨迹规划与遥测。单线程执行器，20 Hz 计时器。
+
+### 6.1 订阅与发布
+
+| 名字 | 方向 | 用途 |
 | --- | --- | --- |
-| /mujoco_bridge/reset | std_srvs/srv/Trigger | 手动兼容入口，成功也递增 generation |
-| /mujoco_bridge/reset_with_generation | manipulation_interfaces/srv/ResetScene | executor 使用，成功返回 session/generation |
+| `/mujoco_bridge/episode_observation` | 订阅 | 关节、TCP、附着；oracle 来源时的盒子位姿 |
+| `/object_pose_estimator/initial_box_pose`、`initial_bin_pose` | 订阅 | vision 来源的盒子与 bin |
+| `/mujoco_bridge/ground_truth/bin_pose` | 订阅 | 仅 oracle 来源且有 bin 时 |
+| `~/start_episode`（Empty） | 订阅 | 开始一个 episode（任何状态都可以重新开始） |
+| `/mujoco_bridge/joint_command`、`gripper_command` | 发布 | 每阶段一条手臂轨迹；夹爪命令每 tick |
+| `/mujoco_bridge/reset_with_generation` | 客户端 | 每个 episode 与每次重试先 reset |
+| `~/initial_pose_latch`（InitialPoseLatch） | 发布 | 锁存状态：WAITING / LATCHED / FAILED，各对象的锁存值、极差、原因 |
+| `~/episode_outcome`（EpisodeOutcome） | 发布 | 每个 episode 一条，见 6.8 |
 
-两服务共用实现（bridge 启动时也执行一次，但不递增 generation）：恢复预设状态的 qpos/qvel/act/ctrl/mocap，保留 mjData::time 单调，调用 mj_forward 刷新派生量。bridge 是唯一 /clock 来源。reset 为仿真专有接口；真机回初始位姿需要可取消、有反馈的轨迹 action。
+### 6.2 生命周期
 
-每次 bridge 启动创建新 session，每次成功 reset 严格递增 generation。controller 只接受本次 reset 的 session/generation 与递增 sample sequence；旧会话/代际/序号被拒绝，更高 generation 报 RESET_SUPERSEDED。请求 token 隔离旧回执。默认 5 s steady-clock 看门狗约束服务与观测等待/断流，失败码包括 RESET_UNAVAILABLE、RESET_FAILED、OBSERVATION_STALE。见 [ADR 003](adr/003-reset-generation-observation.md)。
+`Idle → ResetPending → AwaitingResetResponse → AwaitingObservation → Ready → Finished / Failed`，与阶段分开；状态机只在 Ready 推进。只接受当前 session/generation 的递增样本。看门狗（steady clock）：reset 服务与数据流断流 5 s；vision 来源等锁存 `latch.timeout_s`（10 s，墙钟）。失败码：`RESET_UNAVAILABLE`、`RESET_FAILED`、`RESET_SUPERSEDED`、`OBSERVATION_STALE`、`VISION_LATCH_TIMEOUT`、`IK_FAILED`、`TRAJECTORY_FAILED`，以及阶段失败（见下）。阶段计时用仿真时间。（[ADR 004](adr/004-episode-controller-orchestration.md)）
 
-### 4.2 同一步观测与 oracle
+### 6.3 观测来源与锁存
 
-`/mujoco_bridge/episode_observation`（BridgeObservation）在同一次物理步后读取同一份 mjData，打包 session/generation/sequence、仿真 stamp、9 关节状态、box pose、world-frame TCP、双指接触与 attachment_state。executor 不再混用独立 joint_states 和 TF 作决策输入。
+`observation_source`：节点默认 `oracle`，demo launch 默认 `vision`。
 
-独立 joint_states、TF、ground truth 继续服务可视化与评测，但其他消费者不会自动获得 bundle 原子性。
+- **oracle**：盒子用 bridge 真值，bin 用 `~/ground_truth/bin_pose`。
+- **vision**：每次 reset 后，`PoseLatch` 等盒子与 bin 各自连续 `latch.frames`（5）条 MEASURED，x、y 极差 ≤ 3 mm、yaw 圆周极差 ≤ 3°（盒子按 90° 周期，bin 按 180°），锁存最新一条，直到下次 reset 不变；非 MEASURED 使累积清零。**锁存之前不发任何关节命令。** VERIFY 之前所有阶段用锁存值；VERIFY 只接受释放之后的新测量（估计器在释放时清空窗口，约 1 s 后才有第一条）。
 
-| 独立 oracle 项目 | 契约 |
+`place.into_bin`（demo launch 随 `scene_enabled` 设置）：为 true 时放置目标是 bin（vision：锁存的 bin；oracle：真值），拿到之前不开始；为 false 时是固定点 (`target.place_x_m`, `target.place_y_m`) 与桌面。
+
+### 6.4 阶段与通过条件
+
+顺序 `HOME → PREGRASP → GRASP → CLOSE → LIFT → PREPLACE → PLACE → OPEN → RETRACT → VERIFY → DONE`。运动阶段的“到位”= 本段轨迹已走完 + 各关节离目标 < `fsm.position_epsilon_rad`（0.05；GRASP、PREPLACE、PLACE 用 0.3）且速度 < 0.05 rad/s + 阶段已过 `fsm.min_settle_s`（0.5 s）。
+
+| 阶段 | 通过条件 | 失败 → RECOVER |
+| --- | --- | --- |
+| HOME、PREGRASP、GRASP、RETRACT | 到位 | 超时 |
+| CLOSE | ATTACHED 且已持续 `fsm.close_after_attach_s`（0.2 s） | 超时：`UNEXPECTED_CONTACT` 或 `GRASP_EMPTY`（按手指接触分类） |
+| LIFT | ATTACHED 且到位 | 到位但未附着且超过 `fsm.lift_settle_grace_s`（2 s）：`SLIPPED`；超时 |
+| PREPLACE、PLACE | ATTACHED 且到位 | 失去附着：`SLIPPED`；超时 |
+| OPEN | 两指总开口 > 0.06 m（不等 min_settle） | 超时 |
+| VERIFY | RELEASED、盒子在 bin 内（6.7）、手臂回到 HOME 到位 | 超时：`PLACE_MISSED` |
+
+超时为 `fsm.phase_timeout_s`（6 s）。RECOVER 重新 reset 并从 HOME 开始，最多 `fsm.max_retries`（3）次，之后 FAILED。
+
+### 6.5 目标
+
+`DiffIkWaypointSource`：每个阶段一次 IK（`arm_kinematics::solveIk`，初值为实测关节），阶段内缓存；不收敛报 `IK_FAILED`。HOME 与 VERIFY 不求 IK，直接用 `home.joint_positions`。
+
+<a id="62-cartesian-任务与-waypoint"></a>
+
+| 阶段 | TCP 目标（world） |
 | --- | --- |
-| topic/type | /mujoco_bridge/ground_truth/object_pose，geometry_msgs/msg/PoseStamped |
-| frame/source | world，读取 xpos/xquat，不直接把 qpos 当 world pose |
-| 频率/存在性 | 与 TF 共用 decimation，仅模型含 box body 时创建 |
-| 隔离 | 视觉独立 topic，oracle 仅作仿真对照 |
-| bin（Week 4.1 Stage 8） | /mujoco_bridge/ground_truth/bin_pose，PoseStamped，world，bin 原点 = 内底面中心；transient local，仅 `scene.enabled` 时在启动时发布一次（bin 静态，reset 恢复同一布局）；只给 oracle 来源的放置目标用 |
+| PREGRASP、LIFT | PREGRASP 时盒子位姿上方 `target.hover_height_m`（0.15 m） |
+| GRASP、CLOSE | 盒子中心 |
+| PREPLACE、RETRACT | 放置点上方：支撑面 + 盒半高 + 0.05 + 0.15 m |
+| PLACE、OPEN | 支撑面 + 盒半高 + `target.place_tcp_above_box_center_m`（0.05 m） |
 
+姿态：工具朝下，绕 world z 转 `target.tool_yaw_rad` + 盒子 yaw 折到 [−45°, 45°)（`target.align_tool_to_box_yaw`，默认 true；HOME 除外）。盒子 yaw 取 PREGRASP 时的值，之后各阶段都用它，所以夹住之后不再转腕。CLOSE、LIFT、PREPLACE、PLACE 夹爪命令 0（全合），其余 0.08 m（全开）。
 
-**实际采用的指令（Week 5 Stage 6，[ADR 021](adr/021-applied-command-in-bridge-observation.md)）。** `BridgeObservation.arm_command`（joint1..7，rad）与 `gripper_command_width_m`（m）是 bridge 刚跑完的那一步 `ctrl` 里的手臂伺服目标与夹爪目标开口，与 `joint_state` 同一物理步，是数据集的 action。
+固定关节表模式（`waypoint_source:=keyframe`）是 Week 2 的遗留：每个阶段查一张写死的关节角表，不读物体位姿，HOME 仍是 vendor home；只作对照，不再维护。
 
-**中间件配置（Week 5 Stage 6）。** `mujoco_bridge/config/fastdds_shm.xml` 把 Fast DDS 的共享内存段从默认 512 KB 加到 4 MB；demo launch 用 `SetEnvironmentVariable` 给所有节点设 `FASTRTPS_DEFAULT_PROFILES_FILE`，探针同样设置。原因：每帧 RGB（230 KB）与深度（307 KB）连着发布，合计超过 512 KB，best-effort 的 RGB 被后到的深度挤掉，35%~80% 丢失。不用这个配置（例如手动 `ros2 topic echo`）仍能通信，只是会丢 RGB。
+IK（`arm_kinematics`）：任务空间为 `hand_tcp` 的 [x, y, z, rx, ry, rz]，平移权重 1.0、旋转 0.2；阻尼最小二乘（阈值 0.08、最大阻尼 0.05），零空间往关节中位拉（增益 0.02）；每步误差截到 0.05 m / 0.2 rad、每关节步长截到 0.12 rad；收敛条件 0.1 mm / 0.001 rad。只求终点，不管时间（时间由 6.6 处理）。
 
-**原始记录（Week 5 Stage 6）。** `scripts/record_episode.py`：在已运行的 demo 上，`ros2 bag record --use-sim-time` 显式录相机四个话题、`~/episode_observation`、手臂与夹爪命令、锁存状态、outcome、`/tf_static`（相机话题 best-effort 的 QoS 覆盖），触发一个 episode、等 outcome 后停止；另写契约格式的 `metadata.json`（task、objects、targets）与 `sidecar.json`（布局、outcome、锁存的盒子 yaw、抓取转角及其到 ±45° 切换点的距离、git 版本）。一个 episode 的帧是从 reset（本 generation 的第一个观测）到 outcome 之间的相机帧，按时间戳与观测精确配对。导出器不在本周。
-## 5. RGB-D 与视觉契约
+### 6.6 轨迹（[ADR 020](adr/020-path-then-time-parameterized-joint-trajectories.md)）
 
-### 5.1 相机与精确同步
+进入一个运动阶段时规划一次，发一条 `JointTrajectory`；阶段在轨迹走完之前不结束。
 
-| 项目 | 默认值/约定 |
+- **起点**：上一段轨迹的终点；reset 后的第一段从 `home.joint_positions` 出发。都是**指令**，不是实测关节（实测在重力下比伺服目标低几毫弧度，用它当起点等于一个小阶跃）。
+- **路径**：GRASP、LIFT、PLACE、RETRACT 走 **TCP 直线**——两端构型的 TCP 之间每 5 mm 一个位姿（转角用四元数球面插值），逐点 IK、以上一点为初值，相邻点任一关节差 > 0.05 rad 或不收敛则 `TRAJECTORY_FAILED`；阶段目标改为这条线最后一点的解。其余阶段走**关节空间直线** q(s) = q_a + s·(q_b − q_a)。CLOSE、OPEN 手臂不动，保持上一段终点。
+- **时间**：moveit_core 的 TOTG（`trajectory_processing::Path`、`Trajectory`，直接用关节向量，不需要 MoveIt 机器人模型），起止静止；TCP 直线的路径点之间允许 1 mrad 的拐角圆化。限值 `trajectory.max_velocity`（默认 FCI 的 95%：2.066 / 2.480 rad/s，给数据契约留余量）与 `trajectory.max_acceleration`（默认 FCI 的 1/4：3.75、1.875、2.5、3.125、3.75、5、5 rad/s²，与 MoveIt 官方 Panda 配置相同；这样 TOTG 的加速度突变在 1 kHz 下也满足 FCI 的加加速度上限）。
+- **采样**：每 1 ms 一个点（位置、速度、`time_from_start`）。只用 TOTG 的 `getPosition`/`getVelocity`：它的 `getAcceleration` 在部分时刻报出超过上限的值，而位置本身并不超限。
+
+### 6.7 VERIFY 与搬运期检查
+
+**入 bin 判据**（`boxInBin`）：盒子四角（按其 yaw）在 bin 坐标系里离内口（半宽 70 × 65 mm）至少 5 mm，且盒心高度在内底面 + 20 mm ± 5 mm 内。5 mm = 盒子检测误差限 3 mm + bin 在线偏差 2 mm。VERIFY 期间日志每 0.5 s 打一行 `verify:`（位置、是否在内、最小角余量、高度差）。没有 bin 时是以放置点为圆心、`verify.place_region_radius_m`（0.08 m）为半径。
+
+**开度窗口**（`CarryWidthMonitor`）：ATTACHED 且在 LIFT、PREPLACE、PLACE 时，两指总开口 < 34 mm 持续 0.2 s 告警一次（`CARRY_WIDTH_LOW`），只告警、不改变 episode 的走向。
+
+### 6.8 结果 `EpisodeOutcome`
+
+`success`、`failure_code`、`retries`；`observation_source`、`observation_failure_layer`（`perception` 或 `execution`）、`observation_failure_reason`（成功时为空）；各阶段名、时长、TCP 目标、IK 残差、跟踪误差；搬运期开度告警与最小、最大开口。`observation_confidence`、`observation_residual_m` 在 vision 来源时为 NaN（旧检测路径删除后保留的字段）。
+
+## 7. 原始记录
+
+[scripts/record_episode.py](../scripts/record_episode.py)：在已运行的 demo 上录一个 episode。
+
+- 先确认只有一套 bridge 和 executor 在跑；
+- `ros2 bag record --use-sim-time`，显式列出话题：相机四个（best effort 的 QoS 覆盖）、`~/episode_observation`、手臂与夹爪命令、锁存状态、outcome、`/tf_static`；
+- 发 `~/start_episode`，等 outcome 后再录 1 s 停止；
+- 写 `metadata.json`：数据契约规定的 `task`、`objects`、`targets`（契约的 schema 不允许其他字段）；
+- 写 `sidecar.json`：布局、outcome、锁存的盒子 yaw、抓取转角及其离 ±45° 切换点的距离（同一位姿附近会出现差 90° 的两种抓法）、git 提交与是否有未提交改动。
+
+一帧（10 Hz）= 同一时间戳的 RGB、深度和 `BridgeObservation`：state = `joint_state` 的 7 臂 + 两指之和，action = `arm_command` + `gripper_command_width_m`。一个 episode 的帧从 reset（本 generation 的第一个观测）到 outcome。深度里的 NaN 保留，由导出器按契约转成 0。导出程序（LeRobot 格式）不在本仓库。输出在 `results/episodes/`（不提交）。
+
+## 8. 配置与运行
+
+启动：`scripts/start_demo.sh`（构建后 `ros2 launch mujoco_bridge demo.launch.py`），或直接 `ros2 launch mujoco_bridge demo.launch.py scene_enabled:=true`。launch 起 bridge、估计器（相机开时）、executor、RViz；为所有节点设 Fast DDS 配置，为估计器和 RViz 设软件渲染。
+
+| launch 参数 | 默认 | 作用 |
+| --- | --- | --- |
+| `scene_enabled` | false | 带 bin 的场景；同时设 executor 的 `place.into_bin` |
+| `box_*`、`bin_*`（x, y, z, roll, pitch, yaw） | auto | 只传用户给出的值给 bridge |
+| `observation_source` | vision | oracle / vision |
+| `enable_rgbd_camera` | auto | 随来源；true / false 照办 |
+| `camera_rate_hz`、`joint_state_rate_hz`、`tf_rate_hz` | 10、100、100 | |
+| `enable_debug_viewer`、`debug_viewer_rate_hz` | false、30 | MuJoCo GLFW 窗口 |
+
+常用节点参数（都有默认值）：bridge 的 `scene.*`、`grasp.*`、`fault.*`；估计器的 `plane_z_m`、`box_size_*`、`depth_{min,max}_m`、`initial_box.frames`、`robot_mask.depth_tolerance_m`；executor 的 `home.joint_positions`、`trajectory.max_{velocity,acceleration}`、`fsm.*`、`latch.*`、`target.*`、`verify.*`、`place.into_bin`、`waypoint_source`。
+
+## 9. 验证入口
+
+| 入口 | 覆盖 |
 | --- | --- |
-| 安装 | 项目 MJCF camera_link：world 平移 `(0.5,-0.45,1.0) m`，xyaxes=`1 0 0 0 0.857 0.514` |
-| 光学轴 | MuJoCo +X 右/+Y 上/-Z 前；到 optical 绕 X 转 π，变成 +X 右/+Y 下/+Z 前 |
-| 启用 | bridge 节点参数 enable_rgbd_camera 默认 false；demo launch 的同名参数默认 `auto`，随 observation_source 走（vision 开、oracle 关），显式 true/false 照办（Week 4.1 Stage 14 修正：Stage 11 把来源默认改成 vision 后，相机仍默认关闭，直接 launch 没有图像） |
-| 图像 | /mujoco_bridge/camera/color/image_raw：rgb8；同前缀 depth/image_raw：32FC1。estimator 只消费深度（Stage 5 起不订阅 RGB） |
-| 内参 | color/camera_info、depth/camera_info，相同零畸变内参；320×240、fovy=50°、fx=fy=257.34083046 px、cx=159.5/cy=119.5 |
-| 深度 | 米制光轴 z-depth；OpenGL 缓冲经近远平面换算，无效/远裁剪写 NaN |
-| 时间/frame | RGB、depth、两份 CameraInfo 共用物理步后仿真 stamp 与 camera_optical_frame |
-| 频率 | 相机 10 Hz、TF/observation 100 Hz、物理步长 0.002 s |
+| `colcon test`（各包 gtest + lint） | 场景配置与摆放、附着判定、轨迹插值、TOTG 规划（时长、限值、1 ms 差分下的加加速度）、IK 与 TCP 直线、阶段状态机、episode 控制器、锁存、入 bin 判据、开度窗口、深度窗口与两个检测器（合成场景，答案由构造给出）、机器人遮罩、预设状态与 executor HOME 一致 |
+| [test_model_consistency.cpp](../src/mujoco_bridge/test/test_model_consistency.cpp) | 7 组固定 q 下 MuJoCo、MoveIt、`arm_kinematics` 的 FK 与雅可比三方一致（位置 < 1e-6 m） |
+| [initial_box_probe.py](../src/mujoco_perception/test/initial_box_probe.py) | 起真实的 bridge + 估计器（+ executor）在线核对；各命令的断言写在 docstring。常用：`held`（HELD-A 40 个布局的回归与过程断言 P1~P6）、`motion`（实际关节速度、加速度、TCP 直线度、打滑）、`record`（录制器与数据契约 D1~D5）、`timeline`（各阶段时长与等待）、`static`、`latch`、`verify` |
+| [camera_probe.py](../src/mujoco_bridge/test/camera_probe.py) | 相机同步、反投影 |
 
-反投影 `[(u-cx)z/fx,(v-cy)z/fy,z]` 后经静态 TF 转 world。相机消息与 BridgeObservation 按**完全相等 stamp（0 ns 容差）**配对，获取生命周期键并拒绝旧 generation，不能取各话题最新值拼接；estimator 配对的是深度图、深度相机信息、BridgeObservation 和机器人 TF，不再等待 RGB 及彩色相机信息（去掉后，旧路径 `object_pose` 在非附着深度帧上的发布比例由 62%、76% 变为 100%，丢帧原因未查，见 [Week 4.1 5.6.5](../Job_guides/my_study/week4.1.md#565-在线-episode-检查)）。相机 decimation 必须为 TF/observation decimation 整数倍。安装位置减轻 home 遮挡，但中心像素始终属于 box 不是不变量。
+以上都是仿真里的证据，不代表真机标定、真实深度噪声或真实动力学。
 
-### 5.2 机器人掩膜与几何估计
+## 10. 已知局限
+
+- **仿真与真机的差别**：附着由仿真 bridge 判定；手指“外部接触”是仿真专有；没有重力补偿（真机有）；伺服没有速度前馈（真机控制器是否有未查）；故障注入只在仿真里。
+- **视觉**：只在开局（锁存）和 VERIFY 看盒子，搬运中没有视觉；只支持单个平放的盒子和单个空 bin、HOME 姿态、固定相机；深度几乎没有帧间噪声（多帧平均的好处在仿真里被低估）。
+- **运动**：关节空间直线段 TCP 走曲线（搬运段离直线几十毫米）；轨迹起止都静止，阶段之间有停顿；加速度只用 FCI 的 1/4，比真机能做到的慢；没有碰撞规划。
+- **抓取转角**：盒子 yaw 在 ±45° 附近时，几乎相同的盒子会被差 90° 的两种方式抓（方盒子的对称性，修不掉；sidecar 记录离切换点的距离）。
+- **语言**：只有一种任务、一种物体，元数据里的 `task` 对模型没有区分作用。
+- **中间件**：不经 launch 或探针起的节点没有 Fast DDS 配置，RGB 会静默丢帧。
+- **命名与规模**：单机器人、单盒子、单 bin 的命名与假设；多物体需要重新设计目标身份与检测。
 
 <a id="14-stage-4-实测与后续目标契约"></a>
-
-此旧锚点保留供 ADR 快照引用，历史评测见 [Week 4 Stage 4](../Job_guides/my_study/week4.md#10-stage-4同帧机器人几何掩膜)。
-
-掩膜用 vendor 58 份可见 OBJ 网格，frame 为 link0..link7、hand、两指。geometric_shapes/Assimp 读网格，MoveIt moveit_mesh_filter 渲染预测深度，padding=0。动态机器人 TF 必须在图像同一 stamp；等待超过 0.5 s 且 depth/observation 仍在缓存时发布 MISSING_ROBOT_TRANSFORM；输入已淘汰则警告，不复用旧 TF。
-
-有效观测/预测深度差绝对值 <= robot_mask.depth_tolerance_m=0.012 m 才过滤该像素，更近/更远有效深度均保留。无效输入或同过滤器生命周期中相机尺寸/内参变化报 INVALID_INPUT。当前无整帧冲突比例门，不发布 ROBOT_MODEL_MISMATCH。
-
-**初始 box 与 bin 检测（Week 4.1 Stage 5、6；Week 5 Stage 7 起是估计器唯一的检测，旧的逐帧分割、拟合、跟踪与 `~/object_pose`/`VisionObjectPose` 已删除，见 [ADR 022](adr/022-remove-the-older-object-pose-path.md)）。输入是掩膜后的深度。** `DepthWindow` 对最近 `initial_box.frames`（默认 10）帧做逐像素均值：某像素有效帧不足一半，或有效帧的深度最大值与最小值之差超过 20 mm（它在窗口内看到过两个表面），则该像素无效。`detectInitialBox()` 对均值深度图：反投影到 world；取高度在 `[顶面 − 15 mm, 顶面 + 40 mm]`（桌面 0.22 m、盒高 40 mm 时为 [0.245, 0.30] m）、x ∈ [0.2, 0.8]、y ∈ [−0.4, 0.4] 的像素；图像上 8 邻域连通域（`cv::connectedComponentsWithStats`，至少 20 像素）；每块丢掉 z，对 x–y 求最小面积外接矩形（`cv::minAreaRect`）；两边都在 40 ± 5 mm 的块才是 box，恰好一个才算检出。位置 x、y 取矩形中心，z 取顶面像素的中位数减半高，yaw 取矩形边方向并折到 [−45°, 45°)。bin（壁顶 0.239 m）整个在高度带之下，不会成为候选。不用颜色、不读真值、不用历史。**bin 用同样的步骤、不同的参数（`detectInitialBin()`）：** 高度带 [内底面 − 3.5 mm, 壁顶 + 4 mm]（内底面高于桌面 7 mm、壁高 12 mm 时为 [0.2235, 0.243] m），块的最小面积矩形两边在 152 ± 8 mm 与 142 ± 8 mm 内且恰好一块才是 bin；yaw 取长边方向（bin 自己的 x 轴）并折到 [−90°, 90°)；x、y 取矩形中心，z 取矩形中央区域（沿长边 ±56 mm、沿短边 ±51 mm）像素的中位数，即内底面高度，中央没有像素时拒绝而不是退回先验。bin 必须平放、空着、在视野里：倾斜的 bin 与里面已有盒子的情形不支持。两个检测器共用私有的块扫描（反投影、带内像素、连通域、最小面积矩形）。窗口在新 session/generation 与 ATTACHED→非 ATTACHED 时清空，ATTACHED 时不喂入。`InitialPoseEstimator` 把窗口与两个检测器合在一起（box 与 bin 共用同一个窗口，各检测一次），每个对象各自给出 WARMING_UP / NOT_MEASURED / MEASURED 三态；检测器、窗口与估计器类不创建节点，只用 sensor_msgs 的 CameraInfo 类型和 image_geometry，各有单测。已知局限：多帧平均假设各帧噪声独立（仿真深度几乎无帧间噪声，评测噪声为人为叠加）；只验证了 HOME 位姿、平放单个盒子和单个 bin、box 在 bin 相机一侧 ≥ 21 mm 的遮挡；检测不判断场景何时变化，靠节点在已知事件清空窗口。
-
-调试 topic 前缀 /object_pose_estimator/debug/：robot_predicted_depth、robot_mask、filtered_depth、robot_mask_diagnostics，共用图像 stamp（Week 5 Stage 7 删除了 foreground_points、target_cluster 两个点云）。mask=mono8（255 过滤），深度=米制 32FC1，诊断带生命周期键、投影/掩掉/比较/冲突像素数、簇点数、容差与耗时。
-
-comparison_pixels 为有效预测/观测重合数；mismatch_pixels 仅统计观测更远且超容差的像素。零比较数时比例无定义，不能报零冲突率；计数提示投影不一致，不能直接定位原因。
-
-moveit_mesh_filter 依赖 X11/OpenGL，demo 为感知设置 LIBGL_ALWAYS_SOFTWARE=1。无显示部署需虚拟 X 或经过验证的无头后端；当前不支持运行中改变相机标定。
-
-### 5.3 视觉消息与原因契约
-
-`/object_pose_estimator/initial_box_pose` 类型为 InitialBoxPose（Stage 5），header 的 frame 为 world、stamp 为窗口里最新一帧，携带 bridge_session/generation/sample_sequence。非附着时每个可处理的深度帧发布一条，ATTACHED 期间不发布。`state` 为 WARMING_UP=0（窗口未满，`reason`=WINDOW_FILLING）、NOT_MEASURED=1（窗口已满而检测器拒绝，或这一帧不可用）、MEASURED=2；`reason` 为空表示 MEASURED，否则是检测器的拒绝名（NO_VALID_DEPTH、NO_BOX_BAND_PIXELS、NO_RECTANGLE_MATCHES_BOX、SEVERAL_BOX_CANDIDATES、INVALID_INPUT），不可用的帧为 INVALID_INPUT 或 MISSING_ROBOT_TRANSFORM（这样的帧不进窗口）。`frames_averaged`/`frames_required` 给出窗口进度；`position`（world，盒子中心）与 `yaw_rad`（[−π/4, π/4)，正方形每 90° 重复）只在 MEASURED 时有值，否则为 NaN；不用 Pose，因为 roll、pitch 没有被测量。`candidates[]` 列出高度带里每一块的像素数、矩形两边长、中心、是否被当作 box，用来在漏检时说明原因。没有置信度、残差、内点比。 `/object_pose_estimator/initial_bin_pose` 类型为 InitialBinPose（Stage 6），字段、状态、原因和发布时机与 InitialBoxPose 相同，区别只有：`position` 是 bin 内底面中心（z 为内底面高度），`yaw_rad` 是长边方向、范围 [−π/2, π/2)，拒绝名为 NO_BIN_BAND_PIXELS、NO_RECTANGLE_MATCHES_BIN、SEVERAL_BIN_CANDIDATES、NO_BIN_FLOOR_PIXELS（另有 NO_VALID_DEPTH、INVALID_INPUT）。两者的 `candidates[]` 都是 BlockCandidate（像素数、矩形两边长、中心、`matches`）。
-
-### 5.4 bridge 附着生命周期与视觉暂停
-
-BridgeObservation.attachment_state 为唯一权威：ATTACHMENT_NOT_ATTACHED=0、ATTACHMENT_ATTACHED=1、ATTACHMENT_RELEASED=2。启动/reset 为 NOT_ATTACHED。**Week 4.1 Stage 13 起（[ADR 019](adr/019-attachment-from-robot-side-signals.md)，变更 ADR 012）** bridge 只用真实 Franka Hand 也报告的量确认（对应 libfranka 的 `is_grasped`）：夹爪被命令合拢（最后一条命令 < 盒宽 − 容差 = 30 mm）、实际两指位置之和与盒宽相差 < `grasp.width_epsilon_m`（10 mm）、两指已停下（关节速度绝对值之和 < `grasp.attach_max_finger_speed_m_s`=20 mm/s），连续 `grasp.attach_hold_s`=0.1 s 仿真时间（`AttachmentConfirmer`，输入结构里没有盒子的量，也没有接触）。确认后锁存，接触抖动不解除；实际宽度超过盒宽 + 容差 + 5 mm（55 mm，留 5 mm 滞回）才转 RELEASED。reset 清锁存与计时。`BridgeObservation.left/right_finger_contact` 的含义随之改为“外部接触”（`bodyTouchesExternal`，与 `body_rootid` 不同于机器人的物体接触，不带身份）——**仿真专有，真实 Panda 没有指尖传感器**，不进入任何决策，只给 executor 的 CLOSE 超时贴诊断标签；按身份判的“碰到盒子”只在 `~/ground_truth/*_finger_contact`，以及附着日志行里标明“仅供评测”的部分。`classifyGrasp()`（含物体高度）与 `confirmsAttachment()`（ADR 012）保留作诊断，不驱动附着。
-
-Stage 13 起这套确认不再读物体真值（位置与接触身份），但接触本身仍由仿真产生，附着权威仍在仿真 bridge；手指被盒子以外的东西挡住、停在 30~50 mm 时会误确认（与真实 `is_grasped` 同样的局限，未在线测过）；20 mm/s 的阈值只来自一个 episode 的实测。闭爪滑落仍为 ATTACHED（锁存只在张开超过 50 mm 时解除）；Week 4.1 Stage 12 起 executor 用搬运期开度窗口发现它，见 [5.5](#55-任务观测来源与质量门)，但只告警、不改变 episode。
-
-**仿真故障注入（默认关闭，launch 不暴露）。** Stage 14 加了 `fault.truth_offset_x_m`（默认 0）：只把 bridge **发布**的盒子真值（`BridgeObservation.object_pose`、`~/ground_truth/object_pose`）沿 world x 平移，物理不动；用来在线证明 vision 来源不读真值。下面是 Stage 12 的那一个。
-
-**（Stage 12）** bridge 参数 `fault.drop_box_after_attach_s`（默认 −1，关闭；launch 不暴露）：附着持续到该仿真时长时，把盒子的自由关节移回 reset keyframe 里的位置、速度清零，整个 bridge 运行期间只做一次，以便重试能成功。它改的是“世界”，不是机器人；用来复现“盒子滑出、手指合拢到约 0、附着锁存不变”。
-
-estimator 的 tryProcess 在当前 ATTACHED 时早退，正常 RGB-D 几何处理及结果输出暂停，订阅回调/缓存仍可运行。ATTACHED→RELEASED 或 NOT_ATTACHED 时重置 tracker，清 depth/CameraInfo、pending 与 processed，并清空初始 box 的深度窗口，避免直接消费附着期旧图像；生命周期切换也重置历史（含该窗口）。释放状态不证明物体已落桌，须重新得到合格测量。
-
-### 5.5 任务观测来源与质量门
-
-observation_source 每 episode 唯一；节点参数默认 oracle，demo launch 的默认值自 Week 4.1 Stage 11 起是 vision（vision episode 第一次能完整放进 bin）。oracle 直接使用 bridge 物体真值，不受视觉 MEASURED/REJECTED 状态准入影响，但与 vision 共用附着和 FSM 阶段门。vision 在 VERIFY 之前的所有阶段消费锁存的初始位姿（见下，Week 4.1 Stage 7），VERIFY 消费新检测器重新测得的盒子（Stage 11）；关节/接触/TCP/宽度/附着仍来自 BridgeObservation。demo 的 vision 入口启动 estimator 与相机，不静默回退 oracle pose。
-
-**初始位姿锁存（Week 4.1 Stage 7，vision 来源）。** 每次 reset（含重试，generation 变化）后，executor 订阅 `/object_pose_estimator/initial_box_pose` 与 `initial_bin_pose`，由纯规则类 `PoseLatch` 判定：最近 `latch.frames`=5 条连续 MEASURED 的 x、y 极差 ≤ `latch.max_position_spread_m`=3 mm、yaw 的圆周极差 ≤ `latch.max_yaw_spread_deg`=3°（box 以 90° 为周期、bin 以 180° 为周期）才锁存，锁存值是这几条里最新那条；非 MEASURED 的消息使累积清零；session 或 generation 不符、序号不递增的消息被忽略；锁存后到下一次 reset 前不变。锁存完成之前控制器停在“等待首个观测”，不进入 READY，所以不发任何关节命令；等待上限是 `latch.timeout_s`=10 s（墙钟，控制器的 awaiting-observation 超时，与 5 s 的数据流看门狗分开），超时的 outcome 是 `VISION_LATCH_TIMEOUT`（沿用 `VISION_` 开头归入感知层），失败原因写明还缺哪个对象及其状态（如 `BIN:WAITING:NO_RECTANGLE_MATCHES_BIN`）。`place.into_bin`（默认 false，demo launch 随 `scene_enabled` 设置；Stage 7 时叫 `latch.require_bin`）决定是否也等 bin；默认场景没有 bin。锁存后，VERIFY 之前所有阶段（含 OPEN、RETRACT）的 box 位姿都取自锁存值（confidence、residual 为 NaN，质量在状态话题里）；Stage 11 起按 FSM 阶段而不是附着状态切换，所以抓取时附着状态的反复不影响它。锁存的 box yaw 决定抓取时工具的转角（Stage 9，见 [6](#6-任务与运动执行) 的姿态说明）。
-
-**放置目标（Week 4.1 Stage 8）。** 每个 episode 一个 `PlaceTarget{x, y, support_z}`，由节点在第一次准入观测之前交给控制器（`setPlacement`），控制器用同一个值算 PREPLACE / PLACE / OPEN / RETRACT 的 IK 目标，并以它的 x、y 作为 VERIFY 放置区的中心。PLACE 的 TCP 高度 = `support_z` + 盒子半高 + `target.place_tcp_above_box_center_m`（0.05 m），PREPLACE、RETRACT 再加 `target.hover_height_m`。`place.into_bin` 为 true 时，vision 来源取锁存的视觉 bin（`support_z` 是检测到的内底面高度），oracle 来源取 bridge 的 `/mujoco_bridge/ground_truth/bin_pose`（PoseStamped，transient local，只在 `scene.enabled` 时由 bridge 启动时发布一次；与 `~/ground_truth/object_pose` 同类，只给 oracle 路径用，vision 不订阅），在拿到之前不准入任何观测、不发命令，**不退回配置**；为 false 时用 `target.place_x_m`、`target.place_y_m` 与桌面 0.22 m（旧场景，没有 bin），VERIFY 中心用 `verify.place_x_m`、`verify.place_y_m`，两者只在 `verify.allow_target_mismatch` 实验里不同。工具朝向不变，不要求盒子最终 yaw 等于 bin yaw。状态话题 `/task_executor/initial_pose_latch`（InitialPoseLatch，内含两个 LatchedPose）给出 WAITING / LATCHED / FAILED、各对象的锁存位姿、来源序号与时间戳、极差和未锁住的原因。
-
-**VERIFY（Week 4.1 Stage 11）。** VERIFY 阶段，vision 来源准入 `/object_pose_estimator/initial_box_pose` 的 MEASURED：与 bridge 样本按 session、generation、序号完全相等配对，缓存有界并跳过已处理序号；估计器在释放时清空窗口，所以这是盒子落下后的新测量（约释放后 1 s 才有第一条）。非 MEASURED 记录 `VISION_REJECTED:<检测器原因>` 并等待，不创建 snapshot；持续没有可准入观测仍受 5 s 的数据流看门狗约束，可终止为 OBSERVATION_STALE。**只在 VERIFY 要求新测量**：OPEN、RETRACT 用锁存值，因为它们不需要盒子，而张开的手还在 bin 上方时会挡住盒子（若在那时就只准入新测量，控制器不推进、手不撤离，形成死锁，Stage 11 实测过）。oracle 来源用真值。
-
-**入 bin 判据。** `place.into_bin` 为 true 时 VERIFY 用纯函数 `boxInBin()`（[bin_containment.hpp](../src/task_executor/include/task_executor/bin_containment.hpp)）而不是半径：盒子（边长 40 mm，yaw 取自位姿）四角在 bin 坐标系里离内口（半宽 70 × 65 mm）至少 5 mm，且盒心高度在内底面 + 20 mm ± 5 mm 内，才算放好；其它（越界、压在壁上、离壁不到 5 mm 无法确认）一律不算，VERIFY 继续等，超时为 `PLACE_MISSED` 后按原逻辑重试。5 mm = 盒子检测限 3 mm + bin 在线最大偏差向上取 2 mm。bin 来自放置目标（vision：锁存的视觉 bin，含 yaw；oracle：bridge 的真值 bin）。VERIFY 期间日志每 0.5 s 打印一行 `verify:`，给出盒子位置、是否在内、最小角余量与高度差。没有 bin 时仍是以放置目标为圆心、`verify.place_region_radius_m` 为半径的判据。
-
-**搬运期开度窗口（Week 4.1 Stage 12）。** executor 对每个 bridge 样本更新纯规则类 `CarryWidthMonitor`（[carry_width_monitor.hpp](../src/task_executor/include/task_executor/carry_width_monitor.hpp)）：只在 bridge 为 ATTACHED 且阶段是 LIFT / PREPLACE / PLACE 时计时；两指之和低于 34 mm（搬运中见过 37.6~40.5 mm）持续 0.2 s 仿真时间，产生一次告警（`CARRY_WIDTH_LOW: …`，日志 WARN），每次尝试一个新监视器。告警不改变 episode 的走向；后果由后面的阶段承担（盒子不在 bin 里 → VERIFY 超时 `PLACE_MISSED` → 重试）。上限不另设，张开超过 50 mm 由 bridge 转为 RELEASED。
-
-EpisodeOutcome 记录来源、confidence、residual、失败层/原因，以及最后一次尝试的 `carry_width_alert`、`carry_width_min_m`、`carry_width_max_m`（Stage 12；没有搬运时开度为 NaN）；任务失败码与视觉 state_reason 属于不同接口。附着门、入 bin 判据及 controller 准入共同决定是否推进。Stage 11 起 vision 在随机 box + bin 布局上完整成功（3 个布局），HELD-A 上的验收是 Stage 14。
-
-## 6. 任务与运动执行
-
-### 6.1 EpisodeController 与 FSM
-
-EpisodeController 独占生命周期、phase、retry、失败原因与 telemetry；ROS 节点负责转换、服务/话题、timer、日志。生命周期 Idle/ResetPending/AwaitingResetResponse/AwaitingObservation/Ready/Finished/Failed 与 Phase 分开，FSM 仅在 Ready 推进。任意状态可 start 新 episode，terminal outcome 仅一次。
-
-任务顺序 `HOME -> PREGRASP -> GRASP -> CLOSE -> LIFT -> PREPLACE -> PLACE -> OPEN -> RETRACT -> VERIFY -> DONE`，执行异常经 RECOVER 重试，耗尽后 FAILED。纯 step() 不依赖 ROS/MuJoCo；executor 的 classifyGrasp() 复用 mujoco_bridge::grasp_criteria，仅用于 CLOSE 超时原因分类，不作为第二套附着权威。
-
-CLOSE 要求 bridge 报 ATTACHED 且已持续 `fsm.close_after_attach_s`（默认 0.2 s，Week 5 Stage 5；此前是固定等满 close_settle=2 s）；LIFT 要求 ATTACHED+机械臂关节位置/速度到达抬升目标+min_settle，不以视觉高度判定。LIFT 到达臂目标但未附着且超过 grace 时 recover/slipped，阶段超时 recover/timeout。PREPLACE/PLACE 先检查 ATTACHED，缺失时 recover/slipped，否则检查运动到位；这些门依赖 bridge 锁存，不能独立检测闭爪滑落。OPEN 要求实际宽度 >0.06 m（Week 5 Stage 5 起不再等 min_settle）；VERIFY 的臂目标是 HOME（Week 5 Stage 2），要求 RELEASED、物体在验收区域（有 bin 时为入 bin 判据）、机械臂回到 HOME 及 settle，vision 路径须释放后的新测量；所以 DONE 时手臂已在 reset 构型。
-
-20 Hz tick 最多消费一份新鲜观测，设 IK seed、求当前目标、调用 FSM、记录迁移；无新观测不重发旧目标，新观测下 phase 未变则重发夹爪命令（手臂只在进入阶段时发一次轨迹，见 6.4）。运动阶段的“到位”另须本段轨迹已走完（Week 5 Stage 3）。动作顺序为当前 phase 目标、迁移日志、reset/outcome。阶段计时用仿真时间，看门狗用 steady clock，准入先检查超时再刷新新鲜度。见 [ADR 004](adr/004-episode-controller-orchestration.md) 与 [编排图](task_executor_episode_orchestration.html)。
-
-### 6.2 Cartesian 任务与 waypoint
-
-WaypointSource::jointTargetFor(Phase,ObjectPose) 返回关节目标。默认 DiffIkWaypointSource 消费独立、无 ROS 的 CartesianWaypointSource，以实测关节作 seed、阶段内缓存离线 IK 目标；HOME 与 VERIFY 不求 IK，直接用 `home.joint_positions`（Week 5 Stage 2）；HOME/retry 清抓取锁定与缓存。失败报 IK_FAILED，不发布失败解。固定关节表模式（`keyframe`）查表且忽略物体位姿，详表/调参见 [Week 2 Stage I](../Job_guides/my_study/week2.md#10-stage-ifsm-与-waypointsource-抽象新包-task_executor)。
-
-| 默认几何 | world-frame hand_tcp 目标 |
-| --- | --- |
-| HOME、VERIFY | 关节目标 `home.joint_positions`（= pick_place_home 的臂构型，见 2.3），不经 IK；表中其余阶段经 IK |
-| GRASP/CLOSE | 首次 PREGRASP 锁定的物体中心 |
-| PREGRASP/LIFT | 锁定中心上方 0.15 m |
-| PLACE/OPEN | 放置目标 XY（无 bin 时 `(0.5,0.3) m`），支撑面+半高+0.05 m：桌面时 z=0.29 m，bin 内底面时 0.297 m（Week 4.1 Stage 8） |
-| PREPLACE/RETRACT | 放置目标上方 0.15 m：桌面时 z=0.39 m |
-
-姿态 `R_world_tcp=Rz(tool_yaw_rad)*R_down`，R_down 绕 `(1,1,0)/sqrt(2)` 转 π；默认 yaw=0 时 TCP x/y/z 指向 world +y/+x/-z。参数不是 ZYX Euler yaw。**Week 4.1 Stage 9 起** `target.align_tool_to_box_yaw`（默认 true）把盒子 yaw 折到 [−45°, 45°) 加进 `tool_yaw_rad`，除 HOME 外所有阶段都用：`R_world_tcp=Rz(tool_yaw_rad+fold(box_yaw))*R_down`。盒子 yaw 取自 PREGRASP 时的盒子位姿（vision 是锁存值，oracle 是当时的真值），diff-IK 源从 PREGRASP 起对所有阶段都用这个位姿，所以抓住盒子后不再转腕；放进 bin 时不要求盒子 yaw 与 bin 对齐，也不验证最终 box 姿态。CLOSE/LIFT/PREPLACE/PLACE 全闭（总宽 0 m），其他阶段张开（0.08 m）。
-
-target.* 表达 TCP 任务，verify.* 表达 box 验收，仅节点构造时读取，不改变 XML box/marker。diff-IK 默认两组 XY=(0.5,0.3)，不一致须 verify.allow_target_mismatch=true；keyframe 不消费 target，验收中心=(0.43,0.31)。默认半径 0.08 m，严格回归用 0.03 m。见 [ADR 001](adr/001-cartesian-task-waypoints.md)、[ADR 002](adr/002-placement-target-verification-contract.md)。
-
-### 6.3 离线 IK 与执行容差
-
-任务空间为 world 表达的 hand_tcp，六维 `[x,y,z,rx,ry,rz]`，平移 m、旋转轴角 rad；Jacobian 行序 `[vx,vy,vz,wx,wy,wz]`。平移/旋转权重 1.0/0.2，sigma_min、条件数、阻尼阈值仅在相同权重下可比。
-
-DLS 默认：阻尼阈值 0.08、最大阻尼 0.05、关节居中增益 0.02；误差裁剪 0.05 m/0.2 rad、单关节步长上限 0.12 rad、位置限位内缩 1e-4 rad。先求 DLS 再裁剪/投影，不保证约束最小二乘最优。IkStatus 为 Converged/MaxIterations/Stalled，失败返回有限末状态与残差，不伪造成功。
-
-solveIk() 反馈来自运动学模型，不是实际执行状态；不修正伺服下垂、饱和或接触扰动，没有碰撞规划。模型 IK 残差、实测 TCP 误差、最终落点误差分别记录，不可互代。
-
-FSM 默认位置/GRASP-CLOSE 位置/速度容差为 0.05 rad/0.3 rad/0.05 rad/s；min_settle=0.5 s（OPEN 不受限）、close_after_attach=0.2 s、close_settle=2 s（只在附着确认失败的路径上）、lift_settle_grace=2 s、phase_timeout=6 s、max_retries=3。当前场景经验值已回归，但未证明最小/通用；改变模型、控制或场景需重测。
-
-### 6.4 时间参数化的关节轨迹（Week 5 Stage 3，[ADR 020](adr/020-path-then-time-parameterized-joint-trajectories.md)）
-
-进入一个阶段时，`EpisodeController` 规划一条从上一段参考终点（reset 后为 `home.joint_positions`，即预设状态的臂构型；不用实测关节：没有重力补偿，实测在重力下比伺服目标低，joint4 约 6 mrad）到本阶段目标的轨迹，作为 `EpisodeActions::trajectory` 只返回一次；节点把它发成一条 `JointTrajectory`（每 1 ms 一个点，`positions`、`velocities`、`time_from_start`）。路径：GRASP、LIFT、PLACE、RETRACT 为 TCP 直线（`DiffIkWaypointSource::cartesianLine`：每 5 mm 一个位姿、转角按四元数球面插值，逐点 IK 以上一点为初值，相邻点关节差 > 0.05 rad 或不收敛判 `TRAJECTORY_FAILED`；终点改用这条线最后一点的解），其余为关节空间直线；CLOSE、OPEN 手臂保持上一段终点（单点，不发）。时间：`planJointPath()` 调用 moveit_core 的 TOTG（`trajectory_processing::Path`/`Trajectory`，路径点间允许偏离 0 或 1 mrad），限值 `trajectory.max_velocity`（默认 FCI 的 95%：2.066/2.480 rad/s，Week 5 Stage 6 为数据契约留的余量）与 `trajectory.max_acceleration`（默认 FCI 的 1/4：3.75、1.875、2.5、3.125、3.75、5、5 rad/s²，使 TOTG 的加速度突变在 1 kHz 下也不超过 FCI 加加速度上限）。只用 `getPosition`/`getVelocity` 采样：`getAcceleration` 在部分时刻报出超过上限的值，而位置的差分并不超限。
-
-bridge 的 `~/joint_command`：单点消息照旧立即写入 `ctrl`（固定关节表模式、探针）；多点消息是带时间的轨迹（`TrajectoryInterpolator`，独立库 `mujoco_bridge::trajectory_interpolator`），从到达时的仿真时间开始，每个物理步在点之间线性插值写入 `ctrl`，走完后保持终点；新消息替换正在执行的轨迹，reset 清除它；`velocities` 不使用。采样固定 1 ms，从轨迹开始计时，所以 2 ms 物理步读参考的时刻恰好落在采样点上，伺服拿到的是 TOTG 的精确位置；点之间线性插值的速度是阶梯状的，只在有人于点间读参考时才暴露（2 ms 采样在 1 ms 上看加速度为上限的 2 倍；三次 Hermite 10 ms 采样在加减速切换处超限 24%，见 Week 5 Stage 3 的 3.5）。
-
-位置伺服对光滑参考近似为延迟 $T_s = (k_d + b)/k_p \approx 0.1\ \mathrm{s}$ 的跟踪（各关节相同），实测实际比参考晚约 100 ms，速度、加速度峰值不超过参考（实测 ≤ 参考上限的 1.008 倍）；没有速度前馈。见 [Week 5 Stage 3](../Job_guides/my_study/week5.md#stage-3时间参数化的关节轨迹)。
-
-## 7. 验证门禁与已知限制
-
-### 7.1 验证入口与证据
-
-| 验证 | 覆盖/限制 |
-| --- | --- |
-| [三方模型测试](../src/mujoco_bridge/test/test_model_consistency.cpp) | 7 组固定 q，直接写状态/mj_forward，对照 MoveIt/自写 FK-Jacobian，不经 servo |
-| 模型门槛 | link/TCP 位置 <1e-6 m、姿态 <1e-6 rad、Jacobian 元素 <1e-8，不作为运行伺服容差 |
-| [camera_probe.py](../src/mujoco_bridge/test/camera_probe.py) | 精确同步、反投影/桌面/reset；仿真 smoke，不代表真机标定/动态噪声评估 |
-| [掩膜单测](../src/mujoco_perception/test/test_robot_mask.cpp) / [probe](../src/mujoco_perception/test/robot_mask_probe.py) | 表面过滤、前后景保留、缺 TF/标定变化；probe 仅离线使用 oracle 统计误掩/残留 |
-| [Cartesian 回归](../Job_guides/my_study/week3.md#11-stage-ocartesian-任务几何与离线-ik-适配) / [编排回归](../Job_guides/my_study/week3.5.md#15-p5回归架构记录和收尾) | 固定 oracle 场景连续 20/20，不外推随机姿态、视觉或真机 |
-| [视觉验证](../Job_guides/my_study/week4.md#10-stage-4同帧机器人几何掩膜) | 掩膜/诊断基线、缺 TF、质量拒绝；完整视觉抓放未通过 |
-| [DepthWindow](../src/mujoco_perception/test/test_depth_window.cpp) / [初始 box 检测器](../src/mujoco_perception/test/test_initial_box_detector.cpp) / [初始 bin 检测器](../src/mujoco_perception/test/test_initial_bin_detector.cpp) / [InitialPoseEstimator](../src/mujoco_perception/test/test_initial_pose_estimator.cpp) | 单测在精确光线投射的合成场景上，答案由构造给出（相机与场景在 [workcell_camera.hpp](../src/mujoco_perception/test/workcell_camera.hpp)），共 24 项；场景固定，所以不测非法配置、不会出现的场景和相机分辨率变化。容差是像素量化界，不是调出来的（bin 的边长用检测器自己的 ±8 mm 规则） |
-| `initial_box_probe.py place` | Stage 8：随机 box + bin 布局，oracle 与 vision 各自的 PREPLACE / PLACE 目标对 bin（真值或锁存值）、释放时指尖与壁顶的余量、盒子最终是否在 bin 内（按真值判）；`--scene legacy` 核对旧场景的固定目标。仿真 |
-| `initial_box_probe.py held` / `held-summary` | Week 4.1 Stage 14：留出集 HELD-A（40 个随机 box + bin 布局）上 vision 39/40、oracle 40/40；过程断言 P1~P6（锁存前无命令、锁存误差、抓取与放置目标、无开度告警、无假成功）、负向断言 N1~N5（含用 `fault.truth_offset_x_m` 平移发布的真值，vision 不受影响而 oracle 失败）。仿真，HELD-A 此后为回归集 |
-| [附着确认单测](../src/mujoco_bridge/test/test_grasp_criteria.cpp) / `initial_box_probe.py carry --mode attach` | Stage 13：持续 0.1 s 才确认、空夹/手指仍在动/无合拢命令/宽度不符不确认、断一个样本重新计时；在线核对附着时手指确实碰到盒子（评测端）、合拢到附着的时间。仿真 |
-| [开度窗口单测](../src/task_executor/test/test_carry_width_monitor.cpp) / `initial_box_probe.py carry` | Stage 12：窗口内不报、短暂低于下限不报、持续 0.2 s 报一次、只看搬运期；正常运行不误报，注入 `fault.drop_box_after_attach_s` 后 0.5 s 内报出。仿真 |
-| [入 bin 判据单测](../src/task_executor/test/test_bin_containment.cpp) / `initial_box_probe.py verify`、`place --require-success` | Stage 11：判据的居中、越界、离壁不足余量、压壁、bin 旋转；VERIFY 时新检测器对真值的误差（6 个布局）；oracle 与 vision 在随机布局上完整成功并按真值入 bin。仿真 |
-| [PoseLatch 单测](../src/task_executor/test/test_pose_latch.cpp) / `initial_box_probe.py latch` | 前者覆盖连续一致才锁存、不一致或非 MEASURED 重新累积、其它 generation 与旧序号被忽略、yaw 按物体周期比较、锁存后不变；后者起真实 bridge + 估计器 + executor 核对：锁存前无关节命令、锁存值对真值、GRASP 目标取自锁存值、重新锁存、缺 bin 时的 `VISION_LATCH_TIMEOUT`。仿真 |
-| [initial_box_compare.py](../src/mujoco_perception/test/initial_box_compare.py) / [initial_box_probe.py](../src/mujoco_perception/test/initial_box_probe.py) | 前者在同一批录制帧上对照 C++ 与 Python 原型；后者起真实 bridge + estimator（+ executor）核对消息的状态、窗口计数与误差。验收规则写在各自的 docstring，在运行前写定；仿真，不代表真机 |
-| [当前简化接口测试](../Job_guides/my_study/week4.md#51-改动清单与验证结果) | 2026-10-03 四包 build/test 通过，tracker 11 项通过；工作区汇总 487 tests / 0 errors / 0 failures / 71 skipped（含既有其他包结果），非完整 vision 成功证据 |
-
-link0..link4、link6、link7、hand 的 collision STL 在 apt/vendor 中 SHA256 相同；link5 与手指表示不同，不能推断全身碰撞结果一致。TCP FK/Jacobian 测试不验证可见网格投影。
-
-### 7.2 未决事项与触发条件
-
-- 接入 MoveIt 时决定 RSP TF 隔离与 home/ready 对齐方案，各自记录 ADR。
-- keyframe qpos 静默补齐仍缺专门门禁；修改场景/keyframe 时检查 nq 与完整状态。
-- 冲突比例缺 TF/标定偏差注入验证，不能启用未经验证的整帧拒绝阈值。
-- 附着锁存抗接触抖动，也可能掩盖闭爪掉落；vision 附着确认仍有仿真真值/接触依赖。释放后的新测量是最终落点证据，完整视觉验收未完成。
-- 支撑锚定不证明实际落桌，候选唯一性也不保证跨遮挡目标身份；多目标或离桌场景需新证据门。
-- 当前单机器人/单 box 命名与夹爪假设，引入多臂/多物体时重新设计解析与目标身份。
-- executor 为纯 grasp_criteria 依赖 bridge；替换真机驱动时评估共享库归属。改多线程 executor 时重新验证同步。
-
-维护规则：按主题更新事实并替换过时描述；实测全文写周记，决策变化新增 ADR，未来计划明确状态。此页保留接口、关键默认值、失败行为与证据入口。
+（此锚点保留供 ADR 009 引用；机器人遮罩的历史评测见 [Week 4 Stage 4](../Job_guides/my_study/week4.md#10-stage-4同帧机器人几何掩膜)。）
