@@ -34,21 +34,16 @@
 #include "manipulation_interfaces/msg/initial_bin_pose.hpp"
 #include "manipulation_interfaces/msg/initial_box_pose.hpp"
 #include "manipulation_interfaces/msg/robot_mask_diagnostics.hpp"
-#include "manipulation_interfaces/msg/vision_object_pose.hpp"
-#include "pcl_conversions/pcl_conversions.h"
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/camera_info.hpp"
 #include "sensor_msgs/msg/image.hpp"
-#include "sensor_msgs/msg/point_cloud2.hpp"
 #include "std_msgs/msg/header.hpp"
 #include "tf2/exceptions.h"
 #include "tf2_msgs/msg/tf_message.hpp"
 #include "tf2_ros/buffer.h"
 #include "tf2_ros/transform_listener.h"
-#include "mujoco_perception/geometry_pipeline.hpp"
 #include "mujoco_perception/initial_pose_estimator.hpp"
 #include "mujoco_perception/robot_mask.hpp"
-#include "mujoco_perception/object_tracker.hpp"
 
 namespace mujoco_perception
 {
@@ -59,6 +54,13 @@ using Stamp = int64_t;
 using ImageConstPtr = sensor_msgs::msg::Image::ConstSharedPtr;
 using CameraInfoConstPtr = sensor_msgs::msg::CameraInfo::ConstSharedPtr;
 using ObservationConstPtr = manipulation_interfaces::msg::BridgeObservation::ConstSharedPtr;
+
+// BridgeObservation.attachment_state.
+enum class AttachmentState : uint8_t {kNotAttached = 0, kAttached = 1, kReleased = 2};
+
+// Why a frame could not be used at all; published as the initial poses' reason.
+constexpr const char * kInvalidInput = "INVALID_INPUT";
+constexpr const char * kMissingRobotTransform = "MISSING_ROBOT_TRANSFORM";
 
 Stamp stampKey(const builtin_interfaces::msg::Time & stamp)
 {
@@ -94,56 +96,23 @@ public:
       "/mujoco/franka_emika_panda/assets";
     robot_meshes_ = loadRobotVisualMeshes(assets);
     robot_mask_filter_ = std::make_unique<RobotMaskFilter>(robot_meshes_);
-    config_.depth_min_m = declare_parameter("depth_min_m", config_.depth_min_m);
-    config_.depth_max_m = declare_parameter("depth_max_m", config_.depth_max_m);
-    config_.plane_z_m = declare_parameter("plane_z_m", config_.plane_z_m);
-    config_.plane_tolerance_m = declare_parameter(
-      "plane_tolerance_m", config_.plane_tolerance_m);
-    config_.cluster_tolerance_m = declare_parameter(
-      "cluster_tolerance_m", config_.cluster_tolerance_m);
-    config_.min_cluster_points = static_cast<std::size_t>(declare_parameter(
-        "min_cluster_points", static_cast<int>(config_.min_cluster_points)));
-    config_.world_roi.x_min = declare_parameter("roi.x_min", config_.world_roi.x_min);
-    config_.world_roi.x_max = declare_parameter("roi.x_max", config_.world_roi.x_max);
-    config_.world_roi.y_min = declare_parameter("roi.y_min", config_.world_roi.y_min);
-    config_.world_roi.y_max = declare_parameter("roi.y_max", config_.world_roi.y_max);
-    config_.world_roi.z_min = declare_parameter("roi.z_min", config_.world_roi.z_min);
-    config_.world_roi.z_max = declare_parameter("roi.z_max", config_.world_roi.z_max);
-
-    box_model_.half_extents = Eigen::Vector3d(
-      declare_parameter("box_size_x_m", 0.04) * 0.5,
-      declare_parameter("box_size_y_m", 0.04) * 0.5,
-      declare_parameter("box_size_z_m", 0.04) * 0.5);
-    box_model_.extent_tolerance_m = declare_parameter(
-      "box_extent_tolerance_m", box_model_.extent_tolerance_m);
-    box_model_.min_visible_extent_m = declare_parameter(
-      "box_min_visible_extent_m", box_model_.min_visible_extent_m);
-    box_model_.confidence_reference_points = declare_parameter(
-      "box_confidence_reference_points", box_model_.confidence_reference_points);
-    box_model_.inlier_tolerance_m = declare_parameter(
-      "box_inlier_tolerance_m", box_model_.inlier_tolerance_m);
-    box_model_.max_residual_m = declare_parameter(
-      "max_residual_m", box_model_.max_residual_m);
-    box_model_.min_inlier_ratio = declare_parameter(
-      "min_inlier_ratio", box_model_.min_inlier_ratio);
-    box_model_.anchor_z_to_plane = declare_parameter(
-      "anchor_z_to_plane", box_model_.anchor_z_to_plane);
-    tracker_config_.min_confidence = declare_parameter(
-      "tracking.min_confidence", tracker_config_.min_confidence);
-    tracker_ = std::make_unique<ObjectTracker>(tracker_config_);
-
-    // Initial box and bin detectors (Week 4.1 Stages 5, 6): the table height, the box and the
-    // depth range are the ones the older pipeline already uses, so there is one source of truth
-    // for them. The bin's own numbers are the scene's (InitialBinConfig).
+    // The scene the initial box and bin detectors assume (Week 4.1 Stages 5, 6): the table
+    // height, the box size and the usable depth range. The bin's own numbers are the scene's
+    // (InitialBinConfig).
     InitialBoxConfig initial_box_config;
-    initial_box_config.plane_z_m = config_.plane_z_m;
-    initial_box_config.half_extents = box_model_.half_extents;
-    initial_box_config.depth_min_m = config_.depth_min_m;
-    initial_box_config.depth_max_m = config_.depth_max_m;
+    initial_box_config.plane_z_m = declare_parameter("plane_z_m", initial_box_config.plane_z_m);
+    initial_box_config.half_extents = Eigen::Vector3d(
+      declare_parameter("box_size_x_m", 2.0 * initial_box_config.half_extents.x()) * 0.5,
+      declare_parameter("box_size_y_m", 2.0 * initial_box_config.half_extents.y()) * 0.5,
+      declare_parameter("box_size_z_m", 2.0 * initial_box_config.half_extents.z()) * 0.5);
+    initial_box_config.depth_min_m = declare_parameter(
+      "depth_min_m", initial_box_config.depth_min_m);
+    initial_box_config.depth_max_m = declare_parameter(
+      "depth_max_m", initial_box_config.depth_max_m);
     InitialBinConfig initial_bin_config;
-    initial_bin_config.plane_z_m = config_.plane_z_m;
-    initial_bin_config.depth_min_m = config_.depth_min_m;
-    initial_bin_config.depth_max_m = config_.depth_max_m;
+    initial_bin_config.plane_z_m = initial_box_config.plane_z_m;
+    initial_bin_config.depth_min_m = initial_box_config.depth_min_m;
+    initial_bin_config.depth_max_m = initial_box_config.depth_max_m;
     const int initial_box_frames = declare_parameter("initial_box.frames", 10);
     if (initial_box_frames < 1) {
       throw std::invalid_argument("initial_box.frames must be at least 1");
@@ -164,8 +133,6 @@ public:
     tf_sub_ = create_subscription<tf2_msgs::msg::TFMessage>(
       "/tf", rclcpp::QoS(100),
       std::bind(&ObjectPoseEstimatorNode::onTf, this, std::placeholders::_1));
-    pose_pub_ = create_publisher<manipulation_interfaces::msg::VisionObjectPose>(
-      "~/object_pose", rclcpp::QoS(10));
     initial_box_pub_ = create_publisher<manipulation_interfaces::msg::InitialBoxPose>(
       "~/initial_box_pose", rclcpp::QoS(10));
     initial_bin_pub_ = create_publisher<manipulation_interfaces::msg::InitialBinPose>(
@@ -176,10 +143,6 @@ public:
       "~/debug/robot_mask", sensor_qos);
     filtered_pub_ = create_publisher<sensor_msgs::msg::Image>(
       "~/debug/filtered_depth", sensor_qos);
-    foreground_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(
-      "~/debug/foreground_points", sensor_qos);
-    cluster_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(
-      "~/debug/target_cluster", sensor_qos);
     mask_diagnostics_pub_ = create_publisher<manipulation_interfaces::msg::RobotMaskDiagnostics>(
       "~/debug/robot_mask_diagnostics", rclcpp::QoS(10));
     pending_timer_ = create_wall_timer(
@@ -187,10 +150,10 @@ public:
 
     RCLCPP_INFO(
       get_logger(),
-      "Depth geometry estimator ready: exact timestamp matching, plane z=%.3fm, "
-      "box %.3fx%.3fx%.3fm, initial box and bin from the mean of %d frames",
-      config_.plane_z_m, 2.0 * box_model_.half_extents.x(),
-      2.0 * box_model_.half_extents.y(), 2.0 * box_model_.half_extents.z(), initial_box_frames);
+      "Initial box and bin estimator ready: exact timestamp matching, plane z=%.3fm, "
+      "box %.3fx%.3fx%.3fm, the mean of %d frames", initial_box_config.plane_z_m,
+      2.0 * initial_box_config.half_extents.x(), 2.0 * initial_box_config.half_extents.y(),
+      2.0 * initial_box_config.half_extents.z(), initial_box_frames);
     RCLCPP_INFO(get_logger(), "Robot mask loaded %zu visual meshes", robot_meshes_.size());
   }
 
@@ -238,20 +201,11 @@ private:
     attachment_state_ = static_cast<AttachmentState>(message->attachment_state);
     bridge_session_ = message->bridge_session;
     generation_ = message->generation;
-    if (!tracker_lifecycle_known_ || tracker_session_ != bridge_session_ ||
-      tracker_generation_ != generation_)
-    {
-      tracker_->reset(bridge_session_, generation_);
-      tracker_lifecycle_known_ = true;
-      tracker_session_ = bridge_session_;
-      tracker_generation_ = generation_;
-    }
     if (previous_attachment == AttachmentState::kAttached &&
       attachment_state_ != AttachmentState::kAttached)
     {
       // Release starts a new visual observation episode. Do not process RGB-D
       // frames captured while the estimator was intentionally resting.
-      tracker_->reset(bridge_session_, generation_);
       depth_frames_.clear();
       depth_info_.clear();
       pending_since_.clear();
@@ -307,15 +261,10 @@ private:
         const auto depth = depth_frames_.find(key);
         const auto observation = observations_.find(key);
         if (depth != depth_frames_.end() && observation != observations_.end()) {
-          publishRejected(
-            depth->second->header, *observation->second,
-            RejectionReason::kMissingRobotTransform);
           publishMaskDiagnostics(
-            depth->second->header, *observation->second, {}, {}, 0.0,
-            rejectionReasonName(RejectionReason::kMissingRobotTransform));
+            depth->second->header, *observation->second, {}, 0.0, kMissingRobotTransform);
           publishInitialPosesUnusable(
-            depth->second->header, *observation->second,
-            RejectionReason::kMissingRobotTransform);
+            depth->second->header, *observation->second, kMissingRobotTransform);
         } else {
           RCLCPP_WARN_THROTTLE(
             get_logger(), *get_clock(), 2000,
@@ -361,7 +310,6 @@ private:
     const auto & depth = depth_frames_.at(key);
     const auto & depth_info = depth_info_.at(key);
     const auto & observation = observations_.at(key);
-    const auto processing_start = std::chrono::steady_clock::now();
     const std::size_t depth_row_bytes =
       static_cast<std::size_t>(depth->width) * sizeof(float);
     const bool matching_dimensions =
@@ -374,8 +322,7 @@ private:
     const bool matching_frames =
       !depth->header.frame_id.empty() && depth->header.frame_id == depth_info->header.frame_id;
     if (!valid_frames || !matching_dimensions || !valid_camera_info || !matching_frames) {
-      publishRejected(depth->header, *observation, RejectionReason::kInvalidInput);
-      publishInitialPosesUnusable(depth->header, *observation, RejectionReason::kInvalidInput);
+      publishInitialPosesUnusable(depth->header, *observation, kInvalidInput);
       return;
     }
 
@@ -409,69 +356,24 @@ private:
         std::chrono::steady_clock::now() - mask_start).count();
       publishMaskImages(depth->header, depth->width, depth->height, mask);
       if (!mask.valid) {
-        publishRejected(depth->header, *observation, RejectionReason::kInvalidInput);
-        publishInitialPosesUnusable(depth->header, *observation, RejectionReason::kInvalidInput);
-        publishMaskDiagnostics(
-          depth->header, *observation, mask, {}, elapsed_ms,
-          rejectionReasonName(RejectionReason::kInvalidInput));
+        publishInitialPosesUnusable(depth->header, *observation, kInvalidInput);
+        publishMaskDiagnostics(depth->header, *observation, mask, elapsed_ms, kInvalidInput);
         return;
       }
-      // The new detector looks at the same masked depth, before the older pipeline touches it.
       updateInitialPoses(
         depth->header, *observation, mask.filtered_depth, *depth_info, world_from_optical);
       initial_box_published = true;
-      SegmentationResult segmentation = segmentDepth(
-        mask.filtered_depth, *depth_info, world_from_optical, config_);
-      publishCloud(depth->header, *segmentation.foreground_points, foreground_pub_);
-      TrackingSample sample = trackingSample(depth->header, *observation);
-      BoxModel model = box_model_;
-      model.anchor_z_to_plane = model.anchor_z_to_plane && tracker_->anchorToSupport(sample);
-      sample.support_prior_used = model.anchor_z_to_plane;
-      std::vector<PoseEstimate> candidates;
-      for (const auto & cluster : segmentation.candidate_clusters) {
-        candidates.push_back(estimateBoxPose(*cluster, model, config_.plane_z_m));
-        const auto & candidate = candidates.back();
-        if (!candidate.geometry_valid || candidate.confidence < tracker_config_.min_confidence) {
-          RCLCPP_INFO_THROTTLE(
-            get_logger(), *get_clock(), 1000,
-            "Candidate %zu: geometry=%s reason=%s points=%zu confidence=%.3f "
-            "residual=%.4fm inlier=%.3f",
-            candidates.size() - 1, candidate.geometry_valid ? "valid" : "invalid",
-            rejectionReasonName(candidate.rejection), candidate.point_count,
-            candidate.confidence, candidate.residual_m, candidate.inlier_ratio);
-        }
-      }
-      TrackingSample checked_sample = sample;
-      if (segmentation.rejection == RejectionReason::kInvalidInput) {
-        checked_sample.input_failure = rejectionReasonName(segmentation.rejection);
-      }
-      const TrackingResult tracking = tracker_->update(checked_sample, candidates);
-      segmentation.target_cluster->clear();
-      if (tracking.candidate_index >= 0) {
-        segmentation.target_cluster = segmentation.candidate_clusters.at(
-          static_cast<std::size_t>(tracking.candidate_index));
-      }
-      publishCloud(depth->header, *segmentation.target_cluster, cluster_pub_);
-      publishMaskDiagnostics(
-        depth->header, *observation, mask, segmentation, elapsed_ms,
-        tracking.reason);
-      publishTracking(
-        depth->header, *observation, tracking,
-        std::chrono::duration<double, std::milli>(
-          std::chrono::steady_clock::now() - processing_start).count());
+      publishMaskDiagnostics(depth->header, *observation, mask, elapsed_ms, "OK");
     } catch (const tf2::TransformException & error) {
       RCLCPP_WARN_THROTTLE(
         get_logger(), *get_clock(), 2000, "Cannot transform %s to world: %s",
         depth->header.frame_id.c_str(), error.what());
-      publishRejected(depth->header, *observation, RejectionReason::kMissingRobotTransform);
-      publishInitialPosesUnusable(
-        depth->header, *observation, RejectionReason::kMissingRobotTransform);
+      publishInitialPosesUnusable(depth->header, *observation, kMissingRobotTransform);
     } catch (const std::exception & error) {
       RCLCPP_WARN_THROTTLE(
         get_logger(), *get_clock(), 2000, "Depth processing failed: %s", error.what());
-      publishRejected(depth->header, *observation, RejectionReason::kInvalidInput);
       if (!initial_box_published) {
-        publishInitialPosesUnusable(depth->header, *observation, RejectionReason::kInvalidInput);
+        publishInitialPosesUnusable(depth->header, *observation, kInvalidInput);
       }
     }
   }
@@ -504,23 +406,10 @@ private:
     mask_pub_->publish(image);
   }
 
-  void publishCloud(
-    const std_msgs::msg::Header & header,
-    const pcl::PointCloud<pcl::PointXYZ> & points,
-    const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr & publisher)
-  {
-    sensor_msgs::msg::PointCloud2 message;
-    pcl::toROSMsg(points, message);
-    message.header = header;
-    message.header.frame_id = "world";
-    publisher->publish(message);
-  }
-
   void publishMaskDiagnostics(
     const std_msgs::msg::Header & header,
     const manipulation_interfaces::msg::BridgeObservation & observation,
-    const RobotMaskResult & mask, const SegmentationResult & segmentation,
-    double elapsed_ms, const std::string & status)
+    const RobotMaskResult & mask, double elapsed_ms, const std::string & status)
   {
     manipulation_interfaces::msg::RobotMaskDiagnostics output;
     output.header = header;
@@ -531,25 +420,10 @@ private:
     output.masked_pixels = static_cast<uint32_t>(mask.masked_pixels);
     output.comparison_pixels = static_cast<uint32_t>(mask.comparison_pixels);
     output.mismatch_pixels = static_cast<uint32_t>(mask.mismatch_pixels);
-    output.foreground_points = static_cast<uint32_t>(segmentation.foreground_points->size());
-    output.target_cluster_points = static_cast<uint32_t>(segmentation.target_cluster->size());
     output.depth_tolerance_m = mask_config_.depth_tolerance_m;
     output.elapsed_ms = elapsed_ms;
     output.status = status;
     mask_diagnostics_pub_->publish(output);
-  }
-
-  void fillCommon(
-    manipulation_interfaces::msg::VisionObjectPose & output,
-    const std_msgs::msg::Header & header,
-    const manipulation_interfaces::msg::BridgeObservation & observation) const
-  {
-    output.header = header;
-    output.header.frame_id = "world";
-    output.bridge_session = observation.bridge_session;
-    output.generation = observation.generation;
-    output.sample_sequence = observation.sample_sequence;
-    output.pose.orientation.w = 1.0;
   }
 
   // Adds a usable frame to the initial-pose window and publishes where the box and the bin
@@ -623,21 +497,21 @@ private:
   void publishInitialPosesUnusable(
     const std_msgs::msg::Header & header,
     const manipulation_interfaces::msg::BridgeObservation & observation,
-    RejectionReason reason)
+    const char * reason)
   {
     const auto frames_averaged = static_cast<uint32_t>(initial_pose_estimator_->framesInWindow());
     const auto frames_required = static_cast<uint32_t>(initial_pose_estimator_->frames());
     manipulation_interfaces::msg::InitialBoxPose box;
     fillInitialPoseCommon(box, header, observation);
     box.state = static_cast<uint8_t>(InitialPoseState::kNotMeasured);
-    box.reason = rejectionReasonName(reason);
+    box.reason = reason;
     box.frames_averaged = frames_averaged;
     box.frames_required = frames_required;
     initial_box_pub_->publish(box);
     manipulation_interfaces::msg::InitialBinPose bin;
     fillInitialPoseCommon(bin, header, observation);
     bin.state = static_cast<uint8_t>(InitialPoseState::kNotMeasured);
-    bin.reason = rejectionReasonName(reason);
+    bin.reason = reason;
     bin.frames_averaged = frames_averaged;
     bin.frames_required = frames_required;
     initial_bin_pub_->publish(bin);
@@ -660,76 +534,7 @@ private:
     output.yaw_rad = nan;
   }
 
-  void publishRejected(
-    const std_msgs::msg::Header & header,
-    const manipulation_interfaces::msg::BridgeObservation & observation,
-    RejectionReason reason,
-    std::size_t point_count = 0)
-  {
-    TrackingSample sample = trackingSample(header, observation);
-    sample.input_failure = rejectionReasonName(reason);
-    publishTracking(header, observation, tracker_->update(sample, {}), 0.0);
-    (void)point_count;
-  }
-
-  TrackingSample trackingSample(
-    const std_msgs::msg::Header & header,
-    const manipulation_interfaces::msg::BridgeObservation & observation) const
-  {
-    TrackingSample sample;
-    sample.session = observation.bridge_session;
-    sample.generation = observation.generation;
-    sample.sequence = observation.sample_sequence;
-    sample.time_s = static_cast<double>(stampKey(header.stamp)) * 1e-9;
-    sample.attachment_state = static_cast<AttachmentState>(observation.attachment_state);
-    return sample;
-  }
-
-  void publishTracking(
-    const std_msgs::msg::Header & header,
-    const manipulation_interfaces::msg::BridgeObservation & observation,
-    const TrackingResult & tracking, double processing_ms)
-  {
-    const auto & estimate = tracking.estimate;
-    manipulation_interfaces::msg::VisionObjectPose output;
-    fillCommon(output, header, observation);
-    output.evidence_state = static_cast<uint8_t>(tracking.state);
-    output.grasp_state = static_cast<uint8_t>(tracking.grasp_state);
-    output.attachment_valid = tracking.attachment_valid;
-    output.last_measurement_sequence = tracking.measurement_sequence;
-    output.processing_ms = processing_ms;
-    if (tracking.state == EvidenceState::kMeasured ||
-      tracking.state == EvidenceState::kPredicted)
-    {
-      output.pose.position.x = estimate.position.x();
-      output.pose.position.y = estimate.position.y();
-      output.pose.position.z = estimate.position.z();
-      output.pose.orientation.w = estimate.orientation.w();
-      output.pose.orientation.x = estimate.orientation.x();
-      output.pose.orientation.y = estimate.orientation.y();
-      output.pose.orientation.z = estimate.orientation.z();
-    }
-    output.confidence = estimate.confidence;
-    output.orientation_ambiguous = estimate.orientation_ambiguous;
-    output.residual_m = estimate.residual_m;
-    output.inlier_ratio = estimate.inlier_ratio;
-    output.point_count = static_cast<uint32_t>(estimate.point_count);
-    output.state_reason = tracking.reason;
-    output.diagnostic_stage = static_cast<uint8_t>(tracking.diagnostic_stage);
-    output.candidate_count = static_cast<uint32_t>(tracking.candidate_count);
-    output.eligible_candidate_count = static_cast<uint32_t>(tracking.eligible_candidate_count);
-    output.support_prior_used = tracking.support_prior_used;
-    pose_pub_->publish(output);
-  }
-
-  SegmentationConfig config_;
-  BoxModel box_model_;
-  TrackerConfig tracker_config_;
-  std::unique_ptr<ObjectTracker> tracker_;
   std::unique_ptr<InitialPoseEstimator> initial_pose_estimator_;
-  bool tracker_lifecycle_known_ = false;
-  uint64_t tracker_session_ = 0;
-  uint64_t tracker_generation_ = 0;
   std::set<uint64_t> retired_sessions_;
   RobotMaskConfig mask_config_;
   std::vector<RobotMesh> robot_meshes_;
@@ -747,14 +552,11 @@ private:
   rclcpp::Subscription<manipulation_interfaces::msg::BridgeObservation>::SharedPtr
     observation_sub_;
   rclcpp::Subscription<tf2_msgs::msg::TFMessage>::SharedPtr tf_sub_;
-  rclcpp::Publisher<manipulation_interfaces::msg::VisionObjectPose>::SharedPtr pose_pub_;
   rclcpp::Publisher<manipulation_interfaces::msg::InitialBoxPose>::SharedPtr initial_box_pub_;
   rclcpp::Publisher<manipulation_interfaces::msg::InitialBinPose>::SharedPtr initial_bin_pub_;
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr predicted_pub_;
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr mask_pub_;
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr filtered_pub_;
-  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr foreground_pub_;
-  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr cluster_pub_;
   rclcpp::Publisher<manipulation_interfaces::msg::RobotMaskDiagnostics>::SharedPtr
     mask_diagnostics_pub_;
   rclcpp::TimerBase::SharedPtr pending_timer_;

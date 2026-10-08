@@ -138,9 +138,6 @@ def generate_launch_description():
     # vision is the demo's default from Week 4.1 Stage 11 on, when the vision episode first
     # completes into the bin; oracle remains for comparison.
     observation_source_arg = DeclareLaunchArgument('observation_source', default_value='vision')
-    vision_min_confidence_arg = DeclareLaunchArgument('vision_min_confidence', default_value='0.5')
-    vision_max_residual_arg = DeclareLaunchArgument('vision_max_residual_m', default_value='0.005')
-    vision_min_inlier_arg = DeclareLaunchArgument('vision_min_inlier_ratio', default_value='0.7')
 
     # Optional box/bin start layout (bridge only, see scene_parameters). Off by default;
     # with it off the simulator is the legacy single-box scene. This moves objects in the
@@ -167,9 +164,6 @@ def generate_launch_description():
         parameters=[{
             'use_sim_time': True,
             'observation_source': LaunchConfiguration('observation_source'),
-            'vision.min_confidence': LaunchConfiguration('vision_min_confidence'),
-            'vision.max_residual_m': LaunchConfiguration('vision_max_residual_m'),
-            'vision.min_inlier_ratio': LaunchConfiguration('vision_min_inlier_ratio'),
             # A scene with the bin: put the box into the bin, whose pose comes from vision
             # (latched) or, with the oracle source, from the bridge's ground-truth bin pose
             # (Week 4.1 Stages 7, 8). The default scene has no bin and keeps the fixed target.
@@ -217,9 +211,6 @@ def generate_launch_description():
         enable_rgbd_camera_arg,
         camera_rate_hz_arg,
         observation_source_arg,
-        vision_min_confidence_arg,
-        vision_max_residual_arg,
-        vision_min_inlier_arg,
         *scene_args,
         OpaqueFunction(function=make_bridge_node),
         task_executor_node,

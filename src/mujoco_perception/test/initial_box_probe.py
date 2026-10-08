@@ -157,9 +157,9 @@ episode  Bridge + estimator + executor with observation_source=vision, three epi
            E4 after a release the first message has frames_averaged == 1 (the window restarted)
               and every later message in that generation has frames_averaged counting from it.
          Reported, not accepted or rejected: the fraction of the depth frames that are not
-         ATTACHED which produced a message (on the new topic and on the older object_pose
-         topic; the same count with `--baseline` on the pre-change workspace), and what the
-         detector reports for the box lying in the bin after the release.
+         ATTACHED which produced a message, and what the detector reports for the box lying in
+         the bin after the release. (The older object_pose topic and `--baseline` were removed
+         with that detector in Week 5 Stage 7.)
 The bridge's poses are used to judge the result and are never given to a node under test.
 """
 
@@ -178,11 +178,7 @@ from pathlib import Path
 import numpy as np
 import rclpy
 from manipulation_interfaces.msg import (
-    BridgeObservation, EpisodeOutcome, InitialPoseLatch, VisionObjectPose)
-try:
-    from manipulation_interfaces.msg import InitialBinPose, InitialBoxPose
-except ImportError:  # a workspace from before Stage 5, used by `episode --baseline`
-    InitialBinPose = InitialBoxPose = None
+    BridgeObservation, EpisodeOutcome, InitialBinPose, InitialBoxPose, InitialPoseLatch)
 from rcl_interfaces.srv import ListParameters
 from manipulation_interfaces.srv import ResetScene
 from rclpy.qos import QoSProfile, ReliabilityPolicy
@@ -228,7 +224,7 @@ def stamp_ns(stamp):
 class Rig:
     """Bridge + estimator (+ executor), started directly and always reaped."""
 
-    def __init__(self, workspace, bridge_params, with_executor, initial_box=True,
+    def __init__(self, workspace, bridge_params, with_executor,
                  executor_params=(), source='vision'):
         self.install = Path(workspace) / 'install'
         self.processes = []
@@ -239,7 +235,6 @@ class Rig:
         # monotonic arrival time (see commands_before_latch)
         self.events = []
         self.bin_messages = []
-        self.object_poses = []
         self.depth_stamps = []
         self.outcomes = []
         rclpy.init()
@@ -254,15 +249,11 @@ class Rig:
             InitialPoseLatch, '/task_executor/initial_pose_latch',
             lambda m: self.events.append(('latch', m, time.monotonic())), 200)
         self.node.create_subscription(
-            VisionObjectPose, '/object_pose_estimator/object_pose',
-            self.object_poses.append, 200)
-        if initial_box:
-            self.node.create_subscription(
-                InitialBoxPose, '/object_pose_estimator/initial_box_pose',
-                self.messages.append, 200)
-            self.node.create_subscription(
-                InitialBinPose, '/object_pose_estimator/initial_bin_pose',
-                self.bin_messages.append, 200)
+            InitialBoxPose, '/object_pose_estimator/initial_box_pose',
+            self.messages.append, 200)
+        self.node.create_subscription(
+            InitialBinPose, '/object_pose_estimator/initial_bin_pose',
+            self.bin_messages.append, 200)
         self.node.create_subscription(
             Image, '/mujoco_bridge/camera/depth/image_raw',
             lambda m: self.depth_stamps.append(stamp_ns(m.header.stamp)), BEST_EFFORT)
@@ -299,8 +290,7 @@ class Rig:
                 [str(self.install / package / 'lib' / package / name)] + arguments,
                 stdout=log, stderr=subprocess.STDOUT, env=dict(os.environ, **env),
                 start_new_session=True))
-        topic = '/object_pose_estimator/initial_box_pose' if initial_box else \
-            '/object_pose_estimator/object_pose'
+        topic = '/object_pose_estimator/initial_box_pose'
         ready = self.spin_until(
             lambda: bool(self.observations) and self.node.count_publishers(topic) > 0, 60)
         clock_publishers = self.node.count_publishers('/clock')
@@ -1569,7 +1559,7 @@ def run_episode(args):
     bridge_params = ['enable_rgbd_camera=true']
     if args.scene == 'bin':
         bridge_params.append('scene.enabled=true')
-    rig = Rig(args.workspace, bridge_params, True, initial_box=not args.baseline)
+    rig = Rig(args.workspace, bridge_params, True)
     failures = []
     try:
         if not rig.spin_until(lambda: rig.start.get_subscription_count() > 0, 30):
@@ -1592,14 +1582,6 @@ def run_episode(args):
             depth_frames = [s for s in rig.depth_stamps if s in sample_state]
             free_frames = [s for s in depth_frames
                            if sample_state[s] != BridgeObservation.ATTACHMENT_ATTACHED]
-            old_path = [m for m in rig.object_poses if m.generation == generation]
-            old_note = (f'older object_pose topic: {len(old_path)} messages for '
-                        f'{len(free_frames)} depth frames not ATTACHED '
-                        f'({100 * len(old_path) / max(len(free_frames), 1):.0f} %)')
-            if args.baseline:
-                print(f'episode {episode}: success={outcome.success} retries={outcome.retries} '
-                      f'failure={outcome.failure_code}; {old_note}', flush=True)
-                continue
             if not messages:
                 failures.append(f'episode {episode}: no initial box messages')
                 continue
@@ -1633,13 +1615,10 @@ def run_episode(args):
             print(f'episode {episode}: success={outcome.success} retries={outcome.retries}; '
                   f'initial_box_pose: {len(messages)} messages for {len(free_frames)} depth '
                   f'frames not ATTACHED ({100 * len(messages) / max(len(free_frames), 1):.0f} %), '
-                  f'{len(depth_frames) - len(free_frames)} ATTACHED frames skipped; {old_note}; '
+                  f'{len(depth_frames) - len(free_frames)} ATTACHED frames skipped; '
                   f'{release_note}', flush=True)
     finally:
         rig.close()
-    if args.baseline:
-        print('\nBASELINE: outcomes only, nothing judged')
-        return 0
     print('\nEPISODE ACCEPTANCE:', 'PASS' if not failures else 'FAIL')
     for failure in failures:
         print('  ', failure)
@@ -1984,9 +1963,6 @@ def main():
     parser.add_argument('--source', choices=['oracle', 'vision'], default='vision',
                         help='place: the executor\'s observation source')
     parser.add_argument('--episodes', type=int, default=3)
-    parser.add_argument('--baseline', action='store_true',
-                        help='episode: a workspace without the initial box topic; only report '
-                             'the outcomes (use --workspace)')
     parser.add_argument('--scene', choices=['legacy', 'bin'], default='legacy',
                         help='episode: the simulator scene (bin = scene.enabled with the bin)')
     parser.add_argument('--timeout-s', type=float, default=60.0)

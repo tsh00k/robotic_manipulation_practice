@@ -28,9 +28,8 @@ namespace mujoco_perception
 {
 
 // Detects the box on the table from ONE depth image of a static scene and returns its x, y and
-// yaw. It sits beside the older segmentDepth()/estimateBoxPose() pair (geometry_pipeline.hpp),
-// which stays for the check after the box has been released; see docs/adr/018 and
-// Week 4.1 Stage 5 for why the two differ.
+// yaw. It replaced the older segmentation and box-fitting pipeline (removed in Week 5 Stage 7,
+// docs/adr/022); see docs/adr/018 and Week 4.1 Stage 5 for why.
 //
 // Steps (each one is tested on its own in test_initial_box_detector.cpp):
 //   1. back-project every valid depth pixel to a world point (image_geometry ray x depth);

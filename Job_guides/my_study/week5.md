@@ -1,6 +1,6 @@
 # Week 5 学习笔记
 
-> **状态（2026-10-08）：进行中，Stage 1~6 已完成。** 本周承接 [Week 4.1](week4.1.md)（视觉初始位姿 + 离线 IK 的 pick-and-place，留出集验收 vision 39/40、oracle 40/40）。Week 4.5 的旧计划（多物体、多颜色）已于 2026-10-07 删除，原文见提交 `60293a2`。
+> **状态（2026-10-08）：进行中，Stage 1~7 已完成。** 本周承接 [Week 4.1](week4.1.md)（视觉初始位姿 + 离线 IK 的 pick-and-place，留出集验收 vision 39/40、oracle 40/40）。Week 4.5 的旧计划（多物体、多颜色）已于 2026-10-07 删除，原文见提交 `60293a2`。
 
 ## 学习重点范围
 
@@ -25,6 +25,7 @@
 - [Stage 4：抓取稳定、不打滑——先测](#stage-4抓取稳定不打滑先测)
 - [Stage 5：去掉不必要的等待](#stage-5去掉不必要的等待)
 - [Stage 6：满足数据契约 v0.2 的原始记录](#stage-6满足数据契约-v02-的原始记录)
+- [Stage 7：清理旧检测路径](#stage-7清理旧检测路径)
 - [5. 本周最终出口](#5-本周最终出口)
 - [6. 悬挂与暂缓](#6-悬挂与暂缓)
 
@@ -969,7 +970,7 @@ HELD-A 40 个布局，vision：**40/40 成功、零重试、零假成功**，P1~
 
 ## Stage 6：满足数据契约 v0.2 的原始记录
 
-**状态（2026-10-08）：已完成。** 6.4 的断言在运行前写定；探针的两处测量错误与 D2 的处理见 6.5。**分量：重。** 导出程序（LeRobot 格式）不在本周。
+**状态（2026-10-08）：已完成（提交 `7f33ae3`）。** 6.4 的断言在运行前写定；探针的两处测量错误与 D2 的处理见 6.5。**分量：重。** 导出程序（LeRobot 格式）不在本周。
 
 ### 6.0 目标
 
@@ -1103,6 +1104,81 @@ HELD-A 40 个布局，vision：**40/40 成功、零重试、零假成功**，P1~
 没有做：导出程序（LeRobot 格式，不在本周）；无效深度 NaN → 0（按契约由导出器转换）；录制器检查中间件配置；多物体、多指令（语言不起作用）。
 
 给后续的输入：导出器按“reset 到 outcome”截取帧；按 sidecar 的 `outcome` 只取干净成功，按 `grasp_yaw_distance_to_switch_deg` 可筛掉离切换点近的；episode 约 10 s、约 100 帧。
+
+## Stage 7：清理旧检测路径
+
+**状态（2026-10-08）：已完成。** **分量：轻。**
+
+### 7.1 旧路径是什么、现在还剩什么
+
+Week 3~4 的检测路径：估计器对每帧深度做“背景平面分割 → 聚类 → 盒子模型拟合（配准）→ 跟踪”，发布 `~/object_pose`（`VisionObjectPose` 消息：位姿 + confidence + residual + inlier ratio + 拒绝原因）。Week 4.1 起 executor 改用初始位姿检测（`~/initial_box_pose`、`~/initial_bin_pose` + 锁存），不再订阅它；但估计器每帧仍在算一遍，三个 `vision.*` 参数（`min_confidence`、`max_residual_m`、`min_inlier_ratio`）在 executor 里声明了却不起作用。
+
+| 层 | 只属于旧路径的东西 |
+| --- | --- |
+| 估计器源码 | `geometry_pipeline.cpp`（437 行）、`object_tracker.cpp`（167 行）及头文件；节点里的跟踪与发布部分；约 20 个参数（`depth_min_m`、`plane_*`、`cluster_*`、`roi.*`、`box_size_*`、`box_*` 拟合、`tracking.min_confidence`）；调试点云 `~/debug/foreground_cloud`、`~/debug/cluster_cloud` |
+| 消息 | `manipulation_interfaces/msg/VisionObjectPose.msg` |
+| executor | `vision.*` 三个参数及其校验、日志；demo launch 的三个对应参数 |
+| 单测 | `test_geometry_pipeline`、`test_object_tracker` |
+| 实验工具（Week 3~4 的探针、回放、对比脚本） | `compare_registration.cpp`、`baseline_replay.cpp`、`registration_benchmark.py`、`tracking_probe.py`、`tracking_replay.py`；`frame_recorder.py`、`initial_box_probe.py` 里订阅旧话题的几处；task_executor 的 `oracle_attachment_probe.py`、`tolerance_probe.py`（发假的 `VisionObjectPose`） |
+
+**保留：** 机器人遮罩（`robot_mask.cpp`、调试图像与诊断）、初始位姿检测（深度窗口、两个检测器、估计器类）、它们的单测与探针。`EpisodeOutcome` 的 `observation_confidence`、`observation_residual_m` 两个字段保留（vision 来源时已是 NaN），不为清理改消息。
+
+### 7.2 要用户定的
+
+1. **旧的实验工具删不删。** 它们是 Week 3~4 笔记里结果的出处（笔记里有链接）。删除后 git 历史里仍在，链接会指向不存在的文件。我倾向删除：它们依赖要删的消息和类，留着就得一起留旧路径；在对应的周笔记里不改原文（历史快照），只在本节列出删除清单和最后存在它们的提交号。
+2. **删 `VisionObjectPose` 消息。** 这改了接口包，但没有任何在用的订阅者；按 CLAUDE.md 是“回滚或废弃一条路线”，要写 ADR（废弃 ADR 009/011 定下的视觉位姿契约）。我倾向写一条短 ADR。
+
+**用户的回答（2026-10-08）：** “1. 删。2. 为什么没人订阅它来着？”
+
+**为什么 `~/object_pose` 没人订阅了（Week 4.1 分两步换掉的）：**
+
+1. **Stage 5（ADR 018）：旧检测器不够用，另起一条并行路径。** 在 40 个布局上重放，旧检测器只接受 28 个（被拒的 12 个都是 3D 有向包围盒边长超过 55 mm 的上限），而且 yaw 恒为 0，抓取朝向误差就等于盒子本身的转角。于是新增 `~/initial_box_pose`（深度窗口 + 最小外接矩形，给出 yaw），旧话题一字不改、executor 暂时继续读它。
+2. **Stage 7、11：executor 改读新路径，最后一个用途也没了。** Stage 7 起抓取前所有阶段用锁存的初始位姿；Stage 11 起 VERIFY 也改用新检测器重新测的盒子——旧检测器对“盒子在 bin 里”一律拒绝（`CANDIDATE_INVALID`），bin 场景的 episode 会以 `OBSERVATION_STALE` 结束。此后 executor 不再订阅 `~/object_pose`。
+
+ADR 018 写了“以后若删除旧路径，由新 ADR 记录”，所以删消息要写 ADR（第 2 条按此办）。
+
+### 7.3 出口断言（改动前写定）
+
+| 编号 | 条件 | 预期 |
+| --- | --- | --- |
+| R1 | 全部包编译、单测与 lint | 通过；仓库里（`build/`、`install/`、笔记之外）搜不到 `VisionObjectPose`、`geometry_pipeline`、`ObjectTracker`、`vision.min_confidence` |
+| R2 | 估计器在线 | 只发布 `~/initial_box_pose`、`~/initial_bin_pose` 和机器人遮罩的调试话题；参数列表里没有旧路径的参数 |
+| R3 | HELD-A 40 个布局，vision | ≥ 39 成功、零假成功；P1~P6 不比 Stage 6 差 |
+| R4 | 报告 | 估计器每帧处理耗时（或 CPU 占用）改前改后各量一次 |
+
+### 7.4 改动
+
+用户（2026-10-08）：“1. 删”“确认（写 ADR）”“然后你 commit，直接开始下一个 stage 吧”。见 [ADR 022](../../docs/adr/022-remove-the-older-object-pose-path.md)。
+
+| 删除 | 内容 |
+| --- | --- |
+| 估计器 | `geometry_pipeline.cpp/.hpp`、`object_tracker.cpp/.hpp`；节点里的分割、拟合、跟踪与 `~/object_pose`、`~/debug/foreground_points`、`~/debug/target_cluster`；参数 `plane_tolerance_m`、`cluster_tolerance_m`、`min_cluster_points`、`roi.*`、`box_*` 拟合参数、`max_residual_m`、`min_inlier_ratio`、`anchor_z_to_plane`、`tracking.min_confidence`；PCL 依赖 |
+| 消息 | `VisionObjectPose.msg`；`RobotMaskDiagnostics` 的 `foreground_points`、`target_cluster_points` |
+| executor、launch | `vision.min_confidence`、`vision.max_residual_m`、`vision.min_inlier_ratio` 及其校验、日志、launch 参数 |
+| 单测 | `test_geometry_pipeline`、`test_object_tracker` |
+| 实验工具（最后存在于提交 `7f33ae3`） | `compare_registration.cpp`、`baseline_replay.cpp`、`baseline_compare.py`、`registration_benchmark.py`、`tracking_probe.py`、`tracking_replay.py`、`robot_mask_probe.py`（读前景点云）、`frame_recorder.py`、`initial_box_compare.py` 与 `initial_box_replay.cpp`（依赖 `baseline_compare`）、task_executor 的 `oracle_attachment_probe.py`、`tolerance_probe.py`；`initial_box_probe.py` 的旧话题订阅与 `episode --baseline` |
+
+保留：机器人遮罩与其调试图像、诊断；初始位姿检测；场景先验参数 `plane_z_m`、`box_size_*`、`depth_min_m`、`depth_max_m`（直接配置检测器，默认值与检测器自己的一致）。Week 3~4 笔记里指向被删工具的链接不改（历史快照）。
+
+### 7.5 结果
+
+| 编号 | 结果 | 判定 |
+| --- | --- | --- |
+| R1 | 4 个包从头编译通过；单测与 lint 734 项、0 失败（少了被删的两个单测与其 lint）；源码里搜不到 `VisionObjectPose`、`geometry_pipeline`、`ObjectTracker`、`vision.min_confidence` | 通过 |
+| R2 | 估计器只发布 `initial_box_pose`、`initial_bin_pose` 与四个机器人遮罩调试话题；参数只剩 `plane_z_m`、`box_size_*`、`depth_min_m`、`depth_max_m`、`initial_box.frames`、`robot_mask.depth_tolerance_m`（及 ROS 自带的） | 通过 |
+| R3 | 见下 | |
+| R4 | 估计器每帧 CPU：改前 35.0~35.1 ms（单核 21%），改后 24.4~24.6 ms（14~15%），两次各 30 s | 报告 |
+
+**R3（HELD-A 40 个布局，vision）：** 40/40 成功、零重试、零假成功；P1~P6 全部 40/40；N1 0。与 Stage 6 相同。**通过。**
+
+### 7.6 你没问但值得注意的
+
+- **（C 可观测性）视觉现在只在两个时刻看盒子：开局锁存与 VERIFY。** 搬运中掉盒只能靠夹爪宽度（Stage 12 的开度窗口）和 VERIFY 发现；旧路径虽然没被 executor 用，但它的逐帧输出曾是事后排查“盒子什么时候离手”的一个旁证，现在没有了（真值仍在 `~/ground_truth/object_pose`，仅评测用）。
+- **（E 可测试性）被删的工具里有 Week 4.1 Stage 5 的“新旧检测器对照”。** 以后若改初始检测器，没有现成的对照基线；HELD-A 与 `initial_box_probe.py static` 仍可用作回归。
+
+### 7.7 边界
+
+做完了：旧的逐帧检测路径、`VisionObjectPose`、三个无效参数、依赖它们的工具全部删除；估计器每帧 CPU 降约 30%。没有做：话题改名（`initial_box_pose` 也用于 VERIFY，名字不改，用户同意）。
 
 ---
 

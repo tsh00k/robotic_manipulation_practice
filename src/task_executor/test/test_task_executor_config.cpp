@@ -94,14 +94,12 @@ TEST_F(LoadedTaskExecutorConfig, PreservesModeDefaultsAndOverrides)
       {
         rclcpp::Parameter("waypoint_source", "keyframe"),
         rclcpp::Parameter("observation_source", "vision"),
-        rclcpp::Parameter("vision.min_confidence", 0.8),
         rclcpp::Parameter("target.place_x_m", 0.6),
         rclcpp::Parameter("verify.place_region_radius_m", 0.03)});
   auto legacy_node = std::make_shared<rclcpp::Node>("config_legacy_test", options);
   const auto legacy = loadTaskExecutorConfig(*legacy_node);
   EXPECT_EQ(legacy.waypoint_mode, WaypointMode::kKeyframe);
   EXPECT_EQ(legacy.observation_source, ObservationSource::kVision);
-  EXPECT_DOUBLE_EQ(legacy.vision_min_confidence, 0.8);
   EXPECT_DOUBLE_EQ(legacy.task.tcp_target_x_m, 0.6);
   EXPECT_DOUBLE_EQ(legacy.verification.box_target_x_m, 0.43);
   EXPECT_DOUBLE_EQ(legacy.verification.box_target_y_m, 0.31);

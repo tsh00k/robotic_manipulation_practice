@@ -11,7 +11,6 @@ find_package(builtin_interfaces REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/EpisodeOutcome.msg"
   "msg/BridgeObservation.msg"
-  "msg/VisionObjectPose.msg"
   "msg/RobotMaskDiagnostics.msg"
   "msg/BlockCandidate.msg"
   "msg/InitialBoxPose.msg"

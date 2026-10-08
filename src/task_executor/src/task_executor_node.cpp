@@ -101,9 +101,7 @@ public:
       "[%.3f %.3f %.3f %.3f %.3f %.3f %.3f] rad/s^2", v[0], v[1], v[2], v[3], v[4], v[5], v[6],
       a[0], a[1], a[2], a[3], a[4], a[5], a[6]);
     RCLCPP_INFO(
-      get_logger(), "observation source: %s (vision confidence>=%.3f residual<=%.4fm inlier>=%.3f)",
-      observationSourceName(config_.observation_source), config_.vision_min_confidence,
-      config_.vision_max_residual_m, config_.vision_min_inlier_ratio);
+      get_logger(), "observation source: %s", observationSourceName(config_.observation_source));
     RCLCPP_INFO(
       get_logger(),
       "placement configuration: task_tcp_xy=[%.5f %.5f] verify_box_xy=[%.5f %.5f] "

@@ -23,7 +23,7 @@
 | `arm_kinematics` | FK/Jacobian、加权 DLS 与离线 IK | 纯 C++/Eigen/yaml-cpp，不依赖 ROS、MoveIt、MuJoCo |
 | `task_executor` | 观测适配、episode 编排、FSM、waypoint 与结果发布 | ROS 节点适配纯 C++ 控制器，当前单线程 executor |
 
-主链路：`MuJoCo -> BridgeObservation (+ RGB-D/TF -> VisionObjectPose) -> task_executor -> joint/gripper command -> MuJoCo`。
+主链路：`MuJoCo -> BridgeObservation (+ RGB-D/TF -> InitialBoxPose/InitialBinPose) -> task_executor -> joint/gripper command -> MuJoCo`。
 
 成熟算法复用现有库；自写运动学作为独立学习/验证模块，项目自有代码集中在生命周期、契约适配与可测试的任务判断。选型理由进入 ADR 或周记，不在此重复平台与公开项目比较。
 
@@ -182,19 +182,9 @@ URDF hand:=true 强制加 fer_ 前缀，跨库代码须显式映射。下表采�
 
 有效观测/预测深度差绝对值 <= robot_mask.depth_tolerance_m=0.012 m 才过滤该像素，更近/更远有效深度均保留。无效输入或同过滤器生命周期中相机尺寸/内参变化报 INVALID_INPUT。当前无整帧冲突比例门，不发布 ROBOT_MODEL_MISMATCH。
 
-管线（旧路径；Stage 11 起 executor 不再使用，估计器仍发布）：同帧配对/TF -> 反投影与掩膜 -> world ROI/桌面过滤 -> 水平支持平面 -> 全部候选簇 OBB 覆盖检查/已知盒体表面拟合 -> ObjectTracker 候选有效性/唯一性检查 -> VisionObjectPose。只去除配置桌面高度附近的平面，不把离桌盒体表面删作桌面；在线不再以最大簇决定目标，调试 target_cluster 是实际接受的候选。通用算法来自 image_geometry/PCL；SVD 已知对应点配准入口仍仅有单测。
+**初始 box 与 bin 检测（Week 4.1 Stage 5、6；Week 5 Stage 7 起是估计器唯一的检测，旧的逐帧分割、拟合、跟踪与 `~/object_pose`/`VisionObjectPose` 已删除，见 [ADR 022](adr/022-remove-the-older-object-pose-path.md)）。输入是掩膜后的深度。** `DepthWindow` 对最近 `initial_box.frames`（默认 10）帧做逐像素均值：某像素有效帧不足一半，或有效帧的深度最大值与最小值之差超过 20 mm（它在窗口内看到过两个表面），则该像素无效。`detectInitialBox()` 对均值深度图：反投影到 world；取高度在 `[顶面 − 15 mm, 顶面 + 40 mm]`（桌面 0.22 m、盒高 40 mm 时为 [0.245, 0.30] m）、x ∈ [0.2, 0.8]、y ∈ [−0.4, 0.4] 的像素；图像上 8 邻域连通域（`cv::connectedComponentsWithStats`，至少 20 像素）；每块丢掉 z，对 x–y 求最小面积外接矩形（`cv::minAreaRect`）；两边都在 40 ± 5 mm 的块才是 box，恰好一个才算检出。位置 x、y 取矩形中心，z 取顶面像素的中位数减半高，yaw 取矩形边方向并折到 [−45°, 45°)。bin（壁顶 0.239 m）整个在高度带之下，不会成为候选。不用颜色、不读真值、不用历史。**bin 用同样的步骤、不同的参数（`detectInitialBin()`）：** 高度带 [内底面 − 3.5 mm, 壁顶 + 4 mm]（内底面高于桌面 7 mm、壁高 12 mm 时为 [0.2235, 0.243] m），块的最小面积矩形两边在 152 ± 8 mm 与 142 ± 8 mm 内且恰好一块才是 bin；yaw 取长边方向（bin 自己的 x 轴）并折到 [−90°, 90°)；x、y 取矩形中心，z 取矩形中央区域（沿长边 ±56 mm、沿短边 ±51 mm）像素的中位数，即内底面高度，中央没有像素时拒绝而不是退回先验。bin 必须平放、空着、在视野里：倾斜的 bin 与里面已有盒子的情形不支持。两个检测器共用私有的块扫描（反投影、带内像素、连通域、最小面积矩形）。窗口在新 session/generation 与 ATTACHED→非 ATTACHED 时清空，ATTACHED 时不喂入。`InitialPoseEstimator` 把窗口与两个检测器合在一起（box 与 bin 共用同一个窗口，各检测一次），每个对象各自给出 WARMING_UP / NOT_MEASURED / MEASURED 三态；检测器、窗口与估计器类不创建节点，只用 sensor_msgs 的 CameraInfo 类型和 image_geometry，各有单测。已知局限：多帧平均假设各帧噪声独立（仿真深度几乎无帧间噪声，评测噪声为人为叠加）；只验证了 HOME 位姿、平放单个盒子和单个 bin、box 在 bin 相机一侧 ≥ 21 mm 的遮挡；检测不判断场景何时变化，靠节点在已知事件清空窗口。
 
-先验为单个 4 cm 立方体与已知桌面。配置 anchor_z_to_plane=true 且 bridge 非 ATTACHED 时允许支撑锚定，两个较大 OBB 主尺寸各 ≥`box_min_visible_extent_m=0.008 m`，全部主尺寸 ≤边长加 `box_extent_tolerance_m=0.015 m`（默认 55 mm），中心 z 补为桌面加半高；立方体姿态为对称不确定的规范代表值。当前没有旧 55 mm 张爪门、Supported/Transport 模型，也没有恢复旧最高点支撑判定；新增低水平点片拒绝只过滤残留，是否真的落桌仍须验证。尺寸、残差与内点质量不能证明支撑接触。ATTACHED 时暂停正常处理链，退出附着后清缓存并重新测量。OBB 不提供任意形状识别或完全遮挡恢复。
-
-支撑锚定下，规范立方体 XY 各枚举可见 AABB 中点、最小边界加半宽、最大边界减半宽，组合 9 个中心，选择点到已知盒体表面的平方残差和最小者；等代价优先保留局部中点。仅局部顶面仍不能唯一恢复真实 XY，残差不等于真实位姿误差；当前不支持任意 yaw 的完整搜索。水平厚度 ≤6 mm 且最高点低于模型中心的点片拒绝，防止支撑面残留被拟合为盒底。未锚定模式仍检查三个主尺寸的完整下限。
-
-聚类最少 20 点；confidence=`min(n/box_confidence_reference_points,1) × inlier_ratio × clamp(1-residual/max_residual_m,0,1)`，点数参考值默认 40，残差上限 8 mm，内点比例下限 0.7。tracker confidence 门为 0.20；executor 仍要求 confidence ≥0.5、residual ≤5 mm、inlier ≥0.7。该分数不是校准后的统计概率。几何无效或低于 tracker confidence 门时记录每秒节流的原始候选质量日志；拒绝消息不暴露可用 pose/质量。决策见 [ADR 013](adr/013-partial-cube-geometry-admission.md)，默认场景实测见 [Week 4 Stage 5](../Job_guides/my_study/week4.md#582-排查记录局部候选尺寸与中心偏差)。
-
-PCL ICP/GICP 已在离线真值标注点云与平面 fixture 上比较，仅作为评测工具；默认保持 OBB。当前全表面模型到局部点云的 ICP 可收敛但有约 20 mm 平面偏差，GICP 的运行成本与遮挡退化尚不满足默认在线要求；此结果不否定采用可见面模型等其他配准配置。评测入口为 `registration_benchmark.py` / `compare_registration`，oracle 标签只用于离线选取评测目标像素与计算误差。
-
-**初始 box 与 bin 检测（Week 4.1 Stage 5、6，与上面的旧路径并行，输入是同一帧掩膜后的深度）。** `DepthWindow` 对最近 `initial_box.frames`（默认 10）帧做逐像素均值：某像素有效帧不足一半，或有效帧的深度最大值与最小值之差超过 20 mm（它在窗口内看到过两个表面），则该像素无效。`detectInitialBox()` 对均值深度图：反投影到 world；取高度在 `[顶面 − 15 mm, 顶面 + 40 mm]`（桌面 0.22 m、盒高 40 mm 时为 [0.245, 0.30] m）、x ∈ [0.2, 0.8]、y ∈ [−0.4, 0.4] 的像素；图像上 8 邻域连通域（`cv::connectedComponentsWithStats`，至少 20 像素）；每块丢掉 z，对 x–y 求最小面积外接矩形（`cv::minAreaRect`）；两边都在 40 ± 5 mm 的块才是 box，恰好一个才算检出。位置 x、y 取矩形中心，z 取顶面像素的中位数减半高，yaw 取矩形边方向并折到 [−45°, 45°)。bin（壁顶 0.239 m）整个在高度带之下，不会成为候选。不用颜色、不读真值、不用历史。**bin 用同样的步骤、不同的参数（`detectInitialBin()`）：** 高度带 [内底面 − 3.5 mm, 壁顶 + 4 mm]（内底面高于桌面 7 mm、壁高 12 mm 时为 [0.2235, 0.243] m），块的最小面积矩形两边在 152 ± 8 mm 与 142 ± 8 mm 内且恰好一块才是 bin；yaw 取长边方向（bin 自己的 x 轴）并折到 [−90°, 90°)；x、y 取矩形中心，z 取矩形中央区域（沿长边 ±56 mm、沿短边 ±51 mm）像素的中位数，即内底面高度，中央没有像素时拒绝而不是退回先验。bin 必须平放、空着、在视野里：倾斜的 bin 与里面已有盒子的情形不支持。两个检测器共用私有的块扫描（反投影、带内像素、连通域、最小面积矩形）。窗口在新 session/generation 与 ATTACHED→非 ATTACHED 时清空，ATTACHED 时不喂入。`InitialPoseEstimator` 把窗口与两个检测器合在一起（box 与 bin 共用同一个窗口，各检测一次），每个对象各自给出 WARMING_UP / NOT_MEASURED / MEASURED 三态；检测器、窗口与估计器类不创建节点，只用 sensor_msgs 的 CameraInfo 类型和 image_geometry，各有单测。已知局限：多帧平均假设各帧噪声独立（仿真深度几乎无帧间噪声，评测噪声为人为叠加）；只验证了 HOME 位姿、平放单个盒子和单个 bin、box 在 bin 相机一侧 ≥ 21 mm 的遮挡；检测不判断场景何时变化，靠节点在已知事件清空窗口。
-
-调试 topic 前缀 /object_pose_estimator/debug/：robot_predicted_depth、robot_mask、filtered_depth、foreground_points、target_cluster、robot_mask_diagnostics，共用图像 stamp。mask=mono8（255 过滤），深度=米制 32FC1，点云=world。诊断带生命周期键、投影/掩掉/比较/冲突像素数、簇点数、容差与耗时。
+调试 topic 前缀 /object_pose_estimator/debug/：robot_predicted_depth、robot_mask、filtered_depth、robot_mask_diagnostics，共用图像 stamp（Week 5 Stage 7 删除了 foreground_points、target_cluster 两个点云）。mask=mono8（255 过滤），深度=米制 32FC1，诊断带生命周期键、投影/掩掉/比较/冲突像素数、簇点数、容差与耗时。
 
 comparison_pixels 为有效预测/观测重合数；mismatch_pixels 仅统计观测更远且超容差的像素。零比较数时比例无定义，不能报零冲突率；计数提示投影不一致，不能直接定位原因。
 
@@ -203,27 +193,6 @@ moveit_mesh_filter 依赖 X11/OpenGL，demo 为感知设置 LIBGL_ALWAYS_SOFTWAR
 ### 5.3 视觉消息与原因契约
 
 `/object_pose_estimator/initial_box_pose` 类型为 InitialBoxPose（Stage 5），header 的 frame 为 world、stamp 为窗口里最新一帧，携带 bridge_session/generation/sample_sequence。非附着时每个可处理的深度帧发布一条，ATTACHED 期间不发布。`state` 为 WARMING_UP=0（窗口未满，`reason`=WINDOW_FILLING）、NOT_MEASURED=1（窗口已满而检测器拒绝，或这一帧不可用）、MEASURED=2；`reason` 为空表示 MEASURED，否则是检测器的拒绝名（NO_VALID_DEPTH、NO_BOX_BAND_PIXELS、NO_RECTANGLE_MATCHES_BOX、SEVERAL_BOX_CANDIDATES、INVALID_INPUT），不可用的帧为 INVALID_INPUT 或 MISSING_ROBOT_TRANSFORM（这样的帧不进窗口）。`frames_averaged`/`frames_required` 给出窗口进度；`position`（world，盒子中心）与 `yaw_rad`（[−π/4, π/4)，正方形每 90° 重复）只在 MEASURED 时有值，否则为 NaN；不用 Pose，因为 roll、pitch 没有被测量。`candidates[]` 列出高度带里每一块的像素数、矩形两边长、中心、是否被当作 box，用来在漏检时说明原因。没有置信度、残差、内点比。 `/object_pose_estimator/initial_bin_pose` 类型为 InitialBinPose（Stage 6），字段、状态、原因和发布时机与 InitialBoxPose 相同，区别只有：`position` 是 bin 内底面中心（z 为内底面高度），`yaw_rad` 是长边方向、范围 [−π/2, π/2)，拒绝名为 NO_BIN_BAND_PIXELS、NO_RECTANGLE_MATCHES_BIN、SEVERAL_BIN_CANDIDATES、NO_BIN_FLOOR_PIXELS（另有 NO_VALID_DEPTH、INVALID_INPUT）。两者的 `candidates[]` 都是 BlockCandidate（像素数、矩形两边长、中心、`matches`）。
-
-主结果 `/object_pose_estimator/object_pose` 类型为 VisionObjectPose，header 表达 world 与图像 stamp，携带 bridge_session/generation/sample_sequence。当前生产 evidence_state 为 REJECTED=0、MEASURED=1、OCCLUDED=3；PREDICTED=2 常量仍在，但当前无生产路径。MEASURED 要求恰好一个有效候选，不排除同时存在无效候选。
-
-有效性检查为 geometry_valid、至少 3 点、有限位置与四元数、范数误差 ≤1e-3、有限且 confidence ≥tracking.min_confidence（默认 0.20），以及有限 residual/inlier。当前没有历史运动门、速度预测、TCP 附着校正或视觉滑移检测。无测量时 residual_m/inlier_ratio 为 NaN、point_count 为 0，默认 pose 不可执行；last_measurement_sequence 只表示最近实测序号。orientation_ambiguous 标记姿态代表值歧义，processing_ms 不含配对等待或相机渲染。
-
-`state_reason` 是视觉原因的唯一字段，诊断名对应 `DIAGNOSTIC_*` 常量：
-
-| state_reason | evidence_state | diagnostic_stage | 触发条件与检查方向 |
-| --- | --- | --- | --- |
-| 空字符串 | MEASURED | NONE | 恰好一个合格候选；任务层仍需检查质量门 |
-| NO_CANDIDATE | OCCLUDED | GEOMETRY | 候选为空；检查遮挡、深度、掩膜与聚类 |
-| CANDIDATE_INVALID | REJECTED | GEOMETRY | 有候选但无合格候选；检查尺寸、点数和质量 |
-| MULTIPLE_CANDIDATES | REJECTED | ASSOCIATION | 两个或更多合格候选；不靠历史运动门挑目标 |
-| INVALID_INPUT | REJECTED | INPUT | 图像/掩膜/分割输入无效，或 tracker 序号为零、时间非法 |
-| MISSING_ROBOT_TRANSFORM | REJECTED | INPUT | 同帧机器人 TF 超时或查询失败 |
-| LIFECYCLE_MISMATCH | REJECTED | LIFECYCLE | tracker 的 session/generation 不匹配 |
-| OUT_OF_ORDER | REJECTED | LIFECYCLE | sequence 或 stamp 小于或等于上一已处理样本 |
-
-正常原因是空字符串，不是字符串 NONE。INPUT/GEOMETRY/ASSOCIATION/LIFECYCLE 用于当前原因，PREDICTION/GRASP 常量保留但不用于当前正常路径。节点入口过滤已退休 session 和旧 generation；LIFECYCLE_MISMATCH 是 tracker 拒绝契约，不保证每个旧消息都有结果。sequence 和 stamp 必须严格递增，相等也拒绝。
-
-candidate_count/eligible_candidate_count 表示全部/合格候选数；support_prior_used 表示配置与生命周期允许支撑先验，不证明接触。grasp_state（GRASP_NOT_ATTACHED=0、GRASP_HELD=1、GRASP_RELEASED=2）与 attachment_valid 尚存在，直接映射 bridge 状态；这是派生副本，权威仍是 BridgeObservation，且附着期旧视觉消息不代表当前反馈。消息不再携带宽度、预测年龄、不确定性、关联距离/门限或 grasp_reason；不承诺旧布局兼容。
 
 ### 5.4 bridge 附着生命周期与视觉暂停
 
@@ -239,7 +208,7 @@ estimator 的 tryProcess 在当前 ATTACHED 时早退，正常 RGB-D 几何处�
 
 ### 5.5 任务观测来源与质量门
 
-observation_source 每 episode 唯一；节点参数默认 oracle，demo launch 的默认值自 Week 4.1 Stage 11 起是 vision（vision episode 第一次能完整放进 bin）。oracle 直接使用 bridge 物体真值，不受视觉 MEASURED/REJECTED 状态准入影响，但与 vision 共用附着和 FSM 阶段门。vision 在 VERIFY 之前的所有阶段消费锁存的初始位姿（见下，Week 4.1 Stage 7），VERIFY 消费新检测器重新测得的盒子（Stage 11）；executor 不再订阅 VisionObjectPose；关节/接触/TCP/宽度/附着仍来自 BridgeObservation。demo 的 vision 入口启动 estimator 与相机，不静默回退 oracle pose。
+observation_source 每 episode 唯一；节点参数默认 oracle，demo launch 的默认值自 Week 4.1 Stage 11 起是 vision（vision episode 第一次能完整放进 bin）。oracle 直接使用 bridge 物体真值，不受视觉 MEASURED/REJECTED 状态准入影响，但与 vision 共用附着和 FSM 阶段门。vision 在 VERIFY 之前的所有阶段消费锁存的初始位姿（见下，Week 4.1 Stage 7），VERIFY 消费新检测器重新测得的盒子（Stage 11）；关节/接触/TCP/宽度/附着仍来自 BridgeObservation。demo 的 vision 入口启动 estimator 与相机，不静默回退 oracle pose。
 
 **初始位姿锁存（Week 4.1 Stage 7，vision 来源）。** 每次 reset（含重试，generation 变化）后，executor 订阅 `/object_pose_estimator/initial_box_pose` 与 `initial_bin_pose`，由纯规则类 `PoseLatch` 判定：最近 `latch.frames`=5 条连续 MEASURED 的 x、y 极差 ≤ `latch.max_position_spread_m`=3 mm、yaw 的圆周极差 ≤ `latch.max_yaw_spread_deg`=3°（box 以 90° 为周期、bin 以 180° 为周期）才锁存，锁存值是这几条里最新那条；非 MEASURED 的消息使累积清零；session 或 generation 不符、序号不递增的消息被忽略；锁存后到下一次 reset 前不变。锁存完成之前控制器停在“等待首个观测”，不进入 READY，所以不发任何关节命令；等待上限是 `latch.timeout_s`=10 s（墙钟，控制器的 awaiting-observation 超时，与 5 s 的数据流看门狗分开），超时的 outcome 是 `VISION_LATCH_TIMEOUT`（沿用 `VISION_` 开头归入感知层），失败原因写明还缺哪个对象及其状态（如 `BIN:WAITING:NO_RECTANGLE_MATCHES_BIN`）。`place.into_bin`（默认 false，demo launch 随 `scene_enabled` 设置；Stage 7 时叫 `latch.require_bin`）决定是否也等 bin；默认场景没有 bin。锁存后，VERIFY 之前所有阶段（含 OPEN、RETRACT）的 box 位姿都取自锁存值（confidence、residual 为 NaN，质量在状态话题里）；Stage 11 起按 FSM 阶段而不是附着状态切换，所以抓取时附着状态的反复不影响它。锁存的 box yaw 决定抓取时工具的转角（Stage 9，见 [6](#6-任务与运动执行) 的姿态说明）。
 
@@ -248,8 +217,6 @@ observation_source 每 episode 唯一；节点参数默认 oracle，demo launch 
 **VERIFY（Week 4.1 Stage 11）。** VERIFY 阶段，vision 来源准入 `/object_pose_estimator/initial_box_pose` 的 MEASURED：与 bridge 样本按 session、generation、序号完全相等配对，缓存有界并跳过已处理序号；估计器在释放时清空窗口，所以这是盒子落下后的新测量（约释放后 1 s 才有第一条）。非 MEASURED 记录 `VISION_REJECTED:<检测器原因>` 并等待，不创建 snapshot；持续没有可准入观测仍受 5 s 的数据流看门狗约束，可终止为 OBSERVATION_STALE。**只在 VERIFY 要求新测量**：OPEN、RETRACT 用锁存值，因为它们不需要盒子，而张开的手还在 bin 上方时会挡住盒子（若在那时就只准入新测量，控制器不推进、手不撤离，形成死锁，Stage 11 实测过）。oracle 来源用真值。
 
 **入 bin 判据。** `place.into_bin` 为 true 时 VERIFY 用纯函数 `boxInBin()`（[bin_containment.hpp](../src/task_executor/include/task_executor/bin_containment.hpp)）而不是半径：盒子（边长 40 mm，yaw 取自位姿）四角在 bin 坐标系里离内口（半宽 70 × 65 mm）至少 5 mm，且盒心高度在内底面 + 20 mm ± 5 mm 内，才算放好；其它（越界、压在壁上、离壁不到 5 mm 无法确认）一律不算，VERIFY 继续等，超时为 `PLACE_MISSED` 后按原逻辑重试。5 mm = 盒子检测限 3 mm + bin 在线最大偏差向上取 2 mm。bin 来自放置目标（vision：锁存的视觉 bin，含 yaw；oracle：bridge 的真值 bin）。VERIFY 期间日志每 0.5 s 打印一行 `verify:`，给出盒子位置、是否在内、最小角余量与高度差。没有 bin 时仍是以放置目标为圆心、`verify.place_region_radius_m` 为半径的判据。
-
-`vision.min_confidence`、`vision.max_residual_m`、`vision.min_inlier_ratio` 只用于旧的 VisionObjectPose 准入；executor 自 Stage 11 起不再读该话题，这三个参数仍被声明和校验，但不再起作用（随旧路径一起清理，见 Week 4.1 Stage 5 的 5.11）。
 
 **搬运期开度窗口（Week 4.1 Stage 12）。** executor 对每个 bridge 样本更新纯规则类 `CarryWidthMonitor`（[carry_width_monitor.hpp](../src/task_executor/include/task_executor/carry_width_monitor.hpp)）：只在 bridge 为 ATTACHED 且阶段是 LIFT / PREPLACE / PLACE 时计时；两指之和低于 34 mm（搬运中见过 37.6~40.5 mm）持续 0.2 s 仿真时间，产生一次告警（`CARRY_WIDTH_LOW: …`，日志 WARN），每次尝试一个新监视器。告警不改变 episode 的走向；后果由后面的阶段承担（盒子不在 bin 里 → VERIFY 超时 `PLACE_MISSED` → 重试）。上限不另设，张开超过 50 mm 由 bridge 转为 RELEASED。
 
@@ -331,7 +298,6 @@ link0..link4、link6、link7、hand 的 collision STL 在 apt/vendor 中 SHA256 
 - keyframe qpos 静默补齐仍缺专门门禁；修改场景/keyframe 时检查 nq 与完整状态。
 - 冲突比例缺 TF/标定偏差注入验证，不能启用未经验证的整帧拒绝阈值。
 - 附着锁存抗接触抖动，也可能掩盖闭爪掉落；vision 附着确认仍有仿真真值/接触依赖。释放后的新测量是最终落点证据，完整视觉验收未完成。
-- 新消息布局录制与 replay 联调待做：旧 CDR 不保证兼容；tracking_replay.py 逐帧等待结果，与 ATTACHED 预期静默不兼容，须先适配断言再验收。
 - 支撑锚定不证明实际落桌，候选唯一性也不保证跨遮挡目标身份；多目标或离桌场景需新证据门。
 - 当前单机器人/单 box 命名与夹爪假设，引入多臂/多物体时重新设计解析与目标身份。
 - executor 为纯 grasp_criteria 依赖 bridge；替换真机驱动时评估共享库归属。改多线程 executor 时重新验证同步。

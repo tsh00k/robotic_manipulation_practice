@@ -87,9 +87,6 @@ struct TaskExecutorConfig
   PlacementVerification verification;
   WaypointMode waypoint_mode = WaypointMode::kDiffIk;
   ObservationSource observation_source = ObservationSource::kOracle;
-  double vision_min_confidence = 0.5;
-  double vision_max_residual_m = 0.005;
-  double vision_min_inlier_ratio = 0.7;
   bool allow_target_mismatch = false;
   InitialPoseLatchConfig latch;
   // Put the box into the bin (Week 4.1 Stage 8): the place target is the bin's inner floor,

@@ -10,7 +10,6 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(GLUT REQUIRED)
-find_package(PCL REQUIRED COMPONENTS common features filters io registration search segmentation)
 find_package(image_geometry REQUIRED)
 # cv::connectedComponentsWithStats and cv::minAreaRect (initial_box_detector.cpp) are in imgproc.
 find_package(OpenCV REQUIRED COMPONENTS core imgproc)
@@ -21,24 +20,21 @@ find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(manipulation_interfaces REQUIRED)
 find_package(ament_index_cpp REQUIRED)
-find_package(pcl_conversions REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_msgs REQUIRED)
 
 add_library(mujoco_perception_geometry
-  src/geometry_pipeline.cpp src/robot_mask.cpp src/object_tracker.cpp
+  src/robot_mask.cpp
   src/depth_window.cpp src/rectangle_blocks.cpp src/initial_box_detector.cpp
   src/initial_bin_detector.cpp src/initial_pose_estimator.cpp)
 target_include_directories(mujoco_perception_geometry PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
-  ${PCL_INCLUDE_DIRS}
   ${OpenCV_INCLUDE_DIRS}
 )
-target_compile_definitions(mujoco_perception_geometry PUBLIC ${PCL_DEFINITIONS})
 target_compile_options(mujoco_perception_geometry PRIVATE -O2)
-target_link_libraries(mujoco_perception_geometry Eigen3::Eigen ${PCL_LIBRARIES} ${OpenCV_LIBS}
+target_link_libraries(mujoco_perception_geometry Eigen3::Eigen ${OpenCV_LIBS}
   geometric_shapes::geometric_shapes moveit_ros_perception::moveit_mesh_filter)
 ament_target_dependencies(mujoco_perception_geometry image_geometry sensor_msgs)
 
@@ -54,7 +50,6 @@ ament_target_dependencies(object_pose_estimator_node
   image_geometry
   manipulation_interfaces
   ament_index_cpp
-  pcl_conversions
   tf2
   tf2_ros
   tf2_msgs
@@ -68,17 +63,6 @@ install(TARGETS mujoco_perception_geometry object_pose_estimator_node
 install(DIRECTORY include/ DESTINATION include)
 
 if(BUILD_TESTING)
-  add_executable(compare_registration test/compare_registration.cpp)
-  target_link_libraries(compare_registration mujoco_perception_geometry)
-  # Measurement tool, not a test: replays recorded depth frames through the existing box
-  # detector so that a new detector can be compared with it (Week 4.1 Stage 5). Run by
-  # test/baseline_compare.py; built here only because it needs the same PCL/ROS flags.
-  add_executable(baseline_replay test/baseline_replay.cpp)
-  target_link_libraries(baseline_replay mujoco_perception_geometry)
-  # The same for the new initial box detector, with the DepthWindow in front of it, so that the
-  # C++ implementation can be compared with the Python prototype on identical frames.
-  add_executable(initial_box_replay test/initial_box_replay.cpp)
-  target_link_libraries(initial_box_replay mujoco_perception_geometry)
   find_package(ament_cmake_gtest REQUIRED)
   # Pure data structure and pure detector; the camera and the exactly ray-cast scene they
   # use are in test/workcell_camera.hpp.
@@ -91,20 +75,10 @@ if(BUILD_TESTING)
   ament_add_gtest(test_initial_pose_estimator test/test_initial_pose_estimator.cpp)
   target_link_libraries(test_initial_pose_estimator mujoco_perception_geometry Eigen3::Eigen)
 
-  ament_add_gtest(test_object_tracker test/test_object_tracker.cpp)
-  target_link_libraries(test_object_tracker mujoco_perception_geometry)
-
-  ament_add_gtest(test_geometry_pipeline
-    test/test_geometry_pipeline.cpp
-  )
-  target_include_directories(test_geometry_pipeline PRIVATE include)
-  target_include_directories(test_geometry_pipeline PRIVATE ${PCL_INCLUDE_DIRS})
-  target_link_libraries(test_geometry_pipeline mujoco_perception_geometry Eigen3::Eigen ${PCL_LIBRARIES})
-
   ament_add_gtest(test_robot_mask test/test_robot_mask.cpp)
   set_tests_properties(test_robot_mask PROPERTIES ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1")
   target_include_directories(test_robot_mask PRIVATE include)
-  target_link_libraries(test_robot_mask mujoco_perception_geometry Eigen3::Eigen ${PCL_LIBRARIES}
+  target_link_libraries(test_robot_mask mujoco_perception_geometry Eigen3::Eigen
     geometric_shapes::geometric_shapes)
 
   find_package(ament_lint_auto REQUIRED)

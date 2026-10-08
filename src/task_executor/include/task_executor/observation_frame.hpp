@@ -39,8 +39,8 @@ struct ObservationFrame
   std::string object_source = "oracle";
   double object_confidence = 1.0;
   double object_residual_m = 0.0;
-  // Task-level copy of VisionObjectPose.state_reason. EpisodeOutcome records
-  // the execution result separately as observation_failure_reason.
+  // Where the object pose came from and why (for vision, the latch or the detector's reason).
+  // EpisodeOutcome records the execution result separately as observation_failure_reason.
   std::string object_state_reason;
   // Bridge-owned attachment lifecycle. This is stable across contact flicker.
   uint8_t attachment_state = 0;

@@ -76,12 +76,6 @@ TaskExecutorConfig loadTaskExecutorConfig(rclcpp::Node & node)
   } else {
     throw std::invalid_argument("observation_source must be oracle or vision");
   }
-  config.vision_min_confidence = node.declare_parameter(
-    "vision.min_confidence", config.vision_min_confidence);
-  config.vision_max_residual_m = node.declare_parameter(
-    "vision.max_residual_m", config.vision_max_residual_m);
-  config.vision_min_inlier_ratio = node.declare_parameter(
-    "vision.min_inlier_ratio", config.vision_min_inlier_ratio);
   config.latch.frames = static_cast<std::size_t>(node.declare_parameter(
       "latch.frames", static_cast<int>(config.latch.frames)));
   config.latch.max_position_spread_m = node.declare_parameter(
@@ -164,13 +158,6 @@ void validateTaskExecutorConfig(const TaskExecutorConfig & config)
   }
   if (config.fsm.max_retries < 0 || config.fsm.phase_timeout_s <= 0.0) {
     throw std::invalid_argument("Task executor FSM configuration is invalid");
-  }
-  if (!finite(config.vision_min_confidence) || !finite(config.vision_max_residual_m) ||
-    !finite(config.vision_min_inlier_ratio) || config.vision_min_confidence < 0.0 ||
-    config.vision_min_confidence > 1.0 || config.vision_max_residual_m <= 0.0 ||
-    config.vision_min_inlier_ratio < 0.0 || config.vision_min_inlier_ratio > 1.0)
-  {
-    throw std::invalid_argument("Vision observation quality thresholds are invalid");
   }
   if (config.latch.frames < 1 || !finite(config.latch.max_position_spread_m) ||
     !finite(config.latch.max_yaw_spread_rad) || !finite(config.latch.timeout_s) ||
