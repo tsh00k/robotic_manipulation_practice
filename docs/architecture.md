@@ -54,7 +54,7 @@
 | 桌面 | box geom：`size="0.3 0.4 0.02"`、`pos="0.5 0 0.2"`；顶面 z=0.22 m，无独立 TF |
 | 物体 | body **`box`**，world 下 freejoint；4 cm 立方体、50 g，初始中心 `(0.5, 0, 0.241) m` |
 | 接触 | condim=3、friction=`1 0.03 0.003`、solref=`0.01 1`；当前仅滑动摩擦生效，改 condim 需重测 |
-| 放置标记 | `(0.5, 0.3, 0.221) m`，无碰撞；仅视觉参考，验收由 `verify.*` 决定 |
+| 外观 | 桌面、盒子、bin 用 MuJoCo 内置程序纹理（Week 5 Stage 8）；放置标记已删除（它半透明、不进深度图，从不影响检测）。只影响 RGB |
 | `model_path` 默认 | 项目自有 `pick_place_scene.xml`（`scene.enabled=true` 时为 `pick_place_bin_scene.xml`，见下） |
 | `reset_keyframe_name` 默认 | `pick_place_home`；16 维 qpos = 7 臂 + 2 手指 + box 3 平移/4 四元数 |
 

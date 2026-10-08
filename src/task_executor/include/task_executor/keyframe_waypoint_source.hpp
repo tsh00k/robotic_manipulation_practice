@@ -64,7 +64,7 @@ namespace task_executor
 //    is 0.0, not 0.03, for exactly this reason.
 //
 // In the legacy joint-space mode, PLACE (joint1=0.62) lands ~5-7cm short of the
-// visual place_marker (0.5, 0.3). These are empirically chosen servo commands,
+// fixed place target (0.5, 0.3). These are empirically chosen servo commands,
 // not world-frame task geometry; Stage N showed that applying FK to them already
 // puts the nominal TCP target near (0.434, 0.310), before execution error enters.
 // Stage O's separate Cartesian source now targets the marker directly.
